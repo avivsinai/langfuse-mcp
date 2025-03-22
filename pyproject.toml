@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling", "uv-dynamic-versioning"]
+requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.version]
@@ -12,11 +12,14 @@ bump = true
 
 [project]
 name = "langfuse-mcp"
-dynamic = ["version"]
-description = "The Langfuse MCP server! 🔍"
+version = "0.1.0"
+description = "Langfuse integration for Model Completion Protocol (MCP)"
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+requires-python = ">=3.10"
 readme = "README.md"
-requires-python = ">=3.12"
-license = { text = "MIT" }
+license = {text = "MIT"}
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -26,12 +29,19 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "langfuse>=2.0.0",
-    "mcp[cli]>=1.3.0",
+    "langfuse",
+    "mcp>=0.1.4",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
 ]
 
 [project.scripts]
-langfuse-mcp = "langfuse_mcp.__main__:main"
+langfuse-mcp = "langfuse_mcp.__main__:create_stdio_app"
 
 [project.urls]
 Homepage = "https://github.com/your-org/langfuse-mcp"
@@ -42,7 +52,8 @@ Issues = "https://github.com/your-org/langfuse-mcp/issues"
 dev = ["ruff"]
 
 [tool.ruff]
-line-length = 120
+line-length = 100
+target-version = "py310"
 
 [tool.ruff.lint]
 select = [
