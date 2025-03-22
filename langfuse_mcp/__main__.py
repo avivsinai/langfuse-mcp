@@ -10,6 +10,7 @@ from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Optional, List, Dict, Annotated, Any, Union, cast, Literal
+from functools import lru_cache
 
 from langfuse import Langfuse
 from mcp.server.fastmcp import Context, FastMCP
@@ -153,6 +154,26 @@ async def find_traces(
         return [{"error": f"Failed to retrieve traces: {str(e)}"}]
 
 
+@lru_cache(maxsize=1000)
+def _get_cached_observation(langfuse_client, observation_id: str) -> Optional[Any]:
+    """Cache observation details to avoid duplicate API calls."""
+    try:
+        return langfuse_client.fetch_observation(observation_id).data
+    except Exception as e:
+        logger.warning(f"Error fetching observation {observation_id}: {str(e)}")
+        return None
+
+
+async def _batch_fetch_observations(langfuse_client, observation_ids: List[str]) -> Dict[str, Any]:
+    """Batch fetch observations to reduce API calls."""
+    observations = {}
+    for obs_id in observation_ids:
+        observation = _get_cached_observation(langfuse_client, obs_id)
+        if observation:
+            observations[obs_id] = observation
+    return observations
+
+
 async def find_exceptions(
     ctx: Context,
     age: ValidatedAge,
@@ -181,37 +202,43 @@ async def find_exceptions(
     from_timestamp = to_timestamp - timedelta(minutes=age)
     
     try:
+        # Fetch all observations in a single call
         observations_response = langfuse_client.fetch_observations(
             from_start_time=from_timestamp,
             to_start_time=to_timestamp,
-            type="SPAN",
+            type="SPAN"
         )
         
-        exception_spans = []
-        for span in observations_response.data:
-            try:
-                observation = langfuse_client.fetch_observation(span.id)
-                if hasattr(observation, 'events') and any(
-                    event.attributes.get("exception.type")
-                    for event in observation.events or []
-                ):
-                    exception_spans.append(observation)
-            except Exception as e:
-                logger.warning(f"Error getting observation {span.id}: {str(e)}")
+        # Get all observation IDs first
+        observation_ids = [span.id for span in observations_response.data]
         
-        logger.info(f"Found {len(exception_spans)} spans with exceptions")
+        # Batch fetch all observations
+        observations = await _batch_fetch_observations(langfuse_client, observation_ids)
         
-        # Group exceptions based on the specified field
+        # Process exceptions
         values = []
-        if group_by == "file":
-            key = "code.filepath"
-            values = [span.metadata.get(key) for span in exception_spans if hasattr(span, 'metadata') and span.metadata]
-        elif group_by == "function":
-            key = "code.function"
-            values = [span.metadata.get(key) for span in exception_spans if hasattr(span, 'metadata') and span.metadata]
-        elif group_by == "type":
-            for span in exception_spans:
-                for event in span.events or []:
+        for observation in observations.values():
+            if not hasattr(observation, 'events') or not observation.events:
+                continue
+                
+            has_exception = any(
+                event.attributes.get("exception.type")
+                for event in observation.events
+            )
+            
+            if not has_exception:
+                continue
+                
+            if group_by == "file":
+                key = "code.filepath"
+                if hasattr(observation, 'metadata') and observation.metadata and key in observation.metadata:
+                    values.append(observation.metadata[key])
+            elif group_by == "function":
+                key = "code.function"
+                if hasattr(observation, 'metadata') and observation.metadata and key in observation.metadata:
+                    values.append(observation.metadata[key])
+            elif group_by == "type":
+                for event in observation.events:
                     if event.attributes.get("exception.type"):
                         values.append(event.attributes.get("exception.type"))
         
@@ -219,7 +246,7 @@ async def find_exceptions(
         counts = Counter(values)
         results = [ExceptionCount(group=group, count=count) for group, count in counts.items()]
         
-        logger.info(f"Returning {len(results)} exception groups")
+        logger.info(f"Found {len(results)} exception groups")
         return results
     except Exception as e:
         logger.error(f"Error finding exceptions: {str(e)}", exc_info=True)
@@ -257,49 +284,49 @@ async def find_exceptions_in_file(
     from_timestamp = to_timestamp - timedelta(minutes=age)
     
     try:
+        # Fetch all observations in a single call
         observations_response = langfuse_client.fetch_observations(
             from_start_time=from_timestamp,
             to_start_time=to_timestamp,
             type="SPAN"
         )
         
+        # Get all observation IDs first
+        observation_ids = [span.id for span in observations_response.data]
+        
+        # Batch fetch all observations
+        observations = await _batch_fetch_observations(langfuse_client, observation_ids)
+        
         exception_details = []
         
-        # Filter spans by filepath in metadata
-        for span in observations_response.data:
-            try:
-                observation = langfuse_client.fetch_observation(span.id)
-                
-                # Skip if no metadata or doesn't match filepath
-                if not hasattr(observation, 'metadata') or observation.metadata.get("code.filepath") != filepath:
-                    continue
-                
-                # Check if this observation has exception events
-                if not hasattr(observation, 'events') or not observation.events:
-                    continue
-                
-                for event in observation.events:
-                    exception_type = event.attributes.get("exception.type")
-                    exception_message = event.attributes.get("exception.message")
-                    exception_stacktrace = event.attributes.get("exception.stacktrace")
-                    
-                    if exception_type:
-                        exception_info = {
-                            "observation_id": observation.id,
-                            "observation_name": observation.name,
-                            "timestamp": event.start_time.isoformat() if hasattr(event, 'start_time') else None,
-                            "exception_type": exception_type,
-                            "exception_message": exception_message,
-                            "stacktrace": exception_stacktrace,
-                            "file": filepath,
-                            "function": observation.metadata.get("code.function"),
-                            "line_number": observation.metadata.get("code.lineno"),
-                        }
-                        
-                        exception_details.append(exception_info)
-            except Exception as e:
-                logger.warning(f"Error processing observation {span.id}: {str(e)}")
+        # Process exceptions
+        for observation in observations.values():
+            # Skip if no metadata or doesn't match filepath
+            if not hasattr(observation, 'metadata') or observation.metadata.get("code.filepath") != filepath:
                 continue
+            
+            # Skip if no events
+            if not hasattr(observation, 'events') or not observation.events:
+                continue
+            
+            for event in observation.events:
+                exception_type = event.attributes.get("exception.type")
+                if not exception_type:
+                    continue
+                    
+                exception_info = {
+                    "observation_id": observation.id,
+                    "observation_name": observation.name,
+                    "timestamp": event.start_time.isoformat() if hasattr(event, 'start_time') else None,
+                    "exception_type": exception_type,
+                    "exception_message": event.attributes.get("exception.message"),
+                    "stacktrace": event.attributes.get("exception.stacktrace"),
+                    "file": filepath,
+                    "function": observation.metadata.get("code.function"),
+                    "line_number": observation.metadata.get("code.lineno"),
+                }
+                
+                exception_details.append(exception_info)
         
         if not exception_details:
             logger.info(f"No exceptions found for file: {filepath}")
