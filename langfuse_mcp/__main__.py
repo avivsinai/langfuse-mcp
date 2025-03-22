@@ -190,7 +190,7 @@ async def find_exceptions(
         exception_spans = []
         for span in observations_response.data:
             try:
-                observation = langfuse_client.get_observation(span.id)
+                observation = langfuse_client.fetch_observation(span.id)
                 if hasattr(observation, 'events') and any(
                     event.attributes.get("exception.type")
                     for event in observation.events or []
@@ -268,7 +268,7 @@ async def find_exceptions_in_file(
         # Filter spans by filepath in metadata
         for span in observations_response.data:
             try:
-                observation = langfuse_client.get_observation(span.id)
+                observation = langfuse_client.fetch_observation(span.id)
                 
                 # Skip if no metadata or doesn't match filepath
                 if not hasattr(observation, 'metadata') or observation.metadata.get("code.filepath") != filepath:
@@ -551,7 +551,7 @@ async def get_exception_details(
     try:
         if span_id:
             # If span_id is provided, get that specific observation
-            observation = langfuse_client.get_observation(span_id)
+            observation = langfuse_client.fetch_observation(span_id)
             if observation.trace_id != trace_id:
                 return [{"error": "Span does not belong to the specified trace"}]
             spans = [observation]
@@ -566,7 +566,7 @@ async def get_exception_details(
             spans = []
             for obs in observations:
                 try:
-                    detailed_obs = langfuse_client.get_observation(obs.id)
+                    detailed_obs = langfuse_client.fetch_observation(obs.id)
                     spans.append(detailed_obs)
                 except Exception as e:
                     logger.warning(f"Error getting observation {obs.id}: {str(e)}")
@@ -652,7 +652,7 @@ async def get_observation(
         return {"error": error_msg}
     
     try:
-        observation = langfuse_client.get_observation(observation_id)
+        observation = langfuse_client.fetch_observation(observation_id)
         logger.info(f"Found observation: {observation_id}")
         if hasattr(observation, 'dict'):
             return observation.dict()
