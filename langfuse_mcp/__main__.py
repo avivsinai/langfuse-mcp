@@ -407,7 +407,8 @@ async def get_user_sessions(
         user_sessions = [session for session in sessions_response.data if session.id in session_ids]
         
         logger.info(f"Returning {len(user_sessions)} sessions for user {user_id}")
-        return [session.dict() for session in user_sessions]
+        # Include userId in each session
+        return [{"userId": user_id, **session.dict()} for session in user_sessions]
     except Exception as e:
         logger.error(f"Error retrieving user sessions: {str(e)}", exc_info=True)
         return [{"error": f"Failed to retrieve user sessions: {str(e)}"}]
@@ -447,24 +448,15 @@ async def get_error_count(
         )
         logger.info(f"Retrieved {len(observations_response.data)} spans from Langfuse")
 
-        # Need to get detailed observations for events data
-        error_count = 0
-        for span in observations_response.data:
-            try:
-                # Get detailed observation to access events
-                observation = langfuse_client.get_observation(span.id)
-                if hasattr(observation, 'events') and any(event.attributes.get("exception.type") for event in observation.events or []):
-                    error_count += 1
-            except Exception as e:
-                logger.warning(f"Error getting detailed observation {span.id}: {str(e)}")
-                continue
-                
-        logger.info(f"Found {error_count} traces with errors")
+        # Count spans with errors
+        error_count = sum(1 for obs in observations_response.data if obs.level == "ERROR")
+        logger.info(f"Found {error_count} errors")
+
         return {
-            "error_count": error_count,
+            "count": error_count,
             "time_range": {
                 "from": from_timestamp.isoformat(),
-                "to": to_timestamp.isoformat(),
+                "to": to_timestamp.isoformat()
             }
         }
     except Exception as e:
