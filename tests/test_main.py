@@ -6,6 +6,10 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 from langfuse import Langfuse
+
+# Configure pytest-asyncio to use function scope for async fixtures
+pytest.asyncio_fixture_scope = "function"
+
 from langfuse_mcp.__main__ import (
     find_traces, 
     find_exceptions,
@@ -26,13 +30,13 @@ from langfuse_mcp.__main__ import (
 load_dotenv()
 
 # Sample data from JSON dumps for comparison
-with open('1742387601717-lf-traces-export-cm8d93twc00s0ad07krwaek64.json', 'r') as f:
+with open('data/1742387601717-lf-traces-export-cm8d93twc00s0ad07krwaek64.json', 'r') as f:
     SAMPLE_TRACES_1 = json.load(f)
 
-with open('1742393128173-lf-traces-export-cm8d93twc00s0ad07krwaek64.json', 'r') as f:
+with open('data/1742393128173-lf-traces-export-cm8d93twc00s0ad07krwaek64.json', 'r') as f:
     SAMPLE_TRACES_2 = json.load(f)
 
-with open('1742673386131-lf-traces-export-cm8d93twc00s0ad07krwaek64.json', 'r') as f:
+with open('data/1742673386131-lf-traces-export-cm8d93twc00s0ad07krwaek64.json', 'r') as f:
     SAMPLE_TRACES_3 = json.load(f)
 
 # Create a combined dataset for testing
