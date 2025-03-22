@@ -2,6 +2,9 @@ import argparse
 import asyncio
 import logging
 import os
+import sys
+import json
+from logging.handlers import RotatingFileHandler
 from collections.abc import AsyncIterator
 from collections import Counter
 from contextlib import asynccontextmanager
@@ -12,12 +15,31 @@ from langfuse import Langfuse
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import AfterValidator, BaseModel
 
-# Set up logging
+# Set up logging with rotation
+LOG_FILE = "langfuse_mcp.log"
+LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+LOG_DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
+
+# Create handlers
+console_handler = logging.StreamHandler(stream=sys.stdout)
+file_handler = RotatingFileHandler(
+    LOG_FILE,
+    maxBytes=10 * 1024 * 1024,  # 10 MB
+    backupCount=5,  # Keep 5 backup files
+    encoding='utf-8'
+)
+
+# Set formatter for handlers
+formatter = logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT)
+console_handler.setFormatter(formatter)
+file_handler.setFormatter(formatter)
+
+# Configure root logger
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    handlers=[console_handler, file_handler]
 )
+
 logger = logging.getLogger('langfuse_mcp')
 
 # Constants
@@ -578,27 +600,178 @@ async def get_exception_details(
         return [{"error": f"Failed to get exception details: {str(e)}"}]
 
 
-def app_factory(
-    public_key: str, 
-    secret_key: str, 
-    host: str = "https://cloud.langfuse.com",
-    no_auth_check: bool = False,
-) -> FastMCP:
+async def get_trace(
+    ctx: Context,
+    trace_id: str,
+) -> dict:
+    """Get a single trace by ID with full details.
+    
+    Args:
+        ctx: MCP context with access to Langfuse client
+        trace_id: ID of the trace to retrieve
+        
+    Returns:
+        Trace object with full details as a dictionary
+    """
+    logger.info(f"Getting trace with ID: {trace_id}")
+    if not trace_id:
+        logger.error("No trace_id provided")
+        return {"error": "trace_id is required"}
+    
+    langfuse_client, error = get_langfuse_client(ctx)
+    
+    if not langfuse_client:
+        error_msg = f"Langfuse client not initialized: {error}"
+        logger.error(error_msg)
+        return {"error": error_msg}
+    
+    try:
+        trace_response = langfuse_client.fetch_trace(trace_id)
+        logger.info(f"Found trace: {trace_id}")
+        return trace_response.data.dict()
+    except Exception as e:
+        logger.error(f"Error retrieving trace: {str(e)}", exc_info=True)
+        return {"error": f"Failed to retrieve trace: {str(e)}"}
+
+
+async def get_observation(
+    ctx: Context,
+    observation_id: str,
+) -> dict:
+    """Get a single observation by ID.
+    
+    Args:
+        ctx: MCP context with access to Langfuse client
+        observation_id: ID of the observation to retrieve
+        
+    Returns:
+        Observation object as a dictionary
+    """
+    logger.info(f"Getting observation with ID: {observation_id}")
+    if not observation_id:
+        logger.error("No observation_id provided")
+        return {"error": "observation_id is required"}
+    
+    langfuse_client, error = get_langfuse_client(ctx)
+    
+    if not langfuse_client:
+        error_msg = f"Langfuse client not initialized: {error}"
+        logger.error(error_msg)
+        return {"error": error_msg}
+    
+    try:
+        observation = langfuse_client.get_observation(observation_id)
+        logger.info(f"Found observation: {observation_id}")
+        if hasattr(observation, 'dict'):
+            return observation.dict()
+        else:
+            # Convert to dict manually if dict() method is not available
+            return {
+                "id": observation.id,
+                "trace_id": observation.trace_id if hasattr(observation, 'trace_id') else None,
+                "name": observation.name if hasattr(observation, 'name') else None,
+                "start_time": observation.start_time.isoformat() if hasattr(observation, 'start_time') else None,
+                "end_time": observation.end_time.isoformat() if hasattr(observation, 'end_time') else None,
+                "metadata": observation.metadata if hasattr(observation, 'metadata') else None,
+                "type": observation.type if hasattr(observation, 'type') else None
+            }
+    except Exception as e:
+        logger.error(f"Error retrieving observation: {str(e)}", exc_info=True)
+        return {"error": f"Failed to retrieve observation: {str(e)}"}
+
+
+async def get_observations_by_type(
+    ctx: Context,
+    type: str,
+    name: Optional[str] = None,
+    user_id: Optional[str] = None,
+    trace_id: Optional[str] = None,
+    parent_observation_id: Optional[str] = None,
+    from_start_time: Optional[datetime] = None,
+    to_start_time: Optional[datetime] = None,
+    page: int = 1,
+    limit: int = 50,
+) -> List[dict]:
+    """Get observations filtered by type.
+    
+    Args:
+        ctx: MCP context with access to Langfuse client
+        type: Filter by observation type (e.g., 'SPAN', 'GENERATION', 'SCORE')
+        name: Filter by observation name
+        user_id: Filter by user ID
+        trace_id: Filter by trace ID
+        parent_observation_id: Filter by parent observation ID
+        from_start_time: Start time range (ISO 8601)
+        to_start_time: End time range (ISO 8601)
+        page: Page number for pagination
+        limit: Items per page
+        
+    Returns:
+        List of observation dictionaries
+    """
+    logger.info(f"Getting observations of type: {type}")
+    
+    langfuse_client, error = get_langfuse_client(ctx)
+    
+    if not langfuse_client:
+        error_msg = f"Langfuse client not initialized: {error}"
+        logger.error(error_msg)
+        return [{"error": error_msg}]
+    
+    try:
+        observations_response = langfuse_client.fetch_observations(
+            type=type,
+            name=name,
+            user_id=user_id,
+            trace_id=trace_id,
+            parent_observation_id=parent_observation_id,
+            from_start_time=from_start_time,
+            to_start_time=to_start_time,
+            page=page,
+            limit=limit,
+        )
+        
+        logger.info(f"Found {len(observations_response.data)} observations of type {type}")
+        
+        # Convert observations to dictionaries
+        observations = []
+        for obs in observations_response.data:
+            if hasattr(obs, 'dict'):
+                observations.append(obs.dict())
+            else:
+                # Convert to dict manually if dict() method is not available
+                observations.append({
+                    "id": obs.id if hasattr(obs, 'id') else None,
+                    "trace_id": obs.trace_id if hasattr(obs, 'trace_id') else None,
+                    "name": obs.name if hasattr(obs, 'name') else None,
+                    "start_time": obs.start_time.isoformat() if hasattr(obs, 'start_time') else None,
+                    "end_time": obs.end_time.isoformat() if hasattr(obs, 'end_time') else None,
+                    "type": obs.type if hasattr(obs, 'type') else None,
+                })
+        
+        return observations
+    except Exception as e:
+        logger.error(f"Error retrieving observations: {str(e)}", exc_info=True)
+        return [{"error": f"Failed to retrieve observations: {str(e)}"}]
+
+
+def app_factory(public_key: str, secret_key: str, host: str, no_auth_check: bool = False) -> FastMCP:
     """Create a FastMCP server with Langfuse tools.
     
     Args:
         public_key: Langfuse public key
         secret_key: Langfuse secret key
         host: Langfuse API host URL
-        no_auth_check: Skip authentication check (useful for testing)
+        no_auth_check: Skip authentication check
         
     Returns:
         FastMCP server instance
     """
     @asynccontextmanager
     async def lifespan(server: FastMCP) -> AsyncIterator[MCPState]:
-        """Initialize and clean up Langfuse client."""
         logger.info(f"Initializing Langfuse client with host: {host}")
+        logger.info(f"Python version: {sys.version}")
+        logger.info(f"Langfuse client version: {getattr(Langfuse, '__version__', 'unknown')}")
         
         try:
             if not public_key or not secret_key:
@@ -612,13 +785,13 @@ def app_factory(
                 debug=True
             )
             
-            # Only perform auth check if not disabled
             if not no_auth_check:
                 logger.info("Checking authentication with Langfuse...")
                 try:
                     auth_result = langfuse_client.auth_check()
                     if not auth_result:
                         raise ValueError("Authentication failed with the provided credentials")
+                    logger.info("Authentication successful")
                 except Exception as auth_error:
                     detailed_error = f"Authentication failed: {str(auth_error)}"
                     logger.error(detailed_error)
@@ -628,20 +801,137 @@ def app_factory(
                         detailed_error += " - Check if API keys are valid"
                     raise ValueError(detailed_error)
             
-            logger.info(f"Langfuse client initialized successfully")
+            logger.info("Langfuse client initialized successfully")
+            
             state = MCPState(langfuse_client=langfuse_client)
             yield state
             
             logger.info("Shutting down Langfuse client...")
             langfuse_client.flush()
             langfuse_client.shutdown()
+            logger.info("Langfuse client shutdown complete")
         except Exception as e:
             error_msg = f"Failed to initialize Langfuse client: {str(e)}"
             logger.error(error_msg, exc_info=True)
             yield MCPState(langfuse_client=None, error=error_msg)
-    
-    # Create the FastMCP server with the lifespan context manager
+
     mcp = FastMCP("Langfuse MCP Server", lifespan=lifespan)
+    
+    # Register resource for API schema documentation
+    @mcp.resource("langfuse://api-schema")
+    def api_schema() -> str:
+        """Schema documentation for Langfuse MCP API endpoints."""
+        schema = {
+            "traces": {
+                "find_traces": {
+                    "description": "Search for traces with filtering options",
+                    "parameters": {
+                        "name": "Filter by trace name",
+                        "user_id": "Filter by user ID",
+                        "session_id": "Filter by session ID",
+                        "metadata": "Filter by metadata key-value pairs",
+                        "from_timestamp": "Start time range (ISO 8601)",
+                        "to_timestamp": "End time range (ISO 8601)",
+                        "page": "Page number for pagination",
+                        "limit": "Items per page",
+                        "order_by": "Field to order results by",
+                        "tags": "Filter by tags (string or list of strings)"
+                    },
+                    "returns": "List of trace objects"
+                },
+                "get_trace": {
+                    "description": "Get a single trace by ID with full details",
+                    "parameters": {
+                        "trace_id": "ID of the trace to retrieve"
+                    },
+                    "returns": "Single trace object with complete details"
+                }
+            },
+            "observations": {
+                "get_observation": {
+                    "description": "Get a single observation by ID",
+                    "parameters": {
+                        "observation_id": "ID of the observation to retrieve"
+                    },
+                    "returns": "Single observation object"
+                },
+                "get_observations_by_type": {
+                    "description": "Get observations filtered by type",
+                    "parameters": {
+                        "type": "Filter by observation type (e.g., 'SPAN', 'GENERATION', 'SCORE')",
+                        "name": "Filter by observation name",
+                        "user_id": "Filter by user ID",
+                        "trace_id": "Filter by trace ID",
+                        "parent_observation_id": "Filter by parent observation ID",
+                        "from_start_time": "Start time range (ISO 8601)",
+                        "to_start_time": "End time range (ISO 8601)",
+                        "page": "Page number for pagination",
+                        "limit": "Items per page"
+                    },
+                    "returns": "List of observation objects"
+                }
+            },
+            "sessions": {
+                "get_session": {
+                    "description": "Retrieve a session by ID",
+                    "parameters": {
+                        "session_id": "ID of the session to retrieve"
+                    },
+                    "returns": "Session object"
+                },
+                "get_user_sessions": {
+                    "description": "Retrieve sessions for a user within a time range",
+                    "parameters": {
+                        "user_id": "ID of the user",
+                        "from_timestamp": "Start time (ISO 8601)",
+                        "to_timestamp": "End time (ISO 8601)"
+                    },
+                    "returns": "List of session objects"
+                }
+            },
+            "errors": {
+                "find_exceptions": {
+                    "description": "Get exception counts grouped by file path, function, or type",
+                    "parameters": {
+                        "age": "Number of minutes to look back (max 7 days)",
+                        "group_by": "Field to group by (file, function, or type)"
+                    },
+                    "returns": "List of exception counts"
+                },
+                "find_exceptions_in_file": {
+                    "description": "Get detailed info about exceptions in a specific file",
+                    "parameters": {
+                        "filepath": "Path to the file to analyze",
+                        "age": "Number of minutes to look back (max 7 days)"
+                    },
+                    "returns": "List of exception details"
+                },
+                "get_error_count": {
+                    "description": "Get the number of traces with exceptions within the last N minutes",
+                    "parameters": {
+                        "age": "Number of minutes to look back"
+                    },
+                    "returns": "Error count with time range"
+                },
+                "get_exception_details": {
+                    "description": "Get detailed exception information for a trace or span",
+                    "parameters": {
+                        "trace_id": "ID of the trace to analyze",
+                        "span_id": "Optional ID of the span"
+                    },
+                    "returns": "List of exception details"
+                }
+            },
+            "schema": {
+                "get_data_schema": {
+                    "description": "Get the schema of trace, span, and event objects",
+                    "parameters": {},
+                    "returns": "JSON schema description"
+                }
+            }
+        }
+        
+        return json.dumps(schema, indent=2)
     
     # Register all tools
     mcp.tool()(find_traces)
@@ -652,6 +942,9 @@ def app_factory(
     mcp.tool()(get_error_count)
     mcp.tool()(get_exception_details)
     mcp.tool()(get_data_schema)
+    mcp.tool()(get_trace)
+    mcp.tool()(get_observation)
+    mcp.tool()(get_observations_by_type)
     
     return mcp
 
@@ -659,54 +952,41 @@ def app_factory(
 def main():
     """Entry point for the langfuse_mcp package."""
     parser = argparse.ArgumentParser(description="Langfuse MCP Server")
-    parser.add_argument("--public-key", dest="public_key", help="Langfuse public key")
-    parser.add_argument("--secret-key", dest="secret_key", help="Langfuse secret key")
-    parser.add_argument("--host", help="Langfuse host URL", default="https://cloud.langfuse.com")
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-    parser.add_argument("--no-auth-check", action="store_true", help="Skip authentication check (useful for testing)")
+    parser.add_argument(
+        "--public-key",
+        type=str,
+        required=True,
+        help="Langfuse public key"
+    )
+    parser.add_argument(
+        "--secret-key",
+        type=str,
+        required=True,
+        help="Langfuse secret key"
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="https://cloud.langfuse.com",
+        help="Langfuse host URL"
+    )
+    parser.add_argument(
+        "--no-auth-check",
+        action="store_true",
+        help="Skip authentication check"
+    )
+    
     args = parser.parse_args()
     
-    # Set up logging
-    if args.debug:
-        logger.setLevel(logging.DEBUG)
-        # Also log to a file
-        file_handler = logging.FileHandler("langfuse_mcp.log")
-        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-        logger.addHandler(file_handler)
+    app = app_factory(
+        public_key=args.public_key,
+        secret_key=args.secret_key,
+        host=args.host,
+        no_auth_check=args.no_auth_check
+    )
     
-    # Load credentials from environment if not provided as arguments
-    public_key = args.public_key or os.environ.get("LANGFUSE_PUBLIC_KEY")
-    secret_key = args.secret_key or os.environ.get("LANGFUSE_SECRET_KEY")
-    host = args.host or os.environ.get("LANGFUSE_HOST") or "https://cloud.langfuse.com"
-    
-    if not public_key:
-        logger.error("Missing public key. Provide it as --public-key or LANGFUSE_PUBLIC_KEY")
-        return 1
-    
-    if not secret_key:
-        logger.error("Missing secret key. Provide it as --secret-key or LANGFUSE_SECRET_KEY")
-        return 1
-    
-    logger.info(f"Starting Langfuse MCP Server with host: {host}")
-    logger.info(f"Public key (first 5 chars): {public_key[:5]}*****")
-    
-    try:
-        # Create the FastMCP app
-        mcp = app_factory(
-            public_key=public_key,
-            secret_key=secret_key,
-            host=host,
-            no_auth_check=args.no_auth_check
-        )
-        
-        # Run the MCP server using stdio transport
-        mcp.run(transport="stdio")
-        return 0
-    except Exception as e:
-        logger.error(f"Error running Langfuse MCP server: {str(e)}", exc_info=True)
-        return 1
+    app.run(transport="stdio")
 
 
 if __name__ == "__main__":
-    import sys
-    sys.exit(main()) 
+    main() 
