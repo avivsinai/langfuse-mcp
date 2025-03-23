@@ -164,13 +164,119 @@ def _get_cached_observation(langfuse_client, observation_id: str) -> Optional[An
         return None
 
 
-async def _batch_fetch_observations(langfuse_client, observation_ids: List[str]) -> Dict[str, Any]:
-    """Batch fetch observations to reduce API calls."""
+# Create an in-memory observation cache for the session
+_OBSERVATION_CACHE = {}
+_FILE_TO_OBSERVATIONS_MAP = {}
+_EXCEPTION_TYPE_MAP = {}
+_EXCEPTIONS_BY_FILEPATH = {}
+
+
+def _clear_caches():
+    """Clear all in-memory caches."""
+    global _OBSERVATION_CACHE, _FILE_TO_OBSERVATIONS_MAP, _EXCEPTION_TYPE_MAP, _EXCEPTIONS_BY_FILEPATH
+    _OBSERVATION_CACHE.clear()
+    _FILE_TO_OBSERVATIONS_MAP.clear()
+    _EXCEPTION_TYPE_MAP.clear()
+    _EXCEPTIONS_BY_FILEPATH.clear()
+    
+    # Also clear the LRU cache
+    _get_cached_observation.cache_clear()
+    
+    logger.debug("All caches cleared")
+
+
+async def _efficient_fetch_observations(
+    langfuse_client, 
+    from_timestamp: datetime, 
+    to_timestamp: datetime,
+    filepath: Optional[str] = None
+) -> Dict[str, Any]:
+    """Efficiently fetch observations with exception filtering.
+    
+    Args:
+        langfuse_client: Langfuse client
+        from_timestamp: Start time
+        to_timestamp: End time
+        filepath: Optional filter by filepath
+        
+    Returns:
+        Dictionary of observation_id -> observation
+    """
+    global _OBSERVATION_CACHE, _FILE_TO_OBSERVATIONS_MAP, _EXCEPTION_TYPE_MAP
+    
+    # Use a cache key that includes the time range
+    cache_key = f"{from_timestamp.isoformat()}-{to_timestamp.isoformat()}"
+    
+    # Check if we've already processed this time range
+    if cache_key in _OBSERVATION_CACHE:
+        logger.info(f"Using cached observations for {cache_key}")
+        observations = _OBSERVATION_CACHE[cache_key]
+        
+        # If we have a filepath filter, return only those observations
+        if filepath and filepath in _FILE_TO_OBSERVATIONS_MAP:
+            filtered_observations = {}
+            for obs_id in _FILE_TO_OBSERVATIONS_MAP[filepath]:
+                if obs_id in observations:
+                    filtered_observations[obs_id] = observations[obs_id]
+            return filtered_observations
+        
+        return observations
+
+    # Fetch all observations in a single call
+    logger.info(f"Fetching observations from {from_timestamp} to {to_timestamp}")
+    observations_response = langfuse_client.fetch_observations(
+        from_start_time=from_timestamp,
+        to_start_time=to_timestamp,
+        type="SPAN"
+    )
+    
+    # Fast pre-filter: only process spans with errors to reduce API calls
+    error_spans = [span for span in observations_response.data if span.level == "ERROR"]
+    logger.info(f"Found {len(error_spans)} error spans out of {len(observations_response.data)} total spans")
+    
+    # Get observation details for error spans
     observations = {}
-    for obs_id in observation_ids:
-        observation = _get_cached_observation(langfuse_client, obs_id)
-        if observation:
-            observations[obs_id] = observation
+    _FILE_TO_OBSERVATIONS_MAP.clear()
+    
+    for span in error_spans:
+        observation = _get_cached_observation(langfuse_client, span.id)
+        if not observation:
+            continue
+            
+        # Store in cache
+        observations[span.id] = observation
+        
+        # Check if it has exceptions
+        if hasattr(observation, 'events') and observation.events:
+            has_exception = any(event.attributes.get("exception.type") for event in observation.events)
+            if has_exception:
+                # Index by filepath for faster lookup
+                if hasattr(observation, 'metadata') and observation.metadata:
+                    filepath_key = observation.metadata.get("code.filepath")
+                    if filepath_key:
+                        if filepath_key not in _FILE_TO_OBSERVATIONS_MAP:
+                            _FILE_TO_OBSERVATIONS_MAP[filepath_key] = set()
+                        _FILE_TO_OBSERVATIONS_MAP[filepath_key].add(span.id)
+                        
+                    # Index by exception type for faster lookup
+                    for event in observation.events:
+                        exception_type = event.attributes.get("exception.type")
+                        if exception_type:
+                            if exception_type not in _EXCEPTION_TYPE_MAP:
+                                _EXCEPTION_TYPE_MAP[exception_type] = set()
+                            _EXCEPTION_TYPE_MAP[exception_type].add(span.id)
+    
+    # Cache the results
+    _OBSERVATION_CACHE[cache_key] = observations
+    
+    # If we have a filepath filter, return only those observations
+    if filepath and filepath in _FILE_TO_OBSERVATIONS_MAP:
+        filtered_observations = {}
+        for obs_id in _FILE_TO_OBSERVATIONS_MAP[filepath]:
+            if obs_id in observations:
+                filtered_observations[obs_id] = observations[obs_id]
+        return filtered_observations
+    
     return observations
 
 
@@ -202,52 +308,38 @@ async def find_exceptions(
     from_timestamp = to_timestamp - timedelta(minutes=age)
     
     try:
-        # Fetch all observations in a single call
-        observations_response = langfuse_client.fetch_observations(
-            from_start_time=from_timestamp,
-            to_start_time=to_timestamp,
-            type="SPAN"
+        # Use optimized fetching
+        observations = await _efficient_fetch_observations(
+            langfuse_client, 
+            from_timestamp, 
+            to_timestamp
         )
         
-        # Get all observation IDs first
-        observation_ids = [span.id for span in observations_response.data]
+        # If we're grouping by file, we can use our optimized index
+        if group_by == "file":
+            counts = {filepath: len(obs_ids) for filepath, obs_ids in _FILE_TO_OBSERVATIONS_MAP.items()}
+            return [ExceptionCount(group=group, count=count) for group, count in counts.items()]
         
-        # Batch fetch all observations
-        observations = await _batch_fetch_observations(langfuse_client, observation_ids)
+        # If we're grouping by type, we can use our optimized index
+        if group_by == "type":
+            counts = {exc_type: len(obs_ids) for exc_type, obs_ids in _EXCEPTION_TYPE_MAP.items()}
+            return [ExceptionCount(group=group, count=count) for group, count in counts.items()]
         
-        # Process exceptions
-        values = []
-        for observation in observations.values():
-            if not hasattr(observation, 'events') or not observation.events:
-                continue
-                
-            has_exception = any(
-                event.attributes.get("exception.type")
-                for event in observation.events
-            )
+        # Otherwise, process the function paths
+        if group_by == "function":
+            values = []
+            for observation in observations.values():
+                if hasattr(observation, 'metadata') and observation.metadata:
+                    func = observation.metadata.get("code.function")
+                    if func:
+                        values.append(func)
             
-            if not has_exception:
-                continue
-                
-            if group_by == "file":
-                key = "code.filepath"
-                if hasattr(observation, 'metadata') and observation.metadata and key in observation.metadata:
-                    values.append(observation.metadata[key])
-            elif group_by == "function":
-                key = "code.function"
-                if hasattr(observation, 'metadata') and observation.metadata and key in observation.metadata:
-                    values.append(observation.metadata[key])
-            elif group_by == "type":
-                for event in observation.events:
-                    if event.attributes.get("exception.type"):
-                        values.append(event.attributes.get("exception.type"))
+            counts = Counter(values)
+            return [ExceptionCount(group=group, count=count) for group, count in counts.items()]
         
-        values = [v for v in values if v is not None]
-        counts = Counter(values)
-        results = [ExceptionCount(group=group, count=count) for group, count in counts.items()]
+        logger.error(f"Invalid group_by parameter: {group_by}")
+        return [ExceptionCount(group=f"error: Invalid group_by parameter: {group_by}", count=0)]
         
-        logger.info(f"Found {len(results)} exception groups")
-        return results
     except Exception as e:
         logger.error(f"Error finding exceptions: {str(e)}", exc_info=True)
         return [ExceptionCount(group=f"error: {str(e)}", count=0)]
@@ -283,28 +375,25 @@ async def find_exceptions_in_file(
     to_timestamp = datetime.now(UTC)
     from_timestamp = to_timestamp - timedelta(minutes=age)
     
+    # Check if we have cached results for this filepath
+    cache_key = f"{from_timestamp.isoformat()}-{to_timestamp.isoformat()}-{filepath}"
+    if cache_key in _EXCEPTIONS_BY_FILEPATH:
+        logger.info(f"Using cached exception details for {filepath}")
+        return _EXCEPTIONS_BY_FILEPATH[cache_key]
+    
     try:
-        # Fetch all observations in a single call
-        observations_response = langfuse_client.fetch_observations(
-            from_start_time=from_timestamp,
-            to_start_time=to_timestamp,
-            type="SPAN"
+        # Use optimized fetching with filepath filter
+        observations = await _efficient_fetch_observations(
+            langfuse_client, 
+            from_timestamp, 
+            to_timestamp,
+            filepath
         )
-        
-        # Get all observation IDs first
-        observation_ids = [span.id for span in observations_response.data]
-        
-        # Batch fetch all observations
-        observations = await _batch_fetch_observations(langfuse_client, observation_ids)
         
         exception_details = []
         
         # Process exceptions
         for observation in observations.values():
-            # Skip if no metadata or doesn't match filepath
-            if not hasattr(observation, 'metadata') or observation.metadata.get("code.filepath") != filepath:
-                continue
-            
             # Skip if no events
             if not hasattr(observation, 'events') or not observation.events:
                 continue
@@ -322,11 +411,14 @@ async def find_exceptions_in_file(
                     "exception_message": event.attributes.get("exception.message"),
                     "stacktrace": event.attributes.get("exception.stacktrace"),
                     "file": filepath,
-                    "function": observation.metadata.get("code.function"),
-                    "line_number": observation.metadata.get("code.lineno"),
+                    "function": observation.metadata.get("code.function") if hasattr(observation, 'metadata') else None,
+                    "line_number": observation.metadata.get("code.lineno") if hasattr(observation, 'metadata') else None,
                 }
                 
                 exception_details.append(exception_info)
+        
+        # Cache the results
+        _EXCEPTIONS_BY_FILEPATH[cache_key] = exception_details
         
         if not exception_details:
             logger.info(f"No exceptions found for file: {filepath}")
