@@ -175,3 +175,6 @@ cython_debug/
 
 # Data
 data/
+
+# Logs
+*.log.*
