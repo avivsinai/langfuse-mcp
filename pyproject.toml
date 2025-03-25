@@ -30,7 +30,7 @@ classifiers = [
 ]
 dependencies = [
     "langfuse",
-    "mcp>=0.1.4",
+    "mcp>=1.0.0",
     "pydantic>=2.0.0",
 ]
 
@@ -41,7 +41,7 @@ dev = [
 ]
 
 [project.scripts]
-langfuse-mcp = "langfuse_mcp.__main__:create_stdio_app"
+langfuse-mcp = "langfuse_mcp.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/your-org/langfuse-mcp"

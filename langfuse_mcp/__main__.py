@@ -8,21 +8,21 @@ from logging.handlers import RotatingFileHandler
 from collections.abc import AsyncIterator
 from collections import Counter
 from contextlib import asynccontextmanager
+from typing import Optional, List, Dict, Annotated, Any, Union, cast, Literal, AsyncContextManager
 from datetime import UTC, datetime, timedelta
-from typing import Optional, List, Dict, Annotated, Any, Union, cast, Literal
 from functools import lru_cache
+from dataclasses import dataclass
 
 from langfuse import Langfuse
 from mcp.server.fastmcp import Context, FastMCP
-from pydantic import AfterValidator, BaseModel
+from pydantic import AfterValidator, BaseModel, Field
 
 # Set up logging with rotation
-LOG_FILE = "langfuse_mcp.log"
+LOG_FILE = "/tmp/langfuse_mcp.log"
 LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 LOG_DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
 
-# Create handlers
-console_handler = logging.StreamHandler(stream=sys.stdout)
+# Create handlers - only use file handler, no console handler
 file_handler = RotatingFileHandler(
     LOG_FILE,
     maxBytes=10 * 1024 * 1024,  # 10 MB
@@ -32,13 +32,12 @@ file_handler = RotatingFileHandler(
 
 # Set formatter for handlers
 formatter = logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT)
-console_handler.setFormatter(formatter)
 file_handler.setFormatter(formatter)
 
 # Configure root logger
 logging.basicConfig(
     level=logging.INFO,
-    handlers=[console_handler, file_handler]
+    handlers=[file_handler]  # Only use file handler
 )
 
 logger = logging.getLogger('langfuse_mcp')
@@ -48,19 +47,16 @@ HOUR = 60  # minutes
 DAY = 24 * HOUR
 
 
+@dataclass
 class MCPState:
     """State object passed from lifespan context to tools."""
-    def __init__(self, langfuse_client: Optional[Langfuse] = None, error: Optional[str] = None):
-        self.langfuse_client = langfuse_client
-        self.error = error
-        logger.info("MCPState initialized with Langfuse client: %s", 
-                   "Active" if langfuse_client else "None")
+    langfuse_client: Langfuse
 
 
 class ExceptionCount(BaseModel):
     """Model for exception counts grouped by category."""
-    group: str
-    count: int
+    group: str = Field(description="The grouping key (file path, function name, or exception type)")
+    count: int = Field(description="Number of exceptions in this group")
 
 
 def validate_age(age: int) -> int:
@@ -88,7 +84,7 @@ def get_langfuse_client(ctx: Context) -> tuple[Optional[Langfuse], Optional[str]
     state = ctx.request_context.lifespan_context
     
     if isinstance(state, MCPState):
-        return state.langfuse_client, state.error
+        return state.langfuse_client, None
     elif isinstance(state, dict) and "langfuse_client" in state:
         return state.get("langfuse_client"), state.get("error")
     else:
@@ -97,16 +93,16 @@ def get_langfuse_client(ctx: Context) -> tuple[Optional[Langfuse], Optional[str]
 
 async def find_traces(
     ctx: Context,
-    name: Optional[str] = None,
-    user_id: Optional[str] = None,
-    session_id: Optional[str] = None,
-    metadata: Optional[Dict[str, Any]] = None,
-    from_timestamp: Optional[datetime] = None,
-    to_timestamp: Optional[datetime] = None,
-    page: int = 1,
-    limit: int = 50,
-    order_by: Optional[str] = None,
-    tags: Optional[Union[str, List[str]]] = None,
+    name: Optional[str] = Field(None, description="Filter by trace name"),
+    user_id: Optional[str] = Field(None, description="Filter by user ID"),
+    session_id: Optional[str] = Field(None, description="Filter by session ID"),
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Filter by metadata key-value pairs"),
+    from_timestamp: Optional[datetime] = Field(None, description="Start time range (ISO 8601 format)"),
+    to_timestamp: Optional[datetime] = Field(None, description="End time range (ISO 8601 format)"),
+    page: int = Field(1, description="Page number for pagination", ge=1),
+    limit: int = Field(50, description="Items per page", ge=1, le=100),
+    order_by: Optional[str] = Field(None, description="Field to order results by"),
+    tags: Optional[Union[str, List[str]]] = Field(None, description="Filter by tags"),
 ) -> List[dict]:
     """Retrieve traces based on filters.
     
@@ -282,8 +278,8 @@ async def _efficient_fetch_observations(
 
 async def find_exceptions(
     ctx: Context,
-    age: ValidatedAge,
-    group_by: Literal["file", "function", "type"] = "file",
+    age: ValidatedAge = Field(..., description="Number of minutes to look back (max 7 days)"),
+    group_by: Literal["file", "function", "type"] = Field("file", description="Field to group by (file, function, or type)"),
 ) -> List[ExceptionCount]:
     """Get exception counts grouped by file path, function, or type from spans.
 
@@ -347,8 +343,8 @@ async def find_exceptions(
 
 async def find_exceptions_in_file(
     ctx: Context,
-    filepath: str,
-    age: ValidatedAge,
+    filepath: str = Field(..., description="Path to the file to analyze"),
+    age: ValidatedAge = Field(..., description="Number of minutes to look back (max 7 days)"),
 ) -> List[dict]:
     """Get detailed info about exceptions in a specific file.
     
@@ -433,7 +429,7 @@ async def find_exceptions_in_file(
 
 async def get_session(
     ctx: Context,
-    session_id: str,
+    session_id: str = Field(..., description="ID of the session to retrieve"),
 ) -> dict:
     """Retrieve a session by ID.
     
@@ -478,9 +474,9 @@ async def get_session(
 
 async def get_user_sessions(
     ctx: Context,
-    user_id: str,
-    from_timestamp: Optional[datetime] = None,
-    to_timestamp: Optional[datetime] = None,
+    user_id: str = Field(..., description="ID of the user"),
+    from_timestamp: Optional[datetime] = Field(None, description="Start time (ISO 8601 format)"),
+    to_timestamp: Optional[datetime] = Field(None, description="End time (ISO 8601 format)"),
 ) -> List[dict]:
     """Retrieve sessions for a user within a time range.
     
@@ -535,7 +531,7 @@ async def get_user_sessions(
 
 async def get_error_count(
     ctx: Context,
-    age: ValidatedAge,
+    age: ValidatedAge = Field(..., description="Number of minutes to look back (max 7 days)"),
 ) -> dict:
     """Get the number of traces with exceptions within the last N minutes.
     
@@ -644,8 +640,8 @@ async def get_data_schema(ctx: Context) -> str:
 
 async def get_exception_details(
     ctx: Context,
-    trace_id: str,
-    span_id: Optional[str] = None,
+    trace_id: str = Field(..., description="ID of the trace to analyze"),
+    span_id: Optional[str] = Field(None, description="Optional ID of the span (if specified, get exceptions for that span only)"),
 ) -> List[dict]:
     """Get detailed exception information for a trace or span.
     
@@ -713,7 +709,7 @@ async def get_exception_details(
 
 async def get_trace(
     ctx: Context,
-    trace_id: str,
+    trace_id: str = Field(..., description="ID of the trace to retrieve"),
 ) -> dict:
     """Get a single trace by ID with full details.
     
@@ -747,7 +743,7 @@ async def get_trace(
 
 async def get_observation(
     ctx: Context,
-    observation_id: str,
+    observation_id: str = Field(..., description="ID of the observation to retrieve"),
 ) -> dict:
     """Get a single observation by ID.
     
@@ -880,14 +876,15 @@ def app_factory(public_key: str, secret_key: str, host: str, no_auth_check: bool
     """
     @asynccontextmanager
     async def lifespan(server: FastMCP) -> AsyncIterator[MCPState]:
+        """Create and manage the lifespan of the Langfuse client."""
         logger.info(f"Initializing Langfuse client with host: {host}")
         logger.info(f"Python version: {sys.version}")
         logger.info(f"Langfuse client version: {getattr(Langfuse, '__version__', 'unknown')}")
         
+        if not public_key or not secret_key:
+            raise ValueError("Both public_key and secret_key must be provided")
+            
         try:
-            if not public_key or not secret_key:
-                raise ValueError("Both public_key and secret_key must be provided")
-                
             logger.info("Creating Langfuse client...")
             langfuse_client = Langfuse(
                 public_key=public_key, 
@@ -898,151 +895,22 @@ def app_factory(public_key: str, secret_key: str, host: str, no_auth_check: bool
             
             if not no_auth_check:
                 logger.info("Checking authentication with Langfuse...")
-                try:
-                    auth_result = langfuse_client.auth_check()
-                    if not auth_result:
-                        raise ValueError("Authentication failed with the provided credentials")
-                    logger.info("Authentication successful")
-                except Exception as auth_error:
-                    detailed_error = f"Authentication failed: {str(auth_error)}"
-                    logger.error(detailed_error)
-                    if "404" in str(auth_error).lower():
-                        detailed_error += f" - Check if host URL {host} is correct"
-                    elif "unauthorized" in str(auth_error).lower():
-                        detailed_error += " - Check if API keys are valid"
-                    raise ValueError(detailed_error)
+                auth_result = langfuse_client.auth_check()
+                if not auth_result:
+                    raise ValueError("Authentication failed with the provided credentials")
+                logger.info("Authentication successful")
             
             logger.info("Langfuse client initialized successfully")
+            yield MCPState(langfuse_client=langfuse_client)
             
-            state = MCPState(langfuse_client=langfuse_client)
-            yield state
-            
+        finally:
             logger.info("Shutting down Langfuse client...")
-            langfuse_client.flush()
-            langfuse_client.shutdown()
+            if 'langfuse_client' in locals():
+                langfuse_client.flush()
+                langfuse_client.shutdown()
             logger.info("Langfuse client shutdown complete")
-        except Exception as e:
-            error_msg = f"Failed to initialize Langfuse client: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            yield MCPState(langfuse_client=None, error=error_msg)
 
     mcp = FastMCP("Langfuse MCP Server", lifespan=lifespan)
-    
-    # Register resource for API schema documentation
-    @mcp.resource("langfuse://api-schema")
-    def api_schema() -> str:
-        """Schema documentation for Langfuse MCP API endpoints."""
-        schema = {
-            "traces": {
-                "find_traces": {
-                    "description": "Search for traces with filtering options",
-                    "parameters": {
-                        "name": "Filter by trace name",
-                        "user_id": "Filter by user ID",
-                        "session_id": "Filter by session ID",
-                        "metadata": "Filter by metadata key-value pairs",
-                        "from_timestamp": "Start time range (ISO 8601)",
-                        "to_timestamp": "End time range (ISO 8601)",
-                        "page": "Page number for pagination",
-                        "limit": "Items per page",
-                        "order_by": "Field to order results by",
-                        "tags": "Filter by tags (string or list of strings)"
-                    },
-                    "returns": "List of trace objects"
-                },
-                "get_trace": {
-                    "description": "Get a single trace by ID with full details",
-                    "parameters": {
-                        "trace_id": "ID of the trace to retrieve"
-                    },
-                    "returns": "Single trace object with complete details"
-                }
-            },
-            "observations": {
-                "get_observation": {
-                    "description": "Get a single observation by ID",
-                    "parameters": {
-                        "observation_id": "ID of the observation to retrieve"
-                    },
-                    "returns": "Single observation object"
-                },
-                "get_observations_by_type": {
-                    "description": "Get observations filtered by type",
-                    "parameters": {
-                        "type": "Filter by observation type (e.g., 'SPAN', 'GENERATION', 'SCORE')",
-                        "name": "Filter by observation name",
-                        "user_id": "Filter by user ID",
-                        "trace_id": "Filter by trace ID",
-                        "parent_observation_id": "Filter by parent observation ID",
-                        "from_start_time": "Start time range (ISO 8601)",
-                        "to_start_time": "End time range (ISO 8601)",
-                        "page": "Page number for pagination",
-                        "limit": "Items per page"
-                    },
-                    "returns": "List of observation objects"
-                }
-            },
-            "sessions": {
-                "get_session": {
-                    "description": "Retrieve a session by ID",
-                    "parameters": {
-                        "session_id": "ID of the session to retrieve"
-                    },
-                    "returns": "Session object"
-                },
-                "get_user_sessions": {
-                    "description": "Retrieve sessions for a user within a time range",
-                    "parameters": {
-                        "user_id": "ID of the user",
-                        "from_timestamp": "Start time (ISO 8601)",
-                        "to_timestamp": "End time (ISO 8601)"
-                    },
-                    "returns": "List of session objects"
-                }
-            },
-            "errors": {
-                "find_exceptions": {
-                    "description": "Get exception counts grouped by file path, function, or type",
-                    "parameters": {
-                        "age": "Number of minutes to look back (max 7 days)",
-                        "group_by": "Field to group by (file, function, or type)"
-                    },
-                    "returns": "List of exception counts"
-                },
-                "find_exceptions_in_file": {
-                    "description": "Get detailed info about exceptions in a specific file",
-                    "parameters": {
-                        "filepath": "Path to the file to analyze",
-                        "age": "Number of minutes to look back (max 7 days)"
-                    },
-                    "returns": "List of exception details"
-                },
-                "get_error_count": {
-                    "description": "Get the number of traces with exceptions within the last N minutes",
-                    "parameters": {
-                        "age": "Number of minutes to look back"
-                    },
-                    "returns": "Error count with time range"
-                },
-                "get_exception_details": {
-                    "description": "Get detailed exception information for a trace or span",
-                    "parameters": {
-                        "trace_id": "ID of the trace to analyze",
-                        "span_id": "Optional ID of the span"
-                    },
-                    "returns": "List of exception details"
-                }
-            },
-            "schema": {
-                "get_data_schema": {
-                    "description": "Get the schema of trace, span, and event objects",
-                    "parameters": {},
-                    "returns": "JSON schema description"
-                }
-            }
-        }
-        
-        return json.dumps(schema, indent=2)
     
     # Register all tools
     mcp.tool()(find_traces)

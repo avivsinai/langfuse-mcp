@@ -241,7 +241,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "langfuse" },
-    { name = "mcp", specifier = ">=0.1.4" },
+    { name = "mcp", specifier = ">=1.0.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'" },
