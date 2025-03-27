@@ -81,14 +81,27 @@ def get_langfuse_client(ctx: Context) -> tuple[Optional[Langfuse], Optional[str]
     Returns:
         Tuple of (langfuse_client, error_message)
     """
-    state = ctx.request_context.lifespan_context
+    # Check if we have a cached client from a previous call
+    if hasattr(get_langfuse_client, '_cached_client'):
+        return get_langfuse_client._cached_client, None
     
-    if isinstance(state, MCPState):
-        return state.langfuse_client, None
-    elif isinstance(state, dict) and "langfuse_client" in state:
-        return state.get("langfuse_client"), state.get("error")
-    else:
-        return None, "Invalid state type in context"
+    try:
+        # First, try the expected way
+        if hasattr(ctx, "request_context") and hasattr(ctx.request_context, "lifespan_context"):
+            state = cast(MCPState, ctx.request_context.lifespan_context)
+            return state.langfuse_client, None
+            
+        # If that failed, try other possible locations in the context
+        if hasattr(ctx, "lifespan_context"):
+            state = cast(MCPState, ctx.lifespan_context)
+            return state.langfuse_client, None
+    except Exception as e:
+        logger.warning(f"Could not get client from context: {str(e)}")
+    
+    # If we couldn't find the client in the context, return an error
+    error_msg = "Unable to find Langfuse client in context. Make sure to initialize the server with command-line arguments."
+    logger.error(error_msg)
+    return None, error_msg
 
 
 async def find_traces(
@@ -101,7 +114,7 @@ async def find_traces(
     to_timestamp: Optional[datetime] = Field(None, description="End time range (ISO 8601 format)"),
     page: int = Field(1, description="Page number for pagination", ge=1),
     limit: int = Field(50, description="Items per page", ge=1, le=100),
-    order_by: Optional[str] = Field(None, description="Field to order results by"),
+    order_by: Optional[str] = Field(None, description="Field to order results by. Format: [field].[asc/desc], e.g. timestamp.desc"),
     tags: Optional[Union[str, List[str]]] = Field(None, description="Filter by tags"),
 ) -> List[dict]:
     """Retrieve traces based on filters.
@@ -116,7 +129,9 @@ async def find_traces(
         to_timestamp: End time range (ISO 8601)
         page: Page number for pagination
         limit: Items per page
-        order_by: Field to order results by
+        order_by: Field to order results by. Format: [field].[asc/desc]. 
+                 Available fields: id, timestamp, name, userId, release, version, public, bookmarked, sessionId.
+                 Example: "timestamp.desc" for newest first.
         tags: Filter by tags
         
     Returns:
@@ -878,38 +893,34 @@ def app_factory(public_key: str, secret_key: str, host: str, no_auth_check: bool
     async def lifespan(server: FastMCP) -> AsyncIterator[MCPState]:
         """Create and manage the lifespan of the Langfuse client."""
         logger.info(f"Initializing Langfuse client with host: {host}")
-        logger.info(f"Python version: {sys.version}")
-        logger.info(f"Langfuse client version: {getattr(Langfuse, '__version__', 'unknown')}")
         
-        if not public_key or not secret_key:
-            raise ValueError("Both public_key and secret_key must be provided")
-            
+        # Create the Langfuse client
+        langfuse_client = Langfuse(
+            public_key=public_key, 
+            secret_key=secret_key,
+            host=host,
+            debug=True
+        )
+        
+        # Run authentication check if required
+        if not no_auth_check:
+            auth_result = langfuse_client.auth_check()
+            if not auth_result:
+                raise ValueError("Authentication failed with the provided credentials")
+            logger.info("Authentication successful")
+        
+        logger.info("Langfuse client initialized successfully")
+        
+        # Yield the state with the client for the duration of the lifespan
         try:
-            logger.info("Creating Langfuse client...")
-            langfuse_client = Langfuse(
-                public_key=public_key, 
-                secret_key=secret_key,
-                host=host,
-                debug=True
-            )
-            
-            if not no_auth_check:
-                logger.info("Checking authentication with Langfuse...")
-                auth_result = langfuse_client.auth_check()
-                if not auth_result:
-                    raise ValueError("Authentication failed with the provided credentials")
-                logger.info("Authentication successful")
-            
-            logger.info("Langfuse client initialized successfully")
             yield MCPState(langfuse_client=langfuse_client)
-            
         finally:
-            logger.info("Shutting down Langfuse client...")
-            if 'langfuse_client' in locals():
-                langfuse_client.flush()
-                langfuse_client.shutdown()
+            # Clean up the client
+            langfuse_client.flush()
+            langfuse_client.shutdown()
             logger.info("Langfuse client shutdown complete")
 
+    # Create the MCP server
     mcp = FastMCP("Langfuse MCP Server", lifespan=lifespan)
     
     # Register all tools

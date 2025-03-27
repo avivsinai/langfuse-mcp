@@ -63,16 +63,10 @@ uv pip install langfuse-mcp
 
 ### Manually Run the Server
 
-Use environment variables:
+Use command-line flags:
 
 ```bash
-LANGFUSE_PUBLIC_KEY=YOUR_PUBLIC_KEY LANGFUSE_SECRET_KEY=YOUR_SECRET_KEY uv run -m langfuse_mcp
-```
-
-Or command-line flags:
-
-```bash
-uv run -m langfuse_mcp --public-key=YOUR_PUBLIC_KEY --secret-key=YOUR_SECRET_KEY
+uv run -m langfuse_mcp --public-key YOUR_PUBLIC_KEY --secret-key YOUR_SECRET_KEY
 ```
 
 You can also run directly from source:
@@ -81,7 +75,7 @@ You can also run directly from source:
 git clone https://github.com/langfuse/langfuse-mcp.git
 cd langfuse-mcp
 uv pip install -e .
-uv run -m langfuse_mcp --public-key=YOUR_PUBLIC_KEY --secret-key=YOUR_SECRET_KEY
+uv run -m langfuse_mcp --public-key YOUR_PUBLIC_KEY --secret-key YOUR_SECRET_KEY
 ```
 
 ## Configuration with MCP Clients
@@ -95,7 +89,7 @@ Create a `.cursor/mcp.json` file in your project root:
   "mcpServers": {
     "langfuse": {
       "command": "uv",
-      "args": ["run", "-m", "langfuse_mcp", "--public-key=YOUR_PUBLIC_KEY", "--secret-key=YOUR_SECRET_KEY", "--host=https://cloud.langfuse.com"]
+      "args": ["run", "-m", "langfuse_mcp", "--public-key", "YOUR_PUBLIC_KEY", "--secret-key", "YOUR_SECRET_KEY", "--host", "https://cloud.langfuse.com"]
     }
   }
 }
@@ -108,13 +102,8 @@ Add to your Claude settings:
 ```json
 {
   "command": ["uv"],
-  "args": ["run", "-m", "langfuse_mcp"],
-  "type": "stdio",
-  "env": {
-    "LANGFUSE_PUBLIC_KEY": "YOUR_PUBLIC_KEY",
-    "LANGFUSE_SECRET_KEY": "YOUR_SECRET_KEY",
-    "LANGFUSE_HOST": "https://cloud.langfuse.com"
-  }
+  "args": ["run", "-m", "langfuse_mcp", "--public-key", "YOUR_PUBLIC_KEY", "--secret-key", "YOUR_SECRET_KEY", "--host", "https://cloud.langfuse.com"],
+  "type": "stdio"
 }
 ```
 
@@ -127,11 +116,7 @@ Add to your Cline settings in `cline_mcp_settings.json`:
   "mcpServers": {
     "langfuse": {
       "command": "uv",
-      "args": ["run", "-m", "langfuse_mcp"],
-      "env": {
-        "LANGFUSE_PUBLIC_KEY": "YOUR_PUBLIC_KEY",
-        "LANGFUSE_SECRET_KEY": "YOUR_SECRET_KEY"
-      },
+      "args": ["run", "-m", "langfuse_mcp", "--public-key", "YOUR_PUBLIC_KEY", "--secret-key", "YOUR_SECRET_KEY", "--host", "https://cloud.langfuse.com"],
       "disabled": false,
       "autoApprove": []
     }
@@ -143,31 +128,22 @@ Add to your Cline settings in `cline_mcp_settings.json`:
 
 The default API endpoint is `https://cloud.langfuse.com` (EU region). You can override it with:
 
-1. Command-line argument:
-   ```bash
-   uv run -m langfuse_mcp --host=https://us.cloud.langfuse.com
-   ```
+Command-line argument:
+```bash
+uv run -m langfuse_mcp --host https://us.cloud.langfuse.com
+```
 
-2. Environment variable:
-   ```bash
-   LANGFUSE_HOST=https://us.cloud.langfuse.com uv run -m langfuse_mcp
-   ```
-
-3. In your client configuration:
-   ```json
-   {
-     "mcpServers": {
-       "langfuse": {
-         "command": "uv",
-         "args": ["run", "-m", "langfuse_mcp", "--host=https://us.cloud.langfuse.com"],
-         "env": {
-           "LANGFUSE_PUBLIC_KEY": "YOUR_PUBLIC_KEY",
-           "LANGFUSE_SECRET_KEY": "YOUR_SECRET_KEY"
-         }
-       }
-     }
-   }
-   ```
+In your client configuration:
+```json
+{
+  "mcpServers": {
+    "langfuse": {
+      "command": "uv",
+      "args": ["run", "-m", "langfuse_mcp", "--public-key", "YOUR_PUBLIC_KEY", "--secret-key", "YOUR_SECRET_KEY", "--host", "https://us.cloud.langfuse.com"],
+    }
+  }
+}
+```
 
 #### Available Regions
 
@@ -307,13 +283,13 @@ Now you can ask Claude natural language questions about your Langfuse data:
 3. Run the MCP server:
    ```bash
    # Default EU region
-   uv run -m langfuse_mcp --public-key=YOUR_PUBLIC_KEY --secret-key=YOUR_SECRET_KEY
+   uv run -m langfuse_mcp --public-key YOUR_PUBLIC_KEY --secret-key YOUR_SECRET_KEY
    
    # US region
-   uv run -m langfuse_mcp --public-key=YOUR_PUBLIC_KEY --secret-key=YOUR_SECRET_KEY --host=https://us.cloud.langfuse.com
+   uv run -m langfuse_mcp --public-key YOUR_PUBLIC_KEY --secret-key YOUR_SECRET_KEY --host https://us.cloud.langfuse.com
    
    # Self-hosted
-   uv run -m langfuse_mcp --public-key=YOUR_PUBLIC_KEY --secret-key=YOUR_SECRET_KEY --host=https://your-langfuse-instance.com
+   uv run -m langfuse_mcp --public-key YOUR_PUBLIC_KEY --secret-key YOUR_SECRET_KEY --host https://your-langfuse-instance.com
    ```
 4. Configure your preferred client (Cursor, Claude Desktop, or Cline).
 5. Start analyzing your Langfuse data!
