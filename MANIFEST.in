@@ -1,0 +1,29 @@
+include LICENSE
+include README.md
+include pyproject.toml
+include pytest.ini
+
+# Include all Python files in the main package and tests
+recursive-include langfuse_mcp *.py
+recursive-include tests *.py
+
+# Include GitHub workflows and configuration
+recursive-include .github *
+
+# Exclude unnecessary files and all hidden directories
+global-exclude *.py[cod]
+global-exclude __pycache__/
+global-exclude *.so
+global-exclude .*/*
+global-exclude *.log*
+global-exclude *.csv
+global-exclude .pytest_cache/
+global-exclude .venv/*
+global-exclude dist/*
+global-exclude bin/*
+global-exclude logs/*
+global-exclude data/*
+global-exclude *.code-workspace
+global-exclude uv.lock
+global-exclude .env
+global-exclude .env.example 
