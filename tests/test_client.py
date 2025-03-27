@@ -14,7 +14,7 @@ from mcp.client.stdio import stdio_client
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
@@ -54,8 +54,7 @@ class LangfuseMCPServer:
                 "--public-key", self.public_key,
                 "--secret-key", self.secret_key,
                 "--host", self.host
-            ],
-            env=os.environ
+            ]
         )
 
         try:
@@ -166,10 +165,10 @@ class LangfuseMCPServer:
 
 async def main() -> None:
     """Main test function."""
-    # Default credentials from mcp.json
-    public_key = os.getenv("LANGFUSE_PUBLIC_KEY", "pk-lf-c6231d33-f98d-4393-9b28-4205f74984ae")
-    secret_key = os.getenv("LANGFUSE_SECRET_KEY", "sk-lf-e23afc03-982b-4f68-a4c2-f721af28691a")
-    host = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
+    # Hard-coded credentials for testing
+    public_key = "pk-lf-c6231d33-f98d-4393-9b28-4205f74984ae"
+    secret_key = "sk-lf-e23afc03-982b-4f68-a4c2-f721af28691a"
+    host = "https://cloud.langfuse.com"
 
     server = LangfuseMCPServer(public_key, secret_key, host)
     
@@ -181,30 +180,35 @@ async def main() -> None:
         logger.info("Listing available tools:")
         tools = await server.list_tools()
         
+        # Add debug logging
+        logger.info(f"Tools response type: {type(tools)}")
+        logger.info(f"Tools response content: {tools}")
+        
         # Print info about tools without full serialization
         for i, tool_response in enumerate(tools):
-            if isinstance(tool_response, tuple) and tool_response[0] == "tools":
-                for j, tool in enumerate(tool_response[1]):
-                    print(f"Tool {j+1}: {getattr(tool, 'name', 'Unknown')}")
+            logger.info(f"Tool response {i} type: {type(tool_response)}")
+            logger.info(f"Tool response {i} content: {tool_response}")
+            # Direct access to tool name attribute since tools is a list of Tool objects
+            print(f"Tool {i+1}: {getattr(tool_response, 'name', 'Unknown')}")
         
         # Test error count
-        logger.info("\nGetting error count for last 30 minutes:")
-        error_count = await server.get_error_count(30)
+        logger.info("\nGetting error count for last 24 hours:")
+        error_count = await server.get_error_count(24 * 60)
         print(f"Error count results: {error_count}")
         
         # Test finding exceptions
-        logger.info("\nFinding exceptions in last 30 minutes:")
-        exceptions = await server.find_exceptions(30)
+        logger.info("\nFinding exceptions in last 24 hours:")
+        exceptions = await server.find_exceptions(24 * 60)
         print(f"Exceptions found: {exceptions}")
         
         # Test finding traces
-        logger.info("\nFinding traces from last hour:")
+        logger.info("\nFinding traces from last 24 hours:")
         # Use timezone-aware datetime objects that work in all Python versions
         now = datetime.now(dt.timezone.utc)
-        one_hour_ago = now - timedelta(hours=1)
+        one_day_ago = now - timedelta(days=1)
         
         traces = await server.find_traces(
-            from_timestamp=one_hour_ago,
+            from_timestamp=one_day_ago,
             to_timestamp=now
         )
         print(f"Traces found: {traces}")
