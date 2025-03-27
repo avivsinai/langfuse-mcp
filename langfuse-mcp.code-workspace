@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../reference-projects/langfuse-python"
+		},
+		{
+			"path": "../reference-projects/mcp/python-sdk"
+		},
+		{
+			"path": "../reference-projects/logfire-mcp"
+		}
+	],
+	"settings": {}
+}
