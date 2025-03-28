@@ -6,15 +6,13 @@ import sys
 import json
 from logging.handlers import RotatingFileHandler
 from collections.abc import AsyncIterator
-from collections import Counter, OrderedDict
+from collections import Counter
 from contextlib import asynccontextmanager
-from typing import Optional, List, Dict, Annotated, Any, Union, cast, Literal, AsyncContextManager, TypeVar, Generic
+from typing import Optional, List, Dict, Annotated, Any, Union, cast, Literal, AsyncContextManager
 from datetime import UTC, datetime, timedelta
-from functools import lru_cache, wraps
+from functools import lru_cache
 from dataclasses import dataclass
 
-# Import cachetools instead of OrderedDict
-from cachetools import LRUCache, cached, keys
 from langfuse import Langfuse
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import AfterValidator, BaseModel, Field
@@ -47,7 +45,6 @@ logger = logging.getLogger('langfuse_mcp')
 # Constants
 HOUR = 60  # minutes
 DAY = 24 * HOUR
-CACHE_SIZE = 1000  # Maximum number of items to store in caches
 
 
 @dataclass
@@ -75,8 +72,6 @@ def validate_age(age: int) -> int:
 ValidatedAge = Annotated[int, AfterValidator(validate_age)]
 
 
-# Use cachetools.cached for the client getter with a custom key function
-@cached(cache=LRUCache(maxsize=1), key=lambda ctx, *args, **kwargs: id(ctx))
 def get_langfuse_client(ctx: Context) -> tuple[Optional[Langfuse], Optional[str]]:
     """Helper function to get Langfuse client from context.
     
@@ -86,6 +81,10 @@ def get_langfuse_client(ctx: Context) -> tuple[Optional[Langfuse], Optional[str]
     Returns:
         Tuple of (langfuse_client, error_message)
     """
+    # Check if we have a cached client from a previous call
+    if hasattr(get_langfuse_client, '_cached_client'):
+        return get_langfuse_client._cached_client, None
+    
     try:
         # First, try the expected way
         if hasattr(ctx, "request_context") and hasattr(ctx.request_context, "lifespan_context"):
@@ -166,8 +165,7 @@ async def find_traces(
         return [{"error": f"Failed to retrieve traces: {str(e)}"}]
 
 
-# Replace the @lru_cache with @cached from cachetools with a custom key function
-@cached(cache=LRUCache(maxsize=CACHE_SIZE), key=lambda langfuse_client, observation_id, *args, **kwargs: (id(langfuse_client), observation_id))
+@lru_cache(maxsize=1000)
 def _get_cached_observation(langfuse_client, observation_id: str) -> Optional[Any]:
     """Cache observation details to avoid duplicate API calls."""
     try:
@@ -177,11 +175,11 @@ def _get_cached_observation(langfuse_client, observation_id: str) -> Optional[An
         return None
 
 
-# Create proper cachetools LRUCache instances instead of the custom ones
-_OBSERVATION_CACHE = LRUCache(maxsize=CACHE_SIZE)
-_FILE_TO_OBSERVATIONS_MAP = LRUCache(maxsize=CACHE_SIZE)
-_EXCEPTION_TYPE_MAP = LRUCache(maxsize=CACHE_SIZE)
-_EXCEPTIONS_BY_FILEPATH = LRUCache(maxsize=CACHE_SIZE)
+# Create an in-memory observation cache for the session
+_OBSERVATION_CACHE = {}
+_FILE_TO_OBSERVATIONS_MAP = {}
+_EXCEPTION_TYPE_MAP = {}
+_EXCEPTIONS_BY_FILEPATH = {}
 
 
 def _clear_caches():
@@ -192,9 +190,8 @@ def _clear_caches():
     _EXCEPTION_TYPE_MAP.clear()
     _EXCEPTIONS_BY_FILEPATH.clear()
     
-    # Clear the cached functions' caches
+    # Also clear the LRU cache
     _get_cached_observation.cache_clear()
-    get_langfuse_client.cache_clear()
     
     logger.debug("All caches cleared")
 
@@ -250,17 +247,14 @@ async def _efficient_fetch_observations(
     
     # Get observation details for error spans
     observations = {}
-    
-    # Clear filepath maps before refilling
-    filepath_maps = {}
-    exception_types = {}
+    _FILE_TO_OBSERVATIONS_MAP.clear()
     
     for span in error_spans:
         observation = _get_cached_observation(langfuse_client, span.id)
         if not observation:
             continue
             
-        # Store in observations dict
+        # Store in cache
         observations[span.id] = observation
         
         # Check if it has exceptions
@@ -271,28 +265,20 @@ async def _efficient_fetch_observations(
                 if hasattr(observation, 'metadata') and observation.metadata:
                     filepath_key = observation.metadata.get("code.filepath")
                     if filepath_key:
-                        if filepath_key not in filepath_maps:
-                            filepath_maps[filepath_key] = set()
-                        filepath_maps[filepath_key].add(span.id)
+                        if filepath_key not in _FILE_TO_OBSERVATIONS_MAP:
+                            _FILE_TO_OBSERVATIONS_MAP[filepath_key] = set()
+                        _FILE_TO_OBSERVATIONS_MAP[filepath_key].add(span.id)
                         
                     # Index by exception type for faster lookup
                     for event in observation.events:
                         exception_type = event.attributes.get("exception.type")
                         if exception_type:
-                            if exception_type not in exception_types:
-                                exception_types[exception_type] = set()
-                            exception_types[exception_type].add(span.id)
+                            if exception_type not in _EXCEPTION_TYPE_MAP:
+                                _EXCEPTION_TYPE_MAP[exception_type] = set()
+                            _EXCEPTION_TYPE_MAP[exception_type].add(span.id)
     
-    # Update LRU caches
+    # Cache the results
     _OBSERVATION_CACHE[cache_key] = observations
-    
-    # Update the filepath maps with size limits
-    for filepath_key, obs_ids in filepath_maps.items():
-        _FILE_TO_OBSERVATIONS_MAP[filepath_key] = obs_ids
-        
-    # Update the exception type maps with size limits
-    for exception_type, obs_ids in exception_types.items():
-        _EXCEPTION_TYPE_MAP[exception_type] = obs_ids
     
     # If we have a filepath filter, return only those observations
     if filepath and filepath in _FILE_TO_OBSERVATIONS_MAP:
@@ -695,43 +681,32 @@ async def get_exception_details(
     try:
         if span_id:
             # If span_id is provided, get that specific observation
-            observation_response = langfuse_client.fetch_observation(span_id)
-            observation = observation_response.data
-            # Check if the observation belongs to the specified trace
-            if hasattr(observation, 'trace_id') and observation.trace_id != trace_id:
+            observation = langfuse_client.fetch_observation(span_id)
+            if observation.trace_id != trace_id:
                 return [{"error": "Span does not belong to the specified trace"}]
             spans = [observation]
         else:
             # Otherwise, get all observations for the trace
             traces = langfuse_client.fetch_traces(trace_id=trace_id).data
             if not traces:
-                logger.warning(f"Trace {trace_id} not found")
                 return [{"error": f"Trace {trace_id} not found"}]
             
-            trace = traces[0]
-            logger.info(f"Found trace: {trace.id}, with {len(trace.observations) if hasattr(trace, 'observations') else 0} observations")
-            
-            observations = trace.observations if hasattr(trace, 'observations') else []
+            observations = traces[0].observations
             # Get detailed observation data for each observation in the trace
             spans = []
             for obs in observations:
                 try:
-                    obs_id = obs.id if hasattr(obs, 'id') else obs
-                    logger.info(f"Fetching observation: {obs_id}")
-                    detailed_obs_response = langfuse_client.fetch_observation(obs_id)
-                    detailed_obs = detailed_obs_response.data
+                    detailed_obs = langfuse_client.fetch_observation(obs.id)
                     spans.append(detailed_obs)
                 except Exception as e:
-                    logger.warning(f"Error getting observation {obs}: {str(e)}")
+                    logger.warning(f"Error getting observation {obs.id}: {str(e)}")
                     
-        logger.info(f"Processing {len(spans)} spans for exceptions")
         # Extract exception details from spans
         details = []
         for span in spans:
-            logger.info(f"Processing span {span.id if hasattr(span, 'id') else 'unknown'}")
-            if hasattr(span, 'events') and span.events:
-                for event in span.events:
-                    if hasattr(event, 'attributes') and event.attributes.get("exception.type"):
+            if hasattr(span, 'events'):
+                for event in span.events or []:
+                    if event.attributes.get("exception.type"):
                         details.append({
                             "observation_id": span.id,
                             "exception_type": event.attributes.get("exception.type"),
@@ -740,11 +715,7 @@ async def get_exception_details(
                             "timestamp": event.start_time.isoformat() if hasattr(event, 'start_time') else None,
                             "metadata": span.metadata if hasattr(span, 'metadata') else None,
                         })
-                        logger.info(f"Found exception of type {event.attributes.get('exception.type')} in span {span.id if hasattr(span, 'id') else 'unknown'}")
-        
-        if not details:
-            logger.warning(f"No exceptions found in trace {trace_id}")
-            
+                        
         return details if details else [{"message": "No exceptions found in the specified trace"}]
     except Exception as e:
         logger.error(f"Error getting exception details: {str(e)}", exc_info=True)
