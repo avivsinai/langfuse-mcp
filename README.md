@@ -1,303 +1,126 @@
-# Langfuse MCP Server
+# Langfuse MCP (Model Control Plane)
 
-This repository contains a Model Context Protocol (MCP) server with tools that can access traces, sessions, and metrics stored in Langfuse using the Langfuse SDK.
+This project provides a Model Control Plane (MCP) server for Langfuse, allowing AI agents to query Langfuse trace data for better debugging and observability.
 
-This MCP server enables LLMs to retrieve and analyze your application's telemetry data without needing to write SQL queries.
+## Features
 
-## Available Tools
+- Integration with Langfuse for trace and observation data
+- Tool suite for AI agents to query trace data
+- Exception and error tracking capabilities
+- Session and user activity monitoring
 
-- **`find_traces`** - Retrieve traces based on filters
-  - **Arguments:**
-    - `name`: Optional[str] - Name of the trace
-    - `user_id`: Optional[str] - User ID
-    - `session_id`: Optional[str] - Session ID
-    - `version`: Optional[str] - Application version
-    - `metadata`: Optional[dict] - Metadata to filter on
-    - `from_timestamp`: Optional[datetime] - Start time (ISO 8601)
-    - `to_timestamp`: Optional[datetime] - End time (ISO 8601)
-    - `page`: int - Page number (default: 1)
-    - `limit`: int - Number of traces per page (default: 50)
+## Setup and Installation
 
-- **`find_exceptions`** - Get exception counts grouped by file, function, or type
-  - **Arguments:**
-    - `age`: int - Number of minutes to look back
-    - `group_by`: str - Field to group by ('file', 'function', 'type')
-
-- **`get_exception_details`** - Get detailed exception information for a trace or span
-  - **Arguments:**
-    - `trace_id`: str - ID of the trace
-    - `span_id`: Optional[str] - ID of the span (if specified, get exceptions for that span only)
-
-- **`get_session`** - Retrieve a session by ID
-  - **Arguments:**
-    - `session_id`: str - ID of the session
-
-- **`get_user_sessions`** - Retrieve sessions for a user within a time range
-  - **Arguments:**
-    - `user_id`: str - ID of the user
-    - `from_timestamp`: Optional[datetime] - Start time (ISO 8601)
-    - `to_timestamp`: Optional[datetime] - End time (ISO 8601)
-
-- **`get_error_count`** - Get the number of traces with exceptions within the last N minutes
-  - **Arguments:**
-    - `age`: int - Number of minutes to look back
-
-- **`get_data_schema`** - Get the schema of trace, span, and event objects
-  - **No arguments**
-
-## Setup
-
-### Install `uv`
-
-Ensure `uv` is installed to manage dependencies and run the server. See the [uv installation docs](https://docs.astral.sh/uv/getting-started/installation/).
-
-### Obtain Langfuse Credentials
-
-You need your Langfuse public key and secret key from your project settings (cloud or self-hosted).
-
-### Install with `uv`
-
+1. Clone the repository:
 ```bash
-uv pip install langfuse-mcp
-```
-
-### Manually Run the Server
-
-Use command-line flags:
-
-```bash
-uv run -m langfuse_mcp --public-key YOUR_PUBLIC_KEY --secret-key YOUR_SECRET_KEY
-```
-
-You can also run directly from source:
-
-```bash
-git clone https://github.com/langfuse/langfuse-mcp.git
+git clone https://github.com/yourusername/langfuse-mcp.git
 cd langfuse-mcp
-uv pip install -e .
-uv run -m langfuse_mcp --public-key YOUR_PUBLIC_KEY --secret-key YOUR_SECRET_KEY
 ```
 
-## Configuration with MCP Clients
-
-### Cursor
-
-Create a `.cursor/mcp.json` file in your project root:
-
-```json
-{
-  "mcpServers": {
-    "langfuse": {
-      "command": "uv",
-      "args": ["run", "-m", "langfuse_mcp", "--public-key", "YOUR_PUBLIC_KEY", "--secret-key", "YOUR_SECRET_KEY", "--host", "https://cloud.langfuse.com"]
-    }
-  }
-}
-```
-
-### Claude Desktop
-
-Add to your Claude settings:
-
-```json
-{
-  "command": ["uv"],
-  "args": ["run", "-m", "langfuse_mcp", "--public-key", "YOUR_PUBLIC_KEY", "--secret-key", "YOUR_SECRET_KEY", "--host", "https://cloud.langfuse.com"],
-  "type": "stdio"
-}
-```
-
-### Cline
-
-Add to your Cline settings in `cline_mcp_settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "langfuse": {
-      "command": "uv",
-      "args": ["run", "-m", "langfuse_mcp", "--public-key", "YOUR_PUBLIC_KEY", "--secret-key", "YOUR_SECRET_KEY", "--host", "https://cloud.langfuse.com"],
-      "disabled": false,
-      "autoApprove": []
-    }
-  }
-}
-```
-
-### Customization - Host URL
-
-The default API endpoint is `https://cloud.langfuse.com` (EU region). You can override it with:
-
-Command-line argument:
+2. Create and activate a virtual environment:
 ```bash
-uv run -m langfuse_mcp --host https://us.cloud.langfuse.com
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 ```
 
-In your client configuration:
-```json
-{
-  "mcpServers": {
-    "langfuse": {
-      "command": "uv",
-      "args": ["run", "-m", "langfuse_mcp", "--public-key", "YOUR_PUBLIC_KEY", "--secret-key", "YOUR_SECRET_KEY", "--host", "https://us.cloud.langfuse.com"],
-    }
-  }
-}
+3. Install dependencies:
+```bash
+pip install -r requirements.txt
 ```
 
-#### Available Regions
+4. Set up Langfuse credentials as environment variables:
+```bash
+export LANGFUSE_SECRET_KEY="your-secret-key"
+export LANGFUSE_PUBLIC_KEY="your-public-key"
+export LANGFUSE_HOST="https://cloud.langfuse.com"  # Or your self-hosted URL
+```
 
-- **EU (Default)**: `https://cloud.langfuse.com`
-- **US**: `https://us.cloud.langfuse.com`
-- **Self-hosted**: Your custom Langfuse URL (e.g., `https://langfuse.your-company.com`)
+## Usage
 
-## Example Interactions
+### Running the MCP Server
 
-1. **Find traces from the last hour:**
-   ```json
-   {
-     "name": "find_traces",
-     "arguments": {
-       "from_timestamp": "2024-10-15T09:00:00Z",
-       "to_timestamp": "2024-10-15T10:00:00Z",
-       "limit": 10
-     }
-   }
-   ```
-   **Response:**
-   ```json
-   [
-     {"id": "trace1", "name": "trace_name", "user_id": "user123", "session_id": "session456", ...},
-     ...
-   ]
-   ```
+To start the MCP server:
 
-2. **Get exception counts grouped by file:**
-   ```json
-   {
-     "name": "find_exceptions",
-     "arguments": {
-       "age": 60,
-       "group_by": "file"
-     }
-   }
-   ```
-   **Response:**
-   ```json
-   [
-     {"group": "app/main.py", "count": 5},
-     {"group": "utils/helper.py", "count": 3}
-   ]
-   ```
+```bash
+python -m langfuse_mcp.server
+```
 
-3. **Get detailed exceptions for a trace:**
-   ```json
-   {
-     "name": "get_exception_details",
-     "arguments": {
-       "trace_id": "abc123"
-     }
-   }
-   ```
-   **Response:**
-   ```json
-   [
-     {
-       "observation_id": "obs123",
-       "observation_name": "process_data",
-       "timestamp": "2024-10-15T10:00:00Z",
-       "exception_type": "ZeroDivisionError",
-       "exception_message": "division by zero",
-       "stacktrace": "Traceback (most recent call last):\n  File \"app.py\", line 42...",
-       "file": "app/utils.py",
-       "function": "calculate_ratio",
-       "line_number": 42
-     },
-     ...
-   ]
-   ```
+### Available Tools
 
-4. **Get error count for the last 24 hours:**
-   ```json
-   {
-     "name": "get_error_count",
-     "arguments": {
-       "age": 1440
-     }
-   }
-   ```
-   **Response:**
-   ```json
-   {
-     "error_count": 12,
-     "time_range": {
-       "from": "2024-10-14T10:00:00Z",
-       "to": "2024-10-15T10:00:00Z"
-     }
-   }
-   ```
+The MCP server provides the following tools for AI agents:
 
-5. **Get sessions for a user:**
-   ```json
-   {
-     "name": "get_user_sessions",
-     "arguments": {
-       "user_id": "user123",
-       "from_timestamp": "2024-10-10T00:00:00Z",
-       "to_timestamp": "2024-10-15T23:59:59Z"
-     }
-   }
-   ```
-   **Response:**
-   ```json
-   [
-     {"id": "session1", "user_id": "user123", "created_at": "2024-10-12T14:22:33Z", ...},
-     {"id": "session2", "user_id": "user123", "created_at": "2024-10-13T09:15:44Z", ...}
-   ]
-   ```
+- `find_traces` - Find traces based on criteria like user ID, session ID, etc.
+- `find_exceptions` - Find exceptions and errors in traces
+- `find_exceptions_in_file` - Find exceptions in a specific file
+- `get_session` - Get session details
+- `get_user_sessions` - Get all sessions for a user
+- `get_error_count` - Get the count of errors
+- `get_exception_details` - Get detailed information about an exception
+- `get_trace` - Get a specific trace by ID
+- `get_observation` - Get a specific observation by ID
+- `get_observations_by_type` - Get observations filtered by type
 
-## Examples of Questions for Claude
+## Testing
 
-Now you can ask Claude natural language questions about your Langfuse data:
+To run the test suite:
 
-1. "Show me all traces from the last 30 minutes."
-2. "What are the most common exception types in the past hour?"
-3. "Get details about exceptions in trace 'abc123'."
-4. "How many errors occurred in the last 24 hours?"
-5. "List all sessions for user 'user123' from yesterday."
-6. "What files have the most exceptions in the past week?"
-7. "Show me the stack trace for the most recent ZeroDivisionError exception."
-8. "How many unique users had errors in their sessions today?"
-9. "What's the structure of a trace object in Langfuse?"
-10. "Find all traces with the tag 'production' from the last 3 hours."
-11. "What are all the filtering options I can use with traces?"
-12. "Display a summary of exceptions by error type for the last 48 hours."
+```bash
+./run_tests.py
+```
 
-## Getting Started
-
-1. Obtain your Langfuse public and secret keys from your project settings.
-2. Install the MCP server:
-   ```bash
-   uv pip install langfuse-mcp
-   ```
-3. Run the MCP server:
-   ```bash
-   # Default EU region
-   uv run -m langfuse_mcp --public-key YOUR_PUBLIC_KEY --secret-key YOUR_SECRET_KEY
-   
-   # US region
-   uv run -m langfuse_mcp --public-key YOUR_PUBLIC_KEY --secret-key YOUR_SECRET_KEY --host https://us.cloud.langfuse.com
-   
-   # Self-hosted
-   uv run -m langfuse_mcp --public-key YOUR_PUBLIC_KEY --secret-key YOUR_SECRET_KEY --host https://your-langfuse-instance.com
-   ```
-4. Configure your preferred client (Cursor, Claude Desktop, or Cline).
-5. Start analyzing your Langfuse data!
+See [the testing documentation](langfuse_mcp/tests/README.md) for more details on the testing approach.
 
 ## Contributing
 
-Contributions are welcome! Add new tools, enhance functionality, or improve docs. See the [Model Context Protocol servers repository](https://github.com/modelcontextprotocol/servers) for examples.
+Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-Licensed under the MIT License.
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+# Langfuse MCP Cache Management
+
+This document provides details about how caching is implemented in the Langfuse MCP server.
+
+### Cache Management Improvements
+
+We use the `cachetools` library to implement efficient caching with proper size limits:
+
+1. Replaced custom cache implementation with `cachetools.LRUCache` for better reliability
+2. Added a configurable cache size limit via the `CACHE_SIZE` constant
+3. Leveraged `cachetools.cached` decorator for function memoization
+
+The implementation automatically evicts the least recently used items when caches exceed their size limits, preventing unbounded memory growth in long-running servers.
+
+### Implementation Details
+
+- `langfuse_mcp/__main__.py`: Uses `cachetools.LRUCache` and `cachetools.cached` for all caching needs
+
+### Configuration
+
+The cache size can be configured by modifying the `CACHE_SIZE` constant at the top of the `__main__.py` file. The default value is 1000 items per cache.
+
+```python
+# Constants
+HOUR = 60  # minutes
+DAY = 24 * HOUR
+CACHE_SIZE = 1000  # Maximum number of items to store in caches
+```
+
+### How It Works
+
+We use the `cachetools` library which provides several caching implementations:
+
+```python
+from cachetools import LRUCache, cached, keys
+
+# Create caches with size limits
+_OBSERVATION_CACHE = LRUCache(maxsize=CACHE_SIZE)
+
+# Cached function with LRU eviction
+@cached(cache=LRUCache(maxsize=CACHE_SIZE))
+def _get_cached_observation(langfuse_client, observation_id: str):
+    # Function logic here
+```
+
+This implementation automatically removes the oldest accessed items when the cache exceeds its maximum size.
