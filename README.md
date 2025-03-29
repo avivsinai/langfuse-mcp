@@ -17,18 +17,23 @@ git clone https://github.com/yourusername/langfuse-mcp.git
 cd langfuse-mcp
 ```
 
-2. Create and activate a virtual environment:
+2. Install uv (if not already installed):
 ```bash
-python -m venv .venv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+3. Create and activate a virtual environment with uv:
+```bash
+uv venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 ```
 
-3. Install dependencies:
+4. Install dependencies with uv:
 ```bash
-pip install -r requirements.txt
+uv pip install -e .
 ```
 
-4. Set up Langfuse credentials as environment variables:
+5. Set up Langfuse credentials as environment variables:
 ```bash
 export LANGFUSE_SECRET_KEY="your-secret-key"
 export LANGFUSE_PUBLIC_KEY="your-public-key"
@@ -42,7 +47,7 @@ export LANGFUSE_HOST="https://cloud.langfuse.com"  # Or your self-hosted URL
 To start the MCP server:
 
 ```bash
-python -m langfuse_mcp.server
+uv run -m langfuse_mcp
 ```
 
 ### Available Tools
@@ -60,12 +65,12 @@ The MCP server provides the following tools for AI agents:
 - `get_observation` - Get a specific observation by ID
 - `get_observations_by_type` - Get observations filtered by type
 
-## Testing
+### Testing
 
-To run the test suite:
+To run the test client:
 
 ```bash
-./run_tests.py
+uv run test_mcp_client.py
 ```
 
 See [the testing documentation](langfuse_mcp/tests/README.md) for more details on the testing approach.
