@@ -1,21 +1,22 @@
 import argparse
-import asyncio
 import logging
-import os
 import sys
-import json
-from logging.handlers import RotatingFileHandler
-from collections.abc import AsyncIterator
+import os
 from collections import Counter
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Optional, List, Dict, Annotated, Any, Union, cast, Literal, AsyncContextManager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
-from dataclasses import dataclass
+from logging.handlers import RotatingFileHandler
+from typing import Annotated, Any, Literal, Optional, Union, cast, List
 
+from cachetools import LRUCache
 from langfuse import Langfuse
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import AfterValidator, BaseModel, Field
+
+__version__ = "0.1.0"
 
 # Set up logging with rotation
 LOG_FILE = "/tmp/langfuse_mcp.log"
@@ -36,11 +37,16 @@ file_handler.setFormatter(formatter)
 
 # Configure root logger
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     handlers=[file_handler]  # Only use file handler
 )
 
 logger = logging.getLogger('langfuse_mcp')
+logger.info("=" * 80)
+logger.info(f"Langfuse MCP v{__version__} loading...")
+logger.info(f"Python version: {sys.version}")
+logger.info(f"Running from: {__file__}")
+logger.info("=" * 80)
 
 # Constants
 HOUR = 60  # minutes
@@ -51,6 +57,11 @@ DAY = 24 * HOUR
 class MCPState:
     """State object passed from lifespan context to tools."""
     langfuse_client: Langfuse
+    # LRU caches for efficient exception lookup
+    observation_cache: LRUCache = field(default_factory=lambda: LRUCache(maxsize=100))
+    file_to_observations_map: LRUCache = field(default_factory=lambda: LRUCache(maxsize=100))
+    exception_type_map: LRUCache = field(default_factory=lambda: LRUCache(maxsize=100))
+    exceptions_by_filepath: LRUCache = field(default_factory=lambda: LRUCache(maxsize=100))
 
 
 class ExceptionCount(BaseModel):
@@ -72,101 +83,21 @@ def validate_age(age: int) -> int:
 ValidatedAge = Annotated[int, AfterValidator(validate_age)]
 
 
-def get_langfuse_client(ctx: Context) -> tuple[Optional[Langfuse], Optional[str]]:
-    """Helper function to get Langfuse client from context.
+def clear_caches(state: MCPState) -> None:
+    """Clear all in-memory caches."""
+    state.observation_cache.clear()
+    state.file_to_observations_map.clear()
+    state.exception_type_map.clear()
+    state.exceptions_by_filepath.clear()
     
-    Args:
-        ctx: MCP context with access to lifespan context
-        
-    Returns:
-        Tuple of (langfuse_client, error_message)
-    """
-    # Check if we have a cached client from a previous call
-    if hasattr(get_langfuse_client, '_cached_client'):
-        return get_langfuse_client._cached_client, None
+    # Also clear the LRU cache
+    _get_cached_observation.cache_clear()
     
-    try:
-        # First, try the expected way
-        if hasattr(ctx, "request_context") and hasattr(ctx.request_context, "lifespan_context"):
-            state = cast(MCPState, ctx.request_context.lifespan_context)
-            return state.langfuse_client, None
-            
-        # If that failed, try other possible locations in the context
-        if hasattr(ctx, "lifespan_context"):
-            state = cast(MCPState, ctx.lifespan_context)
-            return state.langfuse_client, None
-    except Exception as e:
-        logger.warning(f"Could not get client from context: {str(e)}")
-    
-    # If we couldn't find the client in the context, return an error
-    error_msg = "Unable to find Langfuse client in context. Make sure to initialize the server with command-line arguments."
-    logger.error(error_msg)
-    return None, error_msg
-
-
-async def find_traces(
-    ctx: Context,
-    name: Optional[str] = Field(None, description="Filter by trace name"),
-    user_id: Optional[str] = Field(None, description="Filter by user ID"),
-    session_id: Optional[str] = Field(None, description="Filter by session ID"),
-    metadata: Optional[Dict[str, Any]] = Field(None, description="Filter by metadata key-value pairs"),
-    from_timestamp: Optional[datetime] = Field(None, description="Start time range (ISO 8601 format)"),
-    to_timestamp: Optional[datetime] = Field(None, description="End time range (ISO 8601 format)"),
-    page: int = Field(1, description="Page number for pagination", ge=1),
-    limit: int = Field(50, description="Items per page", ge=1, le=100),
-    order_by: Optional[str] = Field(None, description="Field to order results by. Format: [field].[asc/desc], e.g. timestamp.desc"),
-    tags: Optional[Union[str, List[str]]] = Field(None, description="Filter by tags"),
-) -> List[dict]:
-    """Retrieve traces based on filters.
-    
-    Args:
-        ctx: MCP context with access to Langfuse client
-        name: Filter by trace name
-        user_id: Filter by user ID
-        session_id: Filter by session ID
-        metadata: Filter by metadata key-value pairs
-        from_timestamp: Start time range (ISO 8601)
-        to_timestamp: End time range (ISO 8601)
-        page: Page number for pagination
-        limit: Items per page
-        order_by: Field to order results by. Format: [field].[asc/desc]. 
-                 Available fields: id, timestamp, name, userId, release, version, public, bookmarked, sessionId.
-                 Example: "timestamp.desc" for newest first.
-        tags: Filter by tags
-        
-    Returns:
-        List of trace dictionaries
-    """
-    logger.info(f"Finding traces with filters: name={name}, user_id={user_id}, session_id={session_id}")
-    
-    langfuse_client, error = get_langfuse_client(ctx)
-    
-    if not langfuse_client:
-        error_msg = f"Langfuse client not initialized: {error}"
-        logger.error(error_msg)
-        return [{"error": error_msg}]
-
-    try:
-        traces_response = langfuse_client.fetch_traces(
-            name=name,
-            user_id=user_id,
-            session_id=session_id,
-            from_timestamp=from_timestamp,
-            to_timestamp=to_timestamp,
-            page=page,
-            limit=limit,
-            order_by=order_by,
-            tags=tags,
-        )
-        logger.info(f"Found {len(traces_response.data)} traces")
-        return [trace.dict() for trace in traces_response.data]
-    except Exception as e:
-        logger.error(f"Error retrieving traces: {str(e)}", exc_info=True)
-        return [{"error": f"Failed to retrieve traces: {str(e)}"}]
+    logger.debug("All caches cleared")
 
 
 @lru_cache(maxsize=1000)
-def _get_cached_observation(langfuse_client, observation_id: str) -> Optional[Any]:
+def _get_cached_observation(langfuse_client: Langfuse, observation_id: str) -> Optional[Any]:
     """Cache observation details to avoid duplicate API calls."""
     try:
         return langfuse_client.fetch_observation(observation_id).data
@@ -175,37 +106,16 @@ def _get_cached_observation(langfuse_client, observation_id: str) -> Optional[An
         return None
 
 
-# Create an in-memory observation cache for the session
-_OBSERVATION_CACHE = {}
-_FILE_TO_OBSERVATIONS_MAP = {}
-_EXCEPTION_TYPE_MAP = {}
-_EXCEPTIONS_BY_FILEPATH = {}
-
-
-def _clear_caches():
-    """Clear all in-memory caches."""
-    global _OBSERVATION_CACHE, _FILE_TO_OBSERVATIONS_MAP, _EXCEPTION_TYPE_MAP, _EXCEPTIONS_BY_FILEPATH
-    _OBSERVATION_CACHE.clear()
-    _FILE_TO_OBSERVATIONS_MAP.clear()
-    _EXCEPTION_TYPE_MAP.clear()
-    _EXCEPTIONS_BY_FILEPATH.clear()
-    
-    # Also clear the LRU cache
-    _get_cached_observation.cache_clear()
-    
-    logger.debug("All caches cleared")
-
-
 async def _efficient_fetch_observations(
-    langfuse_client, 
+    state: MCPState, 
     from_timestamp: datetime, 
     to_timestamp: datetime,
     filepath: Optional[str] = None
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Efficiently fetch observations with exception filtering.
     
     Args:
-        langfuse_client: Langfuse client
+        state: MCP state with Langfuse client and caches
         from_timestamp: Start time
         to_timestamp: End time
         filepath: Optional filter by filepath
@@ -213,593 +123,731 @@ async def _efficient_fetch_observations(
     Returns:
         Dictionary of observation_id -> observation
     """
-    global _OBSERVATION_CACHE, _FILE_TO_OBSERVATIONS_MAP, _EXCEPTION_TYPE_MAP
+    langfuse_client = state.langfuse_client
     
     # Use a cache key that includes the time range
     cache_key = f"{from_timestamp.isoformat()}-{to_timestamp.isoformat()}"
     
     # Check if we've already processed this time range
-    if cache_key in _OBSERVATION_CACHE:
-        logger.info(f"Using cached observations for {cache_key}")
-        observations = _OBSERVATION_CACHE[cache_key]
-        
-        # If we have a filepath filter, return only those observations
-        if filepath and filepath in _FILE_TO_OBSERVATIONS_MAP:
-            filtered_observations = {}
-            for obs_id in _FILE_TO_OBSERVATIONS_MAP[filepath]:
-                if obs_id in observations:
-                    filtered_observations[obs_id] = observations[obs_id]
-            return filtered_observations
-        
-        return observations
-
-    # Fetch all observations in a single call
-    logger.info(f"Fetching observations from {from_timestamp} to {to_timestamp}")
+    if hasattr(state, "observation_cache") and cache_key in state.observation_cache:
+        logger.info("Using cached observations")
+        return state.observation_cache[cache_key]
+    
+    # Fetch observations from Langfuse
     observations_response = langfuse_client.fetch_observations(
         from_start_time=from_timestamp,
         to_start_time=to_timestamp,
-        type="SPAN"
+        type="SPAN",
     )
     
-    # Fast pre-filter: only process spans with errors to reduce API calls
-    error_spans = [span for span in observations_response.data if span.level == "ERROR"]
-    logger.info(f"Found {len(error_spans)} error spans out of {len(observations_response.data)} total spans")
-    
-    # Get observation details for error spans
+    # Process observations and build indices
     observations = {}
-    _FILE_TO_OBSERVATIONS_MAP.clear()
-    
-    for span in error_spans:
-        observation = _get_cached_observation(langfuse_client, span.id)
-        if not observation:
+    for obs in observations_response.data:
+        if not hasattr(obs, 'events') or not obs.events:
             continue
             
-        # Store in cache
-        observations[span.id] = observation
-        
-        # Check if it has exceptions
-        if hasattr(observation, 'events') and observation.events:
-            has_exception = any(event.attributes.get("exception.type") for event in observation.events)
-            if has_exception:
-                # Index by filepath for faster lookup
-                if hasattr(observation, 'metadata') and observation.metadata:
-                    filepath_key = observation.metadata.get("code.filepath")
-                    if filepath_key:
-                        if filepath_key not in _FILE_TO_OBSERVATIONS_MAP:
-                            _FILE_TO_OBSERVATIONS_MAP[filepath_key] = set()
-                        _FILE_TO_OBSERVATIONS_MAP[filepath_key].add(span.id)
-                        
-                    # Index by exception type for faster lookup
-                    for event in observation.events:
-                        exception_type = event.attributes.get("exception.type")
-                        if exception_type:
-                            if exception_type not in _EXCEPTION_TYPE_MAP:
-                                _EXCEPTION_TYPE_MAP[exception_type] = set()
-                            _EXCEPTION_TYPE_MAP[exception_type].add(span.id)
+        for event in obs.events:
+            if not event.attributes.get("exception.type"):
+                continue
+                
+            # Store observation
+            observations[obs.id] = obs
+            
+            # Update file index if we have filepath info
+            if hasattr(obs, 'metadata') and obs.metadata:
+                file = obs.metadata.get("code.filepath")
+                if file:
+                    if file not in state.file_to_observations_map:
+                        state.file_to_observations_map[file] = set()
+                    state.file_to_observations_map[file].add(obs.id)
+                    
+            # Update exception type index
+            exc_type = event.attributes["exception.type"]
+            if exc_type not in state.exception_type_map:
+                state.exception_type_map[exc_type] = set()
+            state.exception_type_map[exc_type].add(obs.id)
     
-    # Cache the results
-    _OBSERVATION_CACHE[cache_key] = observations
-    
-    # If we have a filepath filter, return only those observations
-    if filepath and filepath in _FILE_TO_OBSERVATIONS_MAP:
-        filtered_observations = {}
-        for obs_id in _FILE_TO_OBSERVATIONS_MAP[filepath]:
-            if obs_id in observations:
-                filtered_observations[obs_id] = observations[obs_id]
-        return filtered_observations
+    # Cache the processed observations
+    state.observation_cache[cache_key] = observations
     
     return observations
 
 
-async def find_exceptions(
+async def find_traces(
     ctx: Context,
-    age: ValidatedAge = Field(..., description="Number of minutes to look back (max 7 days)"),
-    group_by: Literal["file", "function", "type"] = Field("file", description="Field to group by (file, function, or type)"),
-) -> List[ExceptionCount]:
-    """Get exception counts grouped by file path, function, or type from spans.
-
-    Args:
-        ctx: MCP context providing access to server state.
-        age: Number of minutes to look back (max 7 days).
-        group_by: Field to group by (file, function, or type).
-
-    Returns:
-        List of ExceptionCount objects with group and count.
-    """
-    logger.info(f"Finding exceptions for the past {age} minutes, grouped by {group_by}")
+    name: Optional[str] = None,
+    user_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    metadata: Optional[dict] = None,
+    from_timestamp: Optional[Union[datetime, str]] = None,
+    to_timestamp: Optional[Union[datetime, str]] = None,
+    page: int = 1,
+    limit: int = 50,
+    tags: Optional[Union[str, List[str]]] = None,
+) -> List[dict]:
+    """Find traces based on filters."""
+    state = cast(MCPState, ctx.request_context.lifespan_context)
     
-    langfuse_client, error = get_langfuse_client(ctx)
+    # Log the filters being used
+    logger.info(f"Finding traces with filters: {locals()}")
     
-    if not langfuse_client:
-        error_msg = f"Langfuse client not initialized: {error}"
-        logger.error(error_msg)
-        return [ExceptionCount(group=f"error: {error_msg}", count=0)]
-
-    to_timestamp = datetime.now(UTC)
-    from_timestamp = to_timestamp - timedelta(minutes=age)
+    # Convert string timestamps to datetime objects if needed
+    if from_timestamp and isinstance(from_timestamp, str):
+        try:
+            from_timestamp = datetime.fromisoformat(from_timestamp.replace('Z', '+00:00'))
+            logger.info(f"Converted from_timestamp string to datetime: {from_timestamp}")
+        except ValueError as e:
+            logger.error(f"Invalid from_timestamp format: {from_timestamp}. Error: {str(e)}")
+            raise ValueError(f"Invalid from_timestamp format: {from_timestamp}. Expected ISO format string.")
+            
+    if to_timestamp and isinstance(to_timestamp, str):
+        try:
+            to_timestamp = datetime.fromisoformat(to_timestamp.replace('Z', '+00:00'))
+            logger.info(f"Converted to_timestamp string to datetime: {to_timestamp}")
+        except ValueError as e:
+            logger.error(f"Invalid to_timestamp format: {to_timestamp}. Error: {str(e)}")
+            raise ValueError(f"Invalid to_timestamp format: {to_timestamp}. Expected ISO format string.")
     
     try:
-        # Use optimized fetching
-        observations = await _efficient_fetch_observations(
-            langfuse_client, 
-            from_timestamp, 
-            to_timestamp
+        # Use the fetch_traces method provided by the Langfuse SDK
+        response = state.langfuse_client.fetch_traces(
+            name=name,
+            user_id=user_id,
+            session_id=session_id,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            page=page,
+            limit=limit,
+            tags=tags
         )
         
-        # If we're grouping by file, we can use our optimized index
-        if group_by == "file":
-            counts = {filepath: len(obs_ids) for filepath, obs_ids in _FILE_TO_OBSERVATIONS_MAP.items()}
-            return [ExceptionCount(group=group, count=count) for group, count in counts.items()]
+        # Convert response to a serializable format
+        # The response is a FetchTracesResponse object with data and meta fields
+        traces = [trace.dict() if hasattr(trace, 'dict') else trace for trace in response.data]
         
-        # If we're grouping by type, we can use our optimized index
-        if group_by == "type":
-            counts = {exc_type: len(obs_ids) for exc_type, obs_ids in _EXCEPTION_TYPE_MAP.items()}
-            return [ExceptionCount(group=group, count=count) for group, count in counts.items()]
-        
-        # Otherwise, process the function paths
-        if group_by == "function":
-            values = []
-            for observation in observations.values():
-                if hasattr(observation, 'metadata') and observation.metadata:
-                    func = observation.metadata.get("code.function")
-                    if func:
-                        values.append(func)
-            
-            counts = Counter(values)
-            return [ExceptionCount(group=group, count=count) for group, count in counts.items()]
-        
-        logger.error(f"Invalid group_by parameter: {group_by}")
-        return [ExceptionCount(group=f"error: Invalid group_by parameter: {group_by}", count=0)]
-        
+        logger.info(f"Found {len(traces)} traces")
+        return traces
     except Exception as e:
-        logger.error(f"Error finding exceptions: {str(e)}", exc_info=True)
-        return [ExceptionCount(group=f"error: {str(e)}", count=0)]
+        logger.error(f"Error finding traces: {str(e)}")
+        logger.exception(e)
+        raise
+
+
+async def find_exceptions(
+    ctx: Context,
+    age: int,
+    group_by: str = "file"
+) -> List[ExceptionCount]:
+    """Get exception counts grouped by file path, function, or type.
+    
+    Args:
+        age: Number of minutes to look back
+        group_by: How to group exceptions - 'file', 'function', or 'type'
+    """
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+    
+    # Calculate from_timestamp based on age
+    from_timestamp = datetime.now(UTC) - timedelta(minutes=age)
+    to_timestamp = datetime.now(UTC)
+    
+    try:
+        # Fetch all SPAN observations since they may contain exceptions
+        response = state.langfuse_client.fetch_observations(
+            type="SPAN",
+            from_start_time=from_timestamp,
+            to_start_time=to_timestamp,
+            limit=100  # Adjust based on your needs
+        )
+        
+        # Process observations to find and group exceptions
+        exception_groups = Counter()
+        
+        for observation in response.data:
+            # Check if this observation has exception events
+            if hasattr(observation, 'events'):
+                for event in observation.events:
+                    if not isinstance(event, dict):
+                        event_dict = event.dict() if hasattr(event, 'dict') else {}
+                    else:
+                        event_dict = event
+                        
+                    # Check if this is an exception event
+                    if event_dict.get('attributes', {}).get('exception.type'):
+                        # Get the grouping key based on group_by parameter
+                        if group_by == 'file':
+                            # Group by file path from metadata
+                            if hasattr(observation, 'metadata') and observation.metadata:
+                                meta = observation.metadata
+                                if isinstance(meta, dict) and meta.get('code.filepath'):
+                                    group_key = meta.get('code.filepath')
+                                else:
+                                    group_key = 'unknown_file'
+                            else:
+                                group_key = 'unknown_file'
+                        elif group_by == 'function':
+                            # Group by function name from metadata
+                            if hasattr(observation, 'metadata') and observation.metadata:
+                                meta = observation.metadata
+                                if isinstance(meta, dict) and meta.get('code.function'):
+                                    group_key = meta.get('code.function')
+                                else:
+                                    group_key = 'unknown_function'
+                            else:
+                                group_key = 'unknown_function'
+                        elif group_by == 'type':
+                            # Group by exception type
+                            group_key = event_dict.get('attributes', {}).get('exception.type', 'unknown_exception')
+                        else:
+                            group_key = 'unknown'
+                            
+                        # Increment the counter for this group
+                        exception_groups[group_key] += 1
+        
+        # Convert counter to list of ExceptionCount objects
+        results = [
+            ExceptionCount(group=group, count=count)
+            for group, count in exception_groups.most_common(50)  # Limit to 50 most common
+        ]
+        
+        logger.info(f"Found {len(results)} exception groups")
+        return results
+    except Exception as e:
+        logger.error(f"Error finding exceptions: {str(e)}")
+        logger.exception(e)
+        raise
 
 
 async def find_exceptions_in_file(
     ctx: Context,
-    filepath: str = Field(..., description="Path to the file to analyze"),
-    age: ValidatedAge = Field(..., description="Number of minutes to look back (max 7 days)"),
+    filepath: str,
+    age: int
 ) -> List[dict]:
-    """Get detailed info about exceptions in a specific file.
+    """Get detailed exception info for a specific file.
     
     Args:
-        ctx: MCP context providing access to server state.
-        filepath: Path to the file to analyze.
-        age: Number of minutes to look back (max 7 days).
-        
-    Returns:
-        List of dictionaries with exception details.
+        filepath: Path to the file to search for exceptions
+        age: Number of minutes to look back
     """
-    logger.info(f"Getting exception details for file: {filepath}, age: {age} minutes")
-    if not filepath:
-        logger.error("No filepath provided")
-        return [{"error": "filepath is required"}]
+    state = cast(MCPState, ctx.request_context.lifespan_context)
     
-    langfuse_client, error = get_langfuse_client(ctx)
-    
-    if not langfuse_client:
-        error_msg = f"Langfuse client not initialized: {error}"
-        logger.error(error_msg)
-        return [{"error": error_msg}]
-    
+    # Calculate from_timestamp based on age
+    from_timestamp = datetime.now(UTC) - timedelta(minutes=age)
     to_timestamp = datetime.now(UTC)
-    from_timestamp = to_timestamp - timedelta(minutes=age)
-    
-    # Check if we have cached results for this filepath
-    cache_key = f"{from_timestamp.isoformat()}-{to_timestamp.isoformat()}-{filepath}"
-    if cache_key in _EXCEPTIONS_BY_FILEPATH:
-        logger.info(f"Using cached exception details for {filepath}")
-        return _EXCEPTIONS_BY_FILEPATH[cache_key]
     
     try:
-        # Use optimized fetching with filepath filter
-        observations = await _efficient_fetch_observations(
-            langfuse_client, 
-            from_timestamp, 
-            to_timestamp,
-            filepath
+        # Fetch all SPAN observations since they may contain exceptions
+        response = state.langfuse_client.fetch_observations(
+            type="SPAN",
+            from_start_time=from_timestamp,
+            to_start_time=to_timestamp,
+            limit=100  # Adjust based on your needs
         )
         
-        exception_details = []
+        # Process observations to find exceptions in the specified file
+        exceptions = []
         
-        # Process exceptions
-        for observation in observations.values():
-            # Skip if no events
-            if not hasattr(observation, 'events') or not observation.events:
-                continue
+        for observation in response.data:
+            # Check if this observation is related to the specified file
+            file_matches = False
+            if hasattr(observation, 'metadata') and observation.metadata:
+                meta = observation.metadata
+                if isinstance(meta, dict) and meta.get('code.filepath') == filepath:
+                    file_matches = True
             
-            for event in observation.events:
-                exception_type = event.attributes.get("exception.type")
-                if not exception_type:
-                    continue
-                    
-                exception_info = {
-                    "observation_id": observation.id,
-                    "observation_name": observation.name,
-                    "timestamp": event.start_time.isoformat() if hasattr(event, 'start_time') else None,
-                    "exception_type": exception_type,
-                    "exception_message": event.attributes.get("exception.message"),
-                    "stacktrace": event.attributes.get("exception.stacktrace"),
-                    "file": filepath,
-                    "function": observation.metadata.get("code.function") if hasattr(observation, 'metadata') else None,
-                    "line_number": observation.metadata.get("code.lineno") if hasattr(observation, 'metadata') else None,
-                }
+            if not file_matches:
+                continue
                 
-                exception_details.append(exception_info)
+            # Check if this observation has exception events
+            if hasattr(observation, 'events'):
+                for event in observation.events:
+                    if not isinstance(event, dict):
+                        event_dict = event.dict() if hasattr(event, 'dict') else {}
+                    else:
+                        event_dict = event
+                        
+                    # Check if this is an exception event
+                    if event_dict.get('attributes', {}).get('exception.type'):
+                        # Extract exception details
+                        exception_info = {
+                            'observation_id': observation.id if hasattr(observation, 'id') else 'unknown',
+                            'trace_id': observation.trace_id if hasattr(observation, 'trace_id') else 'unknown',
+                            'timestamp': observation.start_time if hasattr(observation, 'start_time') else 'unknown',
+                            'exception_type': event_dict.get('attributes', {}).get('exception.type', 'unknown'),
+                            'exception_message': event_dict.get('attributes', {}).get('exception.message', ''),
+                            'exception_stacktrace': event_dict.get('attributes', {}).get('exception.stacktrace', ''),
+                            'function': meta.get('code.function', 'unknown') if isinstance(meta, dict) else 'unknown',
+                            'line_number': meta.get('code.lineno', 'unknown') if isinstance(meta, dict) else 'unknown',
+                        }
+                        
+                        exceptions.append(exception_info)
         
-        # Cache the results
-        _EXCEPTIONS_BY_FILEPATH[cache_key] = exception_details
+        # Sort exceptions by timestamp (newest first)
+        exceptions.sort(key=lambda x: x['timestamp'] if isinstance(x['timestamp'], str) else '', reverse=True)
         
-        if not exception_details:
-            logger.info(f"No exceptions found for file: {filepath}")
-            return [{"message": f"No exceptions found for file: {filepath}"}]
-        
-        logger.info(f"Found {len(exception_details)} exceptions")
-        return exception_details
+        logger.info(f"Found {len(exceptions)} exceptions in file {filepath}")
+        return exceptions[:10]  # Return at most 10 exceptions
     except Exception as e:
-        logger.error(f"Error getting exception details: {str(e)}", exc_info=True)
-        return [{"error": f"Failed to get exception details: {str(e)}"}]
+        logger.error(f"Error finding exceptions in file {filepath}: {str(e)}")
+        logger.exception(e)
+        raise
 
 
 async def get_session(
     ctx: Context,
-    session_id: str = Field(..., description="ID of the session to retrieve"),
+    session_id: str
 ) -> dict:
-    """Retrieve a session by ID.
+    """Get session details by ID.
     
     Args:
-        ctx: MCP context with access to Langfuse client
-        session_id: ID of the session to retrieve
-        
-    Returns:
-        Session data as a dictionary
+        session_id: The ID of the session to retrieve
     """
-    logger.info(f"Getting session with ID: {session_id}")
-    if not session_id:
-        logger.error("No session_id provided")
-        return {"error": "session_id is required"}
-    
-    langfuse_client, error = get_langfuse_client(ctx)
-    
-    if not langfuse_client:
-        error_msg = f"Langfuse client not initialized: {error}"
-        logger.error(error_msg)
-        return {"error": error_msg}
+    state = cast(MCPState, ctx.request_context.lifespan_context)
     
     try:
-        sessions_response = langfuse_client.fetch_sessions()
+        # Fetch traces with this session ID
+        response = state.langfuse_client.fetch_traces(
+            session_id=session_id,
+            limit=50  # Get a reasonable number of traces for this session
+        )
         
-        # Filter sessions by id on the client side
-        matching_sessions = [s for s in sessions_response.data if s.id == session_id]
+        # If no traces were found, return an empty dict
+        if not response.data:
+            logger.info(f"No session found with ID: {session_id}")
+            return {
+                "id": session_id,
+                "traces": [],
+                "found": False
+            }
+            
+        # Convert traces to a serializable format
+        traces = [trace.dict() if hasattr(trace, 'dict') else trace for trace in response.data]
         
-        if not matching_sessions:
-            logger.warning(f"No session found with ID: {session_id}")
-            return {"error": f"Session not found: {session_id}"}
+        # Create a session object with all traces that have this session ID
+        session = {
+            "id": session_id,
+            "traces": traces,
+            "trace_count": len(traces),
+            "first_timestamp": traces[0].get("timestamp") if traces else None,
+            "last_timestamp": traces[-1].get("timestamp") if traces else None,
+            "user_id": traces[0].get("user_id") if traces else None,
+            "found": True
+        }
         
-        session = matching_sessions[0]
-        logger.info(f"Found session: {session.id}")
-        
-        # Convert to dict for serialization
-        return session.dict()
+        logger.info(f"Found session {session_id} with {len(traces)} traces")
+        return session
     except Exception as e:
-        logger.error(f"Error retrieving session: {str(e)}", exc_info=True)
-        return {"error": f"Failed to retrieve session: {str(e)}"}
+        logger.error(f"Error getting session {session_id}: {str(e)}")
+        logger.exception(e)
+        raise
 
 
 async def get_user_sessions(
     ctx: Context,
-    user_id: str = Field(..., description="ID of the user"),
-    from_timestamp: Optional[datetime] = Field(None, description="Start time (ISO 8601 format)"),
-    to_timestamp: Optional[datetime] = Field(None, description="End time (ISO 8601 format)"),
+    user_id: str,
+    from_timestamp: Optional[Union[datetime, str]] = None,
+    to_timestamp: Optional[Union[datetime, str]] = None
 ) -> List[dict]:
-    """Retrieve sessions for a user within a time range.
+    """Get sessions for a user within a time range.
     
     Args:
-        ctx: MCP context with access to Langfuse client
-        user_id: ID of the user
-        from_timestamp: Start time (ISO 8601)
-        to_timestamp: End time (ISO 8601)
-        
-    Returns:
-        List of session dictionaries
+        user_id: The ID of the user to retrieve sessions for
+        from_timestamp: Optional start time for filtering
+        to_timestamp: Optional end time for filtering
     """
-    logger.info(f"Getting sessions for user: {user_id}")
-    if not user_id:
-        logger.error("No user_id provided")
-        return [{"error": "user_id is required"}]
+    state = cast(MCPState, ctx.request_context.lifespan_context)
     
-    langfuse_client, error = get_langfuse_client(ctx)
-    
-    if not langfuse_client:
-        error_msg = f"Langfuse client not initialized: {error}"
-        logger.error(error_msg)
-        return [{"error": error_msg}]
+    # Convert string timestamps to datetime objects if needed
+    if from_timestamp and isinstance(from_timestamp, str):
+        try:
+            from_timestamp = datetime.fromisoformat(from_timestamp.replace('Z', '+00:00'))
+            logger.info(f"Converted from_timestamp string to datetime: {from_timestamp}")
+        except ValueError as e:
+            logger.error(f"Invalid from_timestamp format: {from_timestamp}. Error: {str(e)}")
+            raise ValueError(f"Invalid from_timestamp format: {from_timestamp}. Expected ISO format string.")
+            
+    if to_timestamp and isinstance(to_timestamp, str):
+        try:
+            to_timestamp = datetime.fromisoformat(to_timestamp.replace('Z', '+00:00'))
+            logger.info(f"Converted to_timestamp string to datetime: {to_timestamp}")
+        except ValueError as e:
+            logger.error(f"Invalid to_timestamp format: {to_timestamp}. Error: {str(e)}")
+            raise ValueError(f"Invalid to_timestamp format: {to_timestamp}. Expected ISO format string.")
     
     try:
-        sessions_response = langfuse_client.fetch_sessions(
-            from_timestamp=from_timestamp,
-            to_timestamp=to_timestamp,
-        )
-        
-        # Get traces for the user to find associated sessions
-        traces_response = langfuse_client.fetch_traces(
+        # Fetch traces for this user
+        response = state.langfuse_client.fetch_traces(
             user_id=user_id,
             from_timestamp=from_timestamp,
             to_timestamp=to_timestamp,
+            limit=100  # Get a reasonable number of traces
         )
         
-        # Extract session IDs from traces
-        session_ids = {trace.session_id for trace in traces_response.data if trace.session_id}
-        logger.info(f"Found {len(session_ids)} unique session IDs for user {user_id}")
+        # If no traces were found, return an empty list
+        if not response.data:
+            logger.info(f"No sessions found for user: {user_id}")
+            return []
+            
+        # Convert traces to a serializable format
+        traces = [trace.dict() if hasattr(trace, 'dict') else trace for trace in response.data]
         
-        # Filter sessions to only include those associated with the user's traces
-        user_sessions = [session for session in sessions_response.data if session.id in session_ids]
+        # Group traces by session_id
+        sessions_dict = {}
+        for trace in traces:
+            session_id = trace.get("session_id")
+            if not session_id:
+                continue
+                
+            if session_id not in sessions_dict:
+                sessions_dict[session_id] = {
+                    "id": session_id,
+                    "traces": [],
+                    "first_timestamp": None,
+                    "last_timestamp": None,
+                    "user_id": user_id
+                }
+                
+            # Add trace to this session
+            sessions_dict[session_id]["traces"].append(trace)
+            
+            # Update timestamps
+            trace_timestamp = trace.get("timestamp")
+            if trace_timestamp:
+                if not sessions_dict[session_id]["first_timestamp"] or trace_timestamp < sessions_dict[session_id]["first_timestamp"]:
+                    sessions_dict[session_id]["first_timestamp"] = trace_timestamp
+                if not sessions_dict[session_id]["last_timestamp"] or trace_timestamp > sessions_dict[session_id]["last_timestamp"]:
+                    sessions_dict[session_id]["last_timestamp"] = trace_timestamp
         
-        logger.info(f"Returning {len(user_sessions)} sessions for user {user_id}")
-        # Include userId in each session
-        return [{"userId": user_id, **session.dict()} for session in user_sessions]
+        # Convert to list and add trace counts
+        sessions = list(sessions_dict.values())
+        for session in sessions:
+            session["trace_count"] = len(session["traces"])
+        
+        # Sort sessions by most recent last_timestamp
+        sessions.sort(key=lambda x: x["last_timestamp"] if x["last_timestamp"] else "", reverse=True)
+        
+        logger.info(f"Found {len(sessions)} sessions for user {user_id}")
+        return sessions
     except Exception as e:
-        logger.error(f"Error retrieving user sessions: {str(e)}", exc_info=True)
-        return [{"error": f"Failed to retrieve user sessions: {str(e)}"}]
+        logger.error(f"Error getting sessions for user {user_id}: {str(e)}")
+        logger.exception(e)
+        raise
 
 
 async def get_error_count(
     ctx: Context,
-    age: ValidatedAge = Field(..., description="Number of minutes to look back (max 7 days)"),
+    age: int
 ) -> dict:
-    """Get the number of traces with exceptions within the last N minutes.
+    """Get number of traces with exceptions in last N minutes.
     
     Args:
-        ctx: MCP context with access to Langfuse client
         age: Number of minutes to look back
-        
-    Returns:
-        Dictionary with error count
     """
-    logger.info(f"Getting error count for the past {age} minutes")
+    state = cast(MCPState, ctx.request_context.lifespan_context)
     
-    langfuse_client, error = get_langfuse_client(ctx)
+    # Calculate from_timestamp based on age
+    from_timestamp = datetime.now(UTC) - timedelta(minutes=age)
+    to_timestamp = datetime.now(UTC)
     
-    if not langfuse_client:
-        error_msg = f"Langfuse client not initialized: {error}"
-        logger.error(error_msg)
-        return {"error": error_msg}
-
     try:
-        to_timestamp = datetime.now(UTC)
-        from_timestamp = to_timestamp - timedelta(minutes=age)
-        logger.debug(f"Time range: {from_timestamp} to {to_timestamp}")
-
-        observations_response = langfuse_client.fetch_observations(
+        # Fetch all SPAN observations since they may contain exceptions
+        response = state.langfuse_client.fetch_observations(
+            type="SPAN",
             from_start_time=from_timestamp,
             to_start_time=to_timestamp,
-            type="SPAN",
+            limit=250  # Increase limit to get a good sample
         )
-        logger.info(f"Retrieved {len(observations_response.data)} spans from Langfuse")
-
-        # Count spans with errors
-        error_count = sum(1 for obs in observations_response.data if obs.level == "ERROR")
-        logger.info(f"Found {error_count} errors")
-
-        return {
-            "count": error_count,
-            "time_range": {
-                "from": from_timestamp.isoformat(),
-                "to": to_timestamp.isoformat()
-            }
-        }
-    except Exception as e:
-        logger.error(f"Error getting error count: {str(e)}", exc_info=True)
-        return {"error": f"Failed to get error count: {str(e)}"}
-
-
-async def get_data_schema(ctx: Context) -> str:
-    """Get the schema of trace, span, and event objects.
-    
-    Args:
-        ctx: MCP context (no Langfuse client needed for this)
         
-    Returns:
-        String with JSON schema description
-    """
-    logger.info("Getting Langfuse data schema")
-    
-    # This is a static description of the schema, no API call needed
-    schema = """
-    {
-        "Trace": {
-            "id": "string - unique trace identifier",
-            "name": "string - name of the trace",
-            "user_id": "string? - associated user",
-            "session_id": "string? - associated session",
-            "metadata": "Record<string, any>? - custom metadata",
-            "tags": "string[]? - tags for filtering",
-            "start_time": "ISO timestamp - when trace started",
-            "end_time": "ISO timestamp? - when trace completed",
-            "duration_ms": "number - execution time in milliseconds",
-            "observations": "Observation[] - spans and scores"
-        },
-        "Span": {
-            "id": "string - unique span identifier",
-            "trace_id": "string - parent trace",
-            "name": "string - name of the span",
-            "start_time": "ISO timestamp - when span started",
-            "end_time": "ISO timestamp? - when span completed",
-            "status": "SUCCESS | ERROR | INTERNAL_ERROR - execution status",
-            "metadata": "Record<string, any>? - custom metadata",
-            "input": "any? - input data",
-            "output": "any? - output data",
-            "level": "DEFAULT | DEBUG - visibility level",
-            "events": "Event[]? - timestamped events"
-        },
-        "Event": {
-            "id": "string - unique event identifier",
-            "timestamp": "ISO timestamp - when event occurred",
-            "attributes": "Record<string, any> - event data",
-            "type": "string - event type"
-        },
-        "Exception (in Event.attributes)": {
-            "exception.type": "string - exception class name",
-            "exception.message": "string - error message",
-            "exception.stacktrace": "string - full stack trace",
-            "code.filepath": "string? - source file",
-            "code.function": "string? - function name",
-            "code.lineno": "number? - line number"
+        # Count traces and observations with exceptions
+        trace_ids_with_exceptions = set()
+        observations_with_exceptions = 0
+        total_exceptions = 0
+        
+        for observation in response.data:
+            has_exception = False
+            exception_count = 0
+            
+            # Check if this observation has exception events
+            if hasattr(observation, 'events'):
+                for event in observation.events:
+                    if not isinstance(event, dict):
+                        event_dict = event.dict() if hasattr(event, 'dict') else {}
+                    else:
+                        event_dict = event
+                        
+                    # Check if this is an exception event
+                    if event_dict.get('attributes', {}).get('exception.type'):
+                        has_exception = True
+                        exception_count += 1
+            
+            if has_exception:
+                observations_with_exceptions += 1
+                total_exceptions += exception_count
+                
+                # Add the trace ID to our set
+                if hasattr(observation, 'trace_id') and observation.trace_id:
+                    trace_ids_with_exceptions.add(observation.trace_id)
+        
+        result = {
+            "age_minutes": age,
+            "from_timestamp": from_timestamp.isoformat(),
+            "to_timestamp": to_timestamp.isoformat(),
+            "trace_count": len(trace_ids_with_exceptions),
+            "observation_count": observations_with_exceptions,
+            "exception_count": total_exceptions
         }
-    }
-    """
-    
-    return schema
+        
+        logger.info(f"Found {total_exceptions} exceptions in {observations_with_exceptions} observations across {len(trace_ids_with_exceptions)} traces")
+        return result
+    except Exception as e:
+        logger.error(f"Error getting error count for the last {age} minutes: {str(e)}")
+        logger.exception(e)
+        raise
 
 
 async def get_exception_details(
     ctx: Context,
-    trace_id: str = Field(..., description="ID of the trace to analyze"),
-    span_id: Optional[str] = Field(None, description="Optional ID of the span (if specified, get exceptions for that span only)"),
+    trace_id: str,
+    span_id: Optional[str] = None
 ) -> List[dict]:
-    """Get detailed exception information for a trace or span.
+    """Get detailed exception info for a trace/span.
     
     Args:
-        ctx: MCP context providing access to server state.
-        trace_id: ID of the trace to analyze.
-        span_id: Optional ID of the span (if specified, get exceptions for that span only).
-        
-    Returns:
-        List of dictionaries with exception details.
+        trace_id: The ID of the trace to analyze for exceptions
+        span_id: Optional span ID to filter by specific span
     """
-    logger.info(f"Getting exception details for trace {trace_id}" + 
-                (f", span {span_id}" if span_id else ""))
+    state = cast(MCPState, ctx.request_context.lifespan_context)
     
-    langfuse_client, error = get_langfuse_client(ctx)
-    
-    if not langfuse_client:
-        error_msg = f"Langfuse client not initialized: {error}"
-        logger.error(error_msg)
-        return [{"error": error_msg}]
-        
     try:
-        if span_id:
-            # If span_id is provided, get that specific observation
-            observation = langfuse_client.fetch_observation(span_id)
-            if observation.trace_id != trace_id:
-                return [{"error": "Span does not belong to the specified trace"}]
-            spans = [observation]
-        else:
-            # Otherwise, get all observations for the trace
-            traces = langfuse_client.fetch_traces(trace_id=trace_id).data
-            if not traces:
-                return [{"error": f"Trace {trace_id} not found"}]
+        # First get the trace details
+        trace_response = state.langfuse_client.fetch_trace(trace_id)
+        if not trace_response or not trace_response.data:
+            logger.warning(f"Trace not found: {trace_id}")
+            return []
             
-            observations = traces[0].observations
-            # Get detailed observation data for each observation in the trace
-            spans = []
-            for obs in observations:
-                try:
-                    detailed_obs = langfuse_client.fetch_observation(obs.id)
-                    spans.append(detailed_obs)
-                except Exception as e:
-                    logger.warning(f"Error getting observation {obs.id}: {str(e)}")
-                    
-        # Extract exception details from spans
-        details = []
-        for span in spans:
-            if hasattr(span, 'events'):
-                for event in span.events or []:
-                    if event.attributes.get("exception.type"):
-                        details.append({
-                            "observation_id": span.id,
-                            "exception_type": event.attributes.get("exception.type"),
-                            "exception_message": event.attributes.get("exception.message"),
-                            "stacktrace": event.attributes.get("exception.stacktrace"),
-                            "timestamp": event.start_time.isoformat() if hasattr(event, 'start_time') else None,
-                            "metadata": span.metadata if hasattr(span, 'metadata') else None,
-                        })
+        # Get all observations for this trace
+        observations_response = state.langfuse_client.fetch_observations(
+            trace_id=trace_id,
+            limit=100  # Get a reasonable number of observations
+        )
+        
+        if not observations_response or not observations_response.data:
+            logger.warning(f"No observations found for trace: {trace_id}")
+            return []
+            
+        # Filter observations if span_id is provided
+        if span_id:
+            filtered_observations = [
+                obs for obs in observations_response.data 
+                if hasattr(obs, 'id') and obs.id == span_id
+            ]
+        else:
+            filtered_observations = observations_response.data
+            
+        # Process observations to find exceptions
+        exceptions = []
+        
+        for observation in filtered_observations:
+            # Check if this observation has exception events
+            if hasattr(observation, 'events'):
+                for event in observation.events:
+                    if not isinstance(event, dict):
+                        event_dict = event.dict() if hasattr(event, 'dict') else {}
+                    else:
+                        event_dict = event
                         
-        return details if details else [{"message": "No exceptions found in the specified trace"}]
+                    # Check if this is an exception event
+                    if event_dict.get('attributes', {}).get('exception.type'):
+                        # Get metadata for additional context
+                        metadata = {}
+                        if hasattr(observation, 'metadata') and observation.metadata:
+                            if isinstance(observation.metadata, dict):
+                                metadata = observation.metadata
+                        
+                        # Extract exception details
+                        exception_info = {
+                            'observation_id': observation.id if hasattr(observation, 'id') else 'unknown',
+                            'observation_name': observation.name if hasattr(observation, 'name') else 'unknown',
+                            'observation_type': observation.type if hasattr(observation, 'type') else 'unknown',
+                            'timestamp': observation.start_time if hasattr(observation, 'start_time') else 'unknown',
+                            'exception_type': event_dict.get('attributes', {}).get('exception.type', 'unknown'),
+                            'exception_message': event_dict.get('attributes', {}).get('exception.message', ''),
+                            'exception_stacktrace': event_dict.get('attributes', {}).get('exception.stacktrace', ''),
+                            'filepath': metadata.get('code.filepath', 'unknown'),
+                            'function': metadata.get('code.function', 'unknown'),
+                            'line_number': metadata.get('code.lineno', 'unknown'),
+                            'event_id': event_dict.get('id', 'unknown'),
+                            'event_name': event_dict.get('name', 'unknown'),
+                        }
+                        
+                        exceptions.append(exception_info)
+        
+        # Sort exceptions by timestamp (newest first)
+        exceptions.sort(key=lambda x: x['timestamp'] if isinstance(x['timestamp'], str) else '', reverse=True)
+        
+        logger.info(f"Found {len(exceptions)} exceptions in trace {trace_id}")
+        return exceptions
     except Exception as e:
-        logger.error(f"Error getting exception details: {str(e)}", exc_info=True)
-        return [{"error": f"Failed to get exception details: {str(e)}"}]
+        logger.error(f"Error getting exception details for trace {trace_id}: {str(e)}")
+        logger.exception(e)
+        raise
+
+
+async def get_data_schema(
+    ctx: Context,
+    dummy: str = ""
+) -> str:
+    """Get schema of trace, span and event objects.
+    
+    Args:
+        dummy: Unused parameter for API compatibility
+    """
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+    
+    # Use the dataclasses and models from Langfuse to generate a schema
+    schema = """
+# Langfuse Data Schema
+
+## Trace Schema
+A trace represents a complete request-response flow.
+
+```
+{
+  "id": "string",             // Unique identifier
+  "name": "string",           // Name of the trace
+  "user_id": "string",        // Optional user identifier
+  "session_id": "string",     // Optional session identifier
+  "timestamp": "datetime",    // When the trace was created
+  "metadata": "object",       // Optional JSON metadata
+  "tags": ["string"],         // Optional array of tag strings
+  "release": "string",        // Optional release version
+  "version": "string",        // Optional user-specified version
+  "observations": [           // Array of observation objects
+    {
+      // Observation fields (see below)
+    }
+  ]
+}
+```
+
+## Observation Schema
+An observation can be a span, generation, or event within a trace.
+
+```
+{
+  "id": "string",                 // Unique identifier
+  "trace_id": "string",           // Parent trace id
+  "parent_observation_id": "string", // Optional parent observation id
+  "name": "string",               // Name of the observation
+  "start_time": "datetime",       // When the observation started
+  "end_time": "datetime",         // When the observation ended (for spans/generations)
+  "type": "string",               // Type: SPAN, GENERATION, EVENT
+  "level": "string",              // Log level: DEBUG, DEFAULT, WARNING, ERROR
+  "status_message": "string",     // Optional status message
+  "metadata": "object",           // Optional JSON metadata
+  "input": "any",                 // Optional input data
+  "output": "any",                // Optional output data
+  "version": "string",            // Optional version
+  
+  // Generation-specific fields
+  "model": "string",              // LLM model name (for generations)
+  "model_parameters": "object",   // Model parameters (for generations)
+  "usage": "object",              // Token usage (for generations)
+  
+  "events": [                     // Array of event objects
+    {
+      // Event fields (see below)
+    }
+  ]
+}
+```
+
+## Event Schema
+Events are contained within observations for tracking specific state changes.
+
+```
+{
+  "id": "string",                 // Unique identifier
+  "name": "string",               // Name of the event
+  "start_time": "datetime",       // When the event occurred
+  "attributes": {                 // Event attributes
+    "exception.type": "string",       // Type of exception (for error events)
+    "exception.message": "string",    // Exception message (for error events)
+    "exception.stacktrace": "string", // Exception stack trace (for error events)
+    // ... other attributes
+  }
+}
+```
+
+## Score Schema
+Scores are evaluations attached to traces or observations.
+
+```
+{
+  "id": "string",             // Unique identifier
+  "name": "string",           // Score name 
+  "value": "number or string", // Score value (numeric or categorical)
+  "data_type": "string",      // NUMERIC, BOOLEAN, or CATEGORICAL
+  "trace_id": "string",       // Associated trace
+  "observation_id": "string", // Optional associated observation
+  "timestamp": "datetime",    // When the score was created
+  "comment": "string"         // Optional comment
+}
+```
+"""
+    
+    return schema
 
 
 async def get_trace(
     ctx: Context,
-    trace_id: str = Field(..., description="ID of the trace to retrieve"),
+    trace_id: str
 ) -> dict:
     """Get a single trace by ID with full details.
     
     Args:
-        ctx: MCP context with access to Langfuse client
-        trace_id: ID of the trace to retrieve
-        
-    Returns:
-        Trace object with full details as a dictionary
+        trace_id: The ID of the trace to fetch
     """
-    logger.info(f"Getting trace with ID: {trace_id}")
-    if not trace_id:
-        logger.error("No trace_id provided")
-        return {"error": "trace_id is required"}
-    
-    langfuse_client, error = get_langfuse_client(ctx)
-    
-    if not langfuse_client:
-        error_msg = f"Langfuse client not initialized: {error}"
-        logger.error(error_msg)
-        return {"error": error_msg}
+    state = cast(MCPState, ctx.request_context.lifespan_context)
     
     try:
-        trace_response = langfuse_client.fetch_trace(trace_id)
-        logger.info(f"Found trace: {trace_id}")
-        return trace_response.data.dict()
+        # Use the fetch_trace method provided by the Langfuse SDK
+        response = state.langfuse_client.fetch_trace(trace_id)
+        
+        # Convert response to a serializable format
+        trace = response.data.dict() if hasattr(response.data, 'dict') else response.data
+        
+        logger.info(f"Retrieved trace {trace_id}")
+        return trace
     except Exception as e:
-        logger.error(f"Error retrieving trace: {str(e)}", exc_info=True)
-        return {"error": f"Failed to retrieve trace: {str(e)}"}
+        logger.error(f"Error fetching trace {trace_id}: {str(e)}")
+        logger.exception(e)
+        raise
 
 
 async def get_observation(
     ctx: Context,
-    observation_id: str = Field(..., description="ID of the observation to retrieve"),
+    observation_id: str
 ) -> dict:
     """Get a single observation by ID.
     
     Args:
-        ctx: MCP context with access to Langfuse client
-        observation_id: ID of the observation to retrieve
-        
-    Returns:
-        Observation object as a dictionary
+        observation_id: The ID of the observation to fetch
     """
-    logger.info(f"Getting observation with ID: {observation_id}")
-    if not observation_id:
-        logger.error("No observation_id provided")
-        return {"error": "observation_id is required"}
-    
-    langfuse_client, error = get_langfuse_client(ctx)
-    
-    if not langfuse_client:
-        error_msg = f"Langfuse client not initialized: {error}"
-        logger.error(error_msg)
-        return {"error": error_msg}
+    state = cast(MCPState, ctx.request_context.lifespan_context)
     
     try:
-        observation = langfuse_client.fetch_observation(observation_id)
-        logger.info(f"Found observation: {observation_id}")
-        if hasattr(observation, 'dict'):
-            return observation.dict()
-        else:
-            # Convert to dict manually if dict() method is not available
-            return {
-                "id": observation.id,
-                "trace_id": observation.trace_id if hasattr(observation, 'trace_id') else None,
-                "name": observation.name if hasattr(observation, 'name') else None,
-                "start_time": observation.start_time.isoformat() if hasattr(observation, 'start_time') else None,
-                "end_time": observation.end_time.isoformat() if hasattr(observation, 'end_time') else None,
-                "metadata": observation.metadata if hasattr(observation, 'metadata') else None,
-                "type": observation.type if hasattr(observation, 'type') else None
-            }
+        # Use the fetch_observation method provided by the Langfuse SDK
+        response = state.langfuse_client.fetch_observation(observation_id)
+        
+        # Convert response to a serializable format
+        observation = response.data.dict() if hasattr(response.data, 'dict') else response.data
+        
+        logger.info(f"Retrieved observation {observation_id}")
+        return observation
     except Exception as e:
-        logger.error(f"Error retrieving observation: {str(e)}", exc_info=True)
-        return {"error": f"Failed to retrieve observation: {str(e)}"}
+        logger.error(f"Error fetching observation {observation_id}: {str(e)}")
+        logger.exception(e)
+        raise
 
 
 async def get_observations_by_type(
@@ -812,36 +860,26 @@ async def get_observations_by_type(
     from_start_time: Optional[datetime] = None,
     to_start_time: Optional[datetime] = None,
     page: int = 1,
-    limit: int = 50,
+    limit: int = 50
 ) -> List[dict]:
     """Get observations filtered by type.
     
     Args:
-        ctx: MCP context with access to Langfuse client
-        type: Filter by observation type (e.g., 'SPAN', 'GENERATION', 'SCORE')
-        name: Filter by observation name
-        user_id: Filter by user ID
-        trace_id: Filter by trace ID
-        parent_observation_id: Filter by parent observation ID
-        from_start_time: Start time range (ISO 8601)
-        to_start_time: End time range (ISO 8601)
-        page: Page number for pagination
-        limit: Items per page
-        
-    Returns:
-        List of observation dictionaries
+        type: The observation type to filter by (e.g., "SPAN", "GENERATION", "EVENT")
+        name: Optional name filter
+        user_id: Optional user ID filter
+        trace_id: Optional trace ID filter
+        parent_observation_id: Optional parent observation ID filter
+        from_start_time: Optional start time filter
+        to_start_time: Optional end time filter
+        page: Page number (starting from 1)
+        limit: Maximum number of observations to return
     """
-    logger.info(f"Getting observations of type: {type}")
-    
-    langfuse_client, error = get_langfuse_client(ctx)
-    
-    if not langfuse_client:
-        error_msg = f"Langfuse client not initialized: {error}"
-        logger.error(error_msg)
-        return [{"error": error_msg}]
+    state = cast(MCPState, ctx.request_context.lifespan_context)
     
     try:
-        observations_response = langfuse_client.fetch_observations(
+        # Use the fetch_observations method provided by the Langfuse SDK
+        response = state.langfuse_client.fetch_observations(
             type=type,
             name=name,
             user_id=user_id,
@@ -850,34 +888,21 @@ async def get_observations_by_type(
             from_start_time=from_start_time,
             to_start_time=to_start_time,
             page=page,
-            limit=limit,
+            limit=limit
         )
         
-        logger.info(f"Found {len(observations_response.data)} observations of type {type}")
+        # Convert response to a serializable format
+        observations = [obs.dict() if hasattr(obs, 'dict') else obs for obs in response.data]
         
-        # Convert observations to dictionaries
-        observations = []
-        for obs in observations_response.data:
-            if hasattr(obs, 'dict'):
-                observations.append(obs.dict())
-            else:
-                # Convert to dict manually if dict() method is not available
-                observations.append({
-                    "id": obs.id if hasattr(obs, 'id') else None,
-                    "trace_id": obs.trace_id if hasattr(obs, 'trace_id') else None,
-                    "name": obs.name if hasattr(obs, 'name') else None,
-                    "start_time": obs.start_time.isoformat() if hasattr(obs, 'start_time') else None,
-                    "end_time": obs.end_time.isoformat() if hasattr(obs, 'end_time') else None,
-                    "type": obs.type if hasattr(obs, 'type') else None,
-                })
-        
+        logger.info(f"Found {len(observations)} observations of type '{type}'")
         return observations
     except Exception as e:
-        logger.error(f"Error retrieving observations: {str(e)}", exc_info=True)
-        return [{"error": f"Failed to retrieve observations: {str(e)}"}]
+        logger.error(f"Error fetching observations of type '{type}': {str(e)}")
+        logger.exception(e)
+        raise
 
 
-def app_factory(public_key: str, secret_key: str, host: str, no_auth_check: bool = False) -> FastMCP:
+def app_factory(public_key: str, secret_key: str, host: str, no_auth_check: bool = False, cache_size: int = 100) -> FastMCP:
     """Create a FastMCP server with Langfuse tools.
     
     Args:
@@ -885,42 +910,50 @@ def app_factory(public_key: str, secret_key: str, host: str, no_auth_check: bool
         secret_key: Langfuse secret key
         host: Langfuse API host URL
         no_auth_check: Skip authentication check
+        cache_size: Size of LRU caches used for caching data
         
     Returns:
         FastMCP server instance
     """
     @asynccontextmanager
     async def lifespan(server: FastMCP) -> AsyncIterator[MCPState]:
-        """Create and manage the lifespan of the Langfuse client."""
-        logger.info(f"Initializing Langfuse client with host: {host}")
+        """Initialize and cleanup MCP server state.
         
-        # Create the Langfuse client
-        langfuse_client = Langfuse(
-            public_key=public_key, 
-            secret_key=secret_key,
-            host=host,
-            debug=True
+        Args:
+            server: MCP server instance
+            
+        Returns:
+            AsyncIterator yielding MCPState
+        """
+        # Initialize state
+        state = MCPState(
+            langfuse_client=Langfuse(
+                public_key=public_key,
+                secret_key=secret_key,
+                host=host,
+                debug=True
+            ),
+            observation_cache=LRUCache(maxsize=cache_size),
+            file_to_observations_map=LRUCache(maxsize=cache_size),
+            exception_type_map=LRUCache(maxsize=cache_size),
+            exceptions_by_filepath=LRUCache(maxsize=cache_size)
         )
         
-        # Run authentication check if required
         if not no_auth_check:
-            auth_result = langfuse_client.auth_check()
+            logger.info("Running authentication check...")
+            auth_result = state.langfuse_client.auth_check()
             if not auth_result:
-                raise ValueError("Authentication failed with the provided credentials")
-            logger.info("Authentication successful")
+                raise ValueError("Authentication failed with provided credentials")
         
-        logger.info("Langfuse client initialized successfully")
-        
-        # Yield the state with the client for the duration of the lifespan
         try:
-            yield MCPState(langfuse_client=langfuse_client)
+            yield state
         finally:
-            # Clean up the client
-            langfuse_client.flush()
-            langfuse_client.shutdown()
-            logger.info("Langfuse client shutdown complete")
+            # Cleanup
+            logger.info("Cleaning up Langfuse client")
+            state.langfuse_client.flush()
+            state.langfuse_client.shutdown()
 
-    # Create the MCP server
+    # Create the MCP server with lifespan context manager
     mcp = FastMCP("Langfuse MCP Server", lifespan=lifespan)
     
     # Register all tools
@@ -941,6 +974,11 @@ def app_factory(public_key: str, secret_key: str, host: str, no_auth_check: bool
 
 def main():
     """Entry point for the langfuse_mcp package."""
+    logger.info("=" * 80)
+    logger.info(f"Starting Langfuse MCP v{__version__}")
+    logger.info(f"Python executable: {sys.executable}")
+    logger.info("=" * 80)
+
     parser = argparse.ArgumentParser(description="Langfuse MCP Server")
     parser.add_argument(
         "--public-key",
@@ -965,14 +1003,22 @@ def main():
         action="store_true",
         help="Skip authentication check"
     )
+    parser.add_argument(
+        "--cache-size",
+        type=int,
+        default=100,
+        help="Size of LRU caches used for caching data"
+    )
     
     args = parser.parse_args()
     
+    logger.info(f"Starting MCP - host:{args.host} auth:{not args.no_auth_check} cache:{args.cache_size} keys:{args.public_key[:4]}.../{args.secret_key[:4]}...")
     app = app_factory(
         public_key=args.public_key,
         secret_key=args.secret_key,
         host=args.host,
-        no_auth_check=args.no_auth_check
+        no_auth_check=args.no_auth_check,
+        cache_size=args.cache_size
     )
     
     app.run(transport="stdio")
