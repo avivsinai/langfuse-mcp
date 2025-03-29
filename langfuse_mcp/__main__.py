@@ -857,8 +857,8 @@ async def get_observations_by_type(
     user_id: Optional[str] = None,
     trace_id: Optional[str] = None,
     parent_observation_id: Optional[str] = None,
-    from_start_time: Optional[datetime] = None,
-    to_start_time: Optional[datetime] = None,
+    from_start_time: Optional[Union[datetime, str]] = None,
+    to_start_time: Optional[Union[datetime, str]] = None,
     page: int = 1,
     limit: int = 50
 ) -> List[dict]:
@@ -876,6 +876,23 @@ async def get_observations_by_type(
         limit: Maximum number of observations to return
     """
     state = cast(MCPState, ctx.request_context.lifespan_context)
+    
+    # Convert string timestamps to datetime objects if needed
+    if from_start_time and isinstance(from_start_time, str):
+        try:
+            from_start_time = datetime.fromisoformat(from_start_time.replace('Z', '+00:00'))
+            logger.info(f"Converted from_start_time string to datetime: {from_start_time}")
+        except ValueError as e:
+            logger.error(f"Invalid from_start_time format: {from_start_time}. Error: {str(e)}")
+            raise ValueError(f"Invalid from_start_time format: {from_start_time}. Expected ISO format string.")
+            
+    if to_start_time and isinstance(to_start_time, str):
+        try:
+            to_start_time = datetime.fromisoformat(to_start_time.replace('Z', '+00:00'))
+            logger.info(f"Converted to_start_time string to datetime: {to_start_time}")
+        except ValueError as e:
+            logger.error(f"Invalid to_start_time format: {to_start_time}. Error: {str(e)}")
+            raise ValueError(f"Invalid to_start_time format: {to_start_time}. Expected ISO format string.")
     
     try:
         # Use the fetch_observations method provided by the Langfuse SDK
