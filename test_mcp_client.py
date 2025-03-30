@@ -92,8 +92,8 @@ async def main():
             
             try:
                 # Calculate timestamps for past 48 hours
-                now = datetime.now(UTC).isoformat()
-                two_days_ago = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+                now = datetime.now(UTC)
+                two_days_ago = datetime.now(UTC) - timedelta(days=2)
                 
                 # Find traces with a larger limit and time range
                 result = await session.call_tool("find_traces", {
