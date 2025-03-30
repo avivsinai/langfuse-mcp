@@ -188,6 +188,20 @@ async def main():
                             # Show details for first few observations
                             for i, obs in enumerate(observations[:3]):
                                 logger.info(f"    Observation {i+1}: Type={obs.get('type')}, Name={obs.get('name')}")
+                                
+                            # Log full response length for verification
+                            logger.info(f"Full trace response length: {len(detailed_content)} characters")
+                            logger.info(f"First observation has truncated fields: {'...' in json.dumps(observations[0]) if observations else False}")
+                            
+                            # Check if any input or output fields were truncated
+                            truncated_count = 0
+                            for obs in observations:
+                                if isinstance(obs.get('input'), str) and '...' in obs.get('input', ''):
+                                    truncated_count += 1
+                                if isinstance(obs.get('output'), str) and '...' in obs.get('output', ''):
+                                    truncated_count += 1
+                            
+                            logger.info(f"Number of truncated input/output fields found: {truncated_count}")
                         except json.JSONDecodeError as e:
                             logger.error(f"Error parsing trace JSON: {e}")
                             logger.info(f"First 100 chars of trace response: {detailed_content[:100]}")
