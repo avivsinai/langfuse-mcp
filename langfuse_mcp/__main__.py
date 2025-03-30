@@ -456,7 +456,7 @@ async def find_exceptions_in_file(
 
 async def get_session(
     ctx: Context,
-    session_id: str
+    session_id: str = Field(..., description="The ID of the session to retrieve (unique identifier string)")
 ) -> dict:
     """Get session details by ID.
     
@@ -670,8 +670,8 @@ async def get_error_count(
 
 async def get_exception_details(
     ctx: Context,
-    trace_id: str,
-    span_id: Optional[str] = None
+    trace_id: str = Field(..., description="The ID of the trace to analyze for exceptions (unique identifier string)"),
+    span_id: Optional[str] = Field(None, description="Optional span ID to filter by specific span (unique identifier string)")
 ) -> List[dict]:
     """Get detailed exception info for a trace/span.
     
@@ -871,7 +871,7 @@ Scores are evaluations attached to traces or observations.
 
 async def get_trace(
     ctx: Context,
-    trace_id: str
+    trace_id: str = Field(..., description="The ID of the trace to fetch (unique identifier string)")
 ) -> dict:
     """Get a single trace by ID with full details.
     
@@ -900,7 +900,7 @@ async def get_trace(
 
 async def get_observation(
     ctx: Context,
-    observation_id: str
+    observation_id: str = Field(..., description="The ID of the observation to fetch (unique identifier string)")
 ) -> dict:
     """Get a single observation by ID.
     
