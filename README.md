@@ -154,3 +154,9 @@ def _get_cached_observation(langfuse_client, observation_id: str):
 ```
 
 This implementation automatically removes the oldest accessed items when the cache exceeds its maximum size.
+
+## Version History
+
+- 0.1.2 - Implemented dynamic versioning using uv-dynamic-versioning
+- 0.1.1 - Initial release with dynamic versioning
+- 0.1.0 - Initial public release
