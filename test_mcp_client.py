@@ -79,8 +79,10 @@ async def main():
                 logger.info("Tool execution successful!")
                 
                 # Display result data safely
-                if hasattr(result, 'data'):
-                    logger.info(f"Result data: {result.data}")
+                if hasattr(result, 'content') and result.content:
+                    error_count_text = result.content[0].text if result.content[0].text else "{}"
+                    error_count_data = json.loads(error_count_text)
+                    logger.info(f"Error count data: {error_count_data}")
                 else:
                     logger.info(f"Result: {result}")
             except Exception as e:
@@ -105,46 +107,50 @@ async def main():
                 # Extract and display trace information
                 if hasattr(result, 'content') and result.content:
                     # Parse JSON from the text content
-                    text_content = result.content[0].text if result.content[0].text else "{}"
-                    logger.info(f"Raw response: {text_content[:200]}...")  # Show first part of response
+                    text_content = result.content[0].text if result.content[0].text else "[]"
+                    logger.info(f"Raw response length: {len(text_content)} chars")  # Show length of response
                     
-                    traces_data = json.loads(text_content)
-                    
-                    # Handle both single trace (dict) and multiple traces (list)
-                    traces_list = []
-                    if isinstance(traces_data, dict):
-                        # Single trace
-                        traces_list = [traces_data]
-                        logger.info("Found a single trace")
-                    elif isinstance(traces_data, list):
-                        # Multiple traces
-                        traces_list = traces_data
-                        logger.info(f"Found {len(traces_list)} traces")
-                    
-                    if len(traces_list) == 0:
-                        logger.info("No traces found in the past 48 hours. Check if your Langfuse account has traces.")
-                    else:
-                        # Display details of each trace (up to 5)
-                        for i, trace in enumerate(traces_list[:5]):
-                            trace_id = trace.get("id", "unknown")
-                            trace_name = trace.get("name", "unnamed")
-                            trace_time = trace.get("timestamp", "unknown")
-                            
-                            logger.info(f"Trace {i+1}: ID={trace_id}, Name={trace_name}, Time={trace_time}")
-                            
-                            # If the trace has observations, count them
-                            observations = trace.get("observations", [])
-                            if observations:
-                                logger.info(f"  - Contains {len(observations)} observations")
-                            
-                            # Display user info if available
-                            user_id = trace.get("user_id")
-                            if user_id:
-                                logger.info(f"  - User ID: {user_id}")
-                            
-                            # Save the first trace ID for detailed lookup
-                            if i == 0:
-                                trace_id = trace_id
+                    try:
+                        traces_data = json.loads(text_content)
+                        
+                        # Handle both single trace (dict) and multiple traces (list)
+                        traces_list = []
+                        if isinstance(traces_data, dict):
+                            # Single trace
+                            traces_list = [traces_data]
+                            logger.info("Found a single trace")
+                        elif isinstance(traces_data, list):
+                            # Multiple traces
+                            traces_list = traces_data
+                            logger.info(f"Found {len(traces_list)} traces")
+                        
+                        if not traces_list:
+                            logger.info("No traces found in the past 48 hours. Check if your Langfuse account has traces.")
+                        else:
+                            # Display details of each trace (up to 5)
+                            for i, trace in enumerate(traces_list[:5]):
+                                trace_id = trace.get("id", "unknown")
+                                trace_name = trace.get("name", "unnamed")
+                                trace_time = trace.get("timestamp", "unknown")
+                                
+                                logger.info(f"Trace {i+1}: ID={trace_id}, Name={trace_name}, Time={trace_time}")
+                                
+                                # If the trace has observations, count them
+                                observations = trace.get("observations", [])
+                                if observations:
+                                    logger.info(f"  - Contains {len(observations)} observations")
+                                
+                                # Display user info if available
+                                user_id = trace.get("user_id")
+                                if user_id:
+                                    logger.info(f"  - User ID: {user_id}")
+                                
+                                # Save the first trace ID for detailed lookup
+                                if i == 0:
+                                    trace_id = trace_id
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Error parsing JSON response: {e}")
+                        logger.info(f"First 100 chars of response: {text_content[:100]}")
                 else:
                     logger.info(f"Raw result: {result}")
             except Exception as e:
@@ -155,34 +161,61 @@ async def main():
             if trace_id and trace_id != "unknown":
                 logger.info(f"\nFetching detailed information for trace: {trace_id}")
                 try:
-                    trace_result = await session.call_tool("get_trace", {
+                    trace_result = await session.call_tool("fetch_trace", {
                         "trace_id": trace_id
                     })
                     
                     if hasattr(trace_result, 'content') and trace_result.content:
                         detailed_content = trace_result.content[0].text if trace_result.content[0].text else "{}"
-                        detailed_trace = json.loads(detailed_content)
-                        
-                        # Display trace details
-                        logger.info("Trace details:")
-                        logger.info(f"  Name: {detailed_trace.get('name')}")
-                        logger.info(f"  Start time: {detailed_trace.get('timestamp')}")
-                        logger.info(f"  Duration: {detailed_trace.get('duration_ms')} ms")
-                        
-                        # Display metadata if available
-                        metadata = detailed_trace.get('metadata')
-                        if metadata:
-                            logger.info(f"  Metadata: {json.dumps(metadata, indent=2)[:200]}...")
-                        
-                        # Display observations
-                        observations = detailed_trace.get('observations', [])
-                        logger.info(f"  Observations: {len(observations)}")
-                        
-                        # Show details for first few observations
-                        for i, obs in enumerate(observations[:3]):
-                            logger.info(f"    Observation {i+1}: Type={obs.get('type')}, Name={obs.get('name')}")
+                        try:
+                            detailed_trace = json.loads(detailed_content)
+                            
+                            # Display trace details
+                            logger.info("Trace details:")
+                            logger.info(f"  Name: {detailed_trace.get('name')}")
+                            logger.info(f"  Start time: {detailed_trace.get('timestamp')}")
+                            logger.info(f"  Duration: {detailed_trace.get('duration_ms')} ms")
+                            
+                            # Display metadata if available
+                            metadata = detailed_trace.get('metadata')
+                            if metadata:
+                                logger.info(f"  Metadata: {json.dumps(metadata, indent=2)[:200]}...")
+                            
+                            # Display observations
+                            observations = detailed_trace.get('observations', [])
+                            logger.info(f"  Observations: {len(observations)}")
+                            
+                            # Show details for first few observations
+                            for i, obs in enumerate(observations[:3]):
+                                logger.info(f"    Observation {i+1}: Type={obs.get('type')}, Name={obs.get('name')}")
+                        except json.JSONDecodeError as e:
+                            logger.error(f"Error parsing trace JSON: {e}")
+                            logger.info(f"First 100 chars of trace response: {detailed_content[:100]}")
                 except Exception as e:
                     logger.error(f"Error retrieving trace details: {e}")
+                    logger.exception(e)
+            
+            # Test find_exceptions
+            logger.info("\nTesting find_exceptions tool...")
+            try:
+                result = await session.call_tool("find_exceptions", {"age": 1440, "group_by": "file"})
+                logger.info("find_exceptions executed successfully!")
+                
+                if hasattr(result, 'content') and result.content:
+                    exceptions_text = result.content[0].text if result.content[0].text else "[]"
+                    try:
+                        exceptions_data = json.loads(exceptions_text)
+                        logger.info(f"Found {len(exceptions_data)} exception groups")
+                        
+                        # Display first few exception groups
+                        for i, exception in enumerate(exceptions_data[:3]):
+                            logger.info(f"  Exception group {i+1}: {exception.get('group')} - Count: {exception.get('count')}")
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Error parsing exceptions JSON: {e}")
+                        logger.info(f"First 100 chars of exceptions response: {exceptions_text[:100]}")
+            except Exception as e:
+                logger.error(f"Error executing find_exceptions: {e}")
+                logger.exception(e)
             
             # Shutdown session
             logger.info("\nShutting down session...")

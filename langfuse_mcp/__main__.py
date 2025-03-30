@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from logging.handlers import RotatingFileHandler
-from typing import Annotated, Any, Literal, Optional, Union, cast, List
+from typing import Annotated, Any, Literal, Union, cast, List, Dict
 
 from cachetools import LRUCache
 from langfuse import Langfuse
@@ -128,7 +128,7 @@ def clear_caches(state: MCPState) -> None:
 
 
 @lru_cache(maxsize=1000)
-def _get_cached_observation(langfuse_client: Langfuse, observation_id: str) -> Optional[Any]:
+def _get_cached_observation(langfuse_client: Langfuse, observation_id: str) -> Any:
     """Cache observation details to avoid duplicate API calls."""
     try:
         return langfuse_client.fetch_observation(observation_id).data
@@ -141,7 +141,7 @@ async def _efficient_fetch_observations(
     state: MCPState, 
     from_timestamp: datetime, 
     to_timestamp: datetime,
-    filepath: Optional[str] = None
+    filepath: str = None
 ) -> dict[str, Any]:
     """Efficiently fetch observations with exception filtering.
     
@@ -207,13 +207,13 @@ async def _efficient_fetch_observations(
 async def fetch_traces(
     ctx: Context,
     age: int = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)"),
-    name: Optional[str] = Field(None, description="Name of the trace to filter by"),
-    user_id: Optional[str] = Field(None, description="User ID to filter traces by"),
-    session_id: Optional[str] = Field(None, description="Session ID to filter traces by"),
-    metadata: Optional[dict] = Field(None, description="Metadata fields to filter by"),
+    name: str = Field(None, description="Name of the trace to filter by"),
+    user_id: str = Field(None, description="User ID to filter traces by"),
+    session_id: str = Field(None, description="Session ID to filter traces by"),
+    metadata: dict = Field(None, description="Metadata fields to filter by"),
     page: int = Field(1, description="Page number for pagination (starts at 1)"),
     limit: int = Field(50, description="Maximum number of traces to return per page"),
-    tags: Optional[str] = Field(None, description="Tag or list of tags to filter traces by")
+    tags: str = Field(None, description="Tag or list of tags to filter traces by")
 ) -> List[dict]:
     """Find traces based on filters.
     
@@ -236,20 +236,11 @@ async def fetch_traces(
     """
     state = cast(MCPState, ctx.request_context.lifespan_context)
     
-    # Log the filters being used
-    filters_log = {k: v for k, v in locals().items() if k not in ['ctx', 'state']}
-    logger.info(f"Fetching traces with filters: {filters_log}")
-    
     # Calculate timestamps from age
     from_timestamp = datetime.now(UTC) - timedelta(minutes=age)
-    logger.info(f"Calculated from_timestamp from age {age} minutes: {from_timestamp}")
     
     try:
         # Use the fetch_traces method provided by the Langfuse SDK
-        logger.debug(f"Calling fetch_traces with params: name={name}, user_id={user_id}, session_id={session_id}, " 
-                    f"from_timestamp={from_timestamp}, "
-                    f"page={page}, limit={limit}, tags={tags}")
-        
         response = state.langfuse_client.fetch_traces(
             name=name,
             user_id=user_id,
@@ -261,16 +252,295 @@ async def fetch_traces(
         )
         
         # Convert response to a serializable format
-        # The response is a FetchTracesResponse object with data and meta fields
         traces = [trace.dict() if hasattr(trace, 'dict') else trace for trace in response.data]
         
         logger.info(f"Found {len(traces)} traces")
         return traces
     except Exception as e:
-        logger.error(f"Error fetching traces: {str(e)}")
-        logger.error(f"Parameters: name={name}, user_id={user_id}, session_id={session_id}, "
-                    f"from_timestamp={from_timestamp} (type: {type(from_timestamp)}), "
-                    f"page={page}, limit={limit}, tags={tags}")
+        logger.error(f"Error in fetch_traces: {str(e)}")
+        logger.exception(e)
+        raise
+
+
+async def fetch_trace(
+    ctx: Context,
+    trace_id: str = Field(..., description="The ID of the trace to fetch (unique identifier string)")
+) -> dict:
+    """Get a single trace by ID with full details.
+    
+    Args:
+        trace_id: The ID of the trace to fetch (unique identifier string)
+    
+    Returns:
+        Complete trace object with all associated observations and metadata
+    """
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+    
+    try:
+        # Use the fetch_trace method provided by the Langfuse SDK
+        response = state.langfuse_client.fetch_trace(trace_id)
+        
+        # Convert response to a serializable format
+        trace = response.data.dict() if hasattr(response.data, 'dict') else response.data
+        
+        logger.info(f"Retrieved trace {trace_id}")
+        return trace
+    except Exception as e:
+        logger.error(f"Error fetching trace {trace_id}: {str(e)}")
+        logger.exception(e)
+        raise
+
+
+async def fetch_observations(
+    ctx: Context,
+    type: Literal["SPAN", "GENERATION", "EVENT"] = Field(None, description="The observation type to filter by ('SPAN', 'GENERATION', or 'EVENT')"),
+    age: int = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)"),
+    name: str = Field(None, description="Optional name filter (string pattern to match)"),
+    user_id: str = Field(None, description="Optional user ID filter (exact match)"),
+    trace_id: str = Field(None, description="Optional trace ID filter (exact match)"),
+    parent_observation_id: str = Field(None, description="Optional parent observation ID filter (exact match)"),
+    page: int = Field(1, description="Page number for pagination (starts at 1)"),
+    limit: int = Field(50, description="Maximum number of observations to return per page")
+) -> List[dict]:
+    """Get observations filtered by type and other criteria.
+    
+    Args:
+        type: The observation type to filter by (SPAN, GENERATION, or EVENT)
+        age: Minutes ago to start looking (e.g., 1440 for 24 hours)
+        name: Optional name filter (string pattern to match)
+        user_id: Optional user ID filter (exact match)
+        trace_id: Optional trace ID filter (exact match)
+        parent_observation_id: Optional parent observation ID filter (exact match)
+        page: Page number for pagination (starts at 1)
+        limit: Maximum number of observations to return per page
+    
+    Returns:
+        List of observation objects matching the filters
+    """
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+    
+    # Calculate timestamps from age
+    from_start_time = datetime.now(UTC) - timedelta(minutes=age)
+    
+    try:
+        # Use the fetch_observations method provided by the Langfuse SDK
+        response = state.langfuse_client.fetch_observations(
+            type=type,
+            name=name,
+            user_id=user_id,
+            trace_id=trace_id,
+            parent_observation_id=parent_observation_id,
+            from_start_time=from_start_time,
+            page=page,
+            limit=limit
+        )
+        
+        # Convert response to a serializable format
+        observations = [obs.dict() if hasattr(obs, 'dict') else obs for obs in response.data]
+        
+        logger.info(f"Found {len(observations)} observations")
+        return observations
+    except Exception as e:
+        logger.error(f"Error fetching observations: {str(e)}")
+        logger.exception(e)
+        raise
+
+
+async def fetch_observation(
+    ctx: Context,
+    observation_id: str = Field(..., description="The ID of the observation to fetch (unique identifier string)")
+) -> dict:
+    """Get a single observation by ID.
+    
+    Args:
+        observation_id: The ID of the observation to fetch (unique identifier string)
+    
+    Returns:
+        Complete observation object with all associated events and metadata
+    """
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+    
+    try:
+        # Use the fetch_observation method provided by the Langfuse SDK
+        response = state.langfuse_client.fetch_observation(observation_id)
+        
+        # Convert response to a serializable format
+        observation = response.data.dict() if hasattr(response.data, 'dict') else response.data
+        
+        logger.info(f"Retrieved observation {observation_id}")
+        return observation
+    except Exception as e:
+        logger.error(f"Error fetching observation {observation_id}: {str(e)}")
+        logger.exception(e)
+        raise
+
+
+async def fetch_sessions(
+    ctx: Context,
+    age: int = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)"),
+    page: int = Field(1, description="Page number for pagination (starts at 1)"),
+    limit: int = Field(50, description="Maximum number of sessions to return per page")
+) -> List[dict]:
+    """Get a list of sessions in the current project.
+    
+    Args:
+        age: Minutes ago to start looking (e.g., 1440 for 24 hours)
+        page: Page number for pagination (starts at 1)
+        limit: Maximum number of sessions to return per page
+    
+    Returns:
+        List of session objects
+    """
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+    
+    # Calculate timestamps from age
+    from_timestamp = datetime.now(UTC) - timedelta(minutes=age)
+    
+    try:
+        # Use the fetch_sessions method provided by the Langfuse SDK
+        response = state.langfuse_client.fetch_sessions(
+            from_timestamp=from_timestamp,
+            page=page,
+            limit=limit
+        )
+        
+        # Convert response to a serializable format
+        sessions = [session.dict() if hasattr(session, 'dict') else session for session in response.data]
+        
+        logger.info(f"Found {len(sessions)} sessions")
+        return sessions
+    except Exception as e:
+        logger.error(f"Error fetching sessions: {str(e)}")
+        logger.exception(e)
+        raise
+
+
+async def get_session_details(
+    ctx: Context,
+    session_id: str = Field(..., description="The ID of the session to retrieve (unique identifier string)")
+) -> dict:
+    """Get detailed information about a specific session.
+    
+    Args:
+        session_id: The ID of the session to retrieve (unique identifier string)
+    
+    Returns:
+        Session details including associated traces, timestamps, and metrics
+    """
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+    
+    try:
+        # Fetch traces with this session ID
+        response = state.langfuse_client.fetch_traces(
+            session_id=session_id,
+            limit=50  # Get a reasonable number of traces for this session
+        )
+        
+        # If no traces were found, return an empty dict
+        if not response.data:
+            logger.info(f"No session found with ID: {session_id}")
+            return {
+                "id": session_id,
+                "traces": [],
+                "found": False
+            }
+            
+        # Convert traces to a serializable format
+        traces = [trace.dict() if hasattr(trace, 'dict') else trace for trace in response.data]
+        
+        # Create a session object with all traces that have this session ID
+        session = {
+            "id": session_id,
+            "traces": traces,
+            "trace_count": len(traces),
+            "first_timestamp": traces[0].get("timestamp") if traces else None,
+            "last_timestamp": traces[-1].get("timestamp") if traces else None,
+            "user_id": traces[0].get("user_id") if traces else None,
+            "found": True
+        }
+        
+        logger.info(f"Found session {session_id} with {len(traces)} traces")
+        return session
+    except Exception as e:
+        logger.error(f"Error getting session {session_id}: {str(e)}")
+        logger.exception(e)
+        raise
+
+
+async def get_user_sessions(
+    ctx: Context,
+    user_id: str = Field(..., description="The ID of the user to retrieve sessions for"),
+    age: int = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)")
+) -> List[dict]:
+    """Get sessions for a user within a time range.
+    
+    Args:
+        user_id: The ID of the user to retrieve sessions for (unique identifier string)
+        age: Minutes ago to start looking (e.g., 1440 for 24 hours)
+    
+    Returns:
+        List of session objects associated with the user in the specified time range
+    """
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+    
+    # Calculate timestamp from age
+    from_timestamp = datetime.now(UTC) - timedelta(minutes=age)
+    
+    try:
+        # Fetch traces for this user
+        response = state.langfuse_client.fetch_traces(
+            user_id=user_id,
+            from_timestamp=from_timestamp,
+            limit=100  # Get a reasonable number of traces
+        )
+        
+        # If no traces were found, return an empty list
+        if not response.data:
+            logger.info(f"No sessions found for user: {user_id}")
+            return []
+            
+        # Convert traces to a serializable format
+        traces = [trace.dict() if hasattr(trace, 'dict') else trace for trace in response.data]
+        
+        # Group traces by session_id
+        sessions_dict = {}
+        for trace in traces:
+            session_id = trace.get("session_id")
+            if not session_id:
+                continue
+                
+            if session_id not in sessions_dict:
+                sessions_dict[session_id] = {
+                    "id": session_id,
+                    "traces": [],
+                    "first_timestamp": None,
+                    "last_timestamp": None,
+                    "user_id": user_id
+                }
+                
+            # Add trace to this session
+            sessions_dict[session_id]["traces"].append(trace)
+            
+            # Update timestamps
+            trace_timestamp = trace.get("timestamp")
+            if trace_timestamp:
+                if not sessions_dict[session_id]["first_timestamp"] or trace_timestamp < sessions_dict[session_id]["first_timestamp"]:
+                    sessions_dict[session_id]["first_timestamp"] = trace_timestamp
+                if not sessions_dict[session_id]["last_timestamp"] or trace_timestamp > sessions_dict[session_id]["last_timestamp"]:
+                    sessions_dict[session_id]["last_timestamp"] = trace_timestamp
+        
+        # Convert to list and add trace counts
+        sessions = list(sessions_dict.values())
+        for session in sessions:
+            session["trace_count"] = len(session["traces"])
+        
+        # Sort sessions by most recent last_timestamp
+        sessions.sort(key=lambda x: x["last_timestamp"] if x["last_timestamp"] else "", reverse=True)
+        
+        logger.info(f"Found {len(sessions)} sessions for user {user_id}")
+        return sessions
+    except Exception as e:
+        logger.error(f"Error getting sessions for user {user_id}: {str(e)}")
         logger.exception(e)
         raise
 
@@ -402,7 +672,7 @@ async def find_exceptions_in_file(
             type="SPAN",
             from_start_time=from_timestamp,
             to_start_time=to_timestamp,
-            limit=100  # Adjust based on your needs
+            limit=100
         )
         
         # Process observations to find exceptions in the specified file
@@ -454,224 +724,10 @@ async def find_exceptions_in_file(
         raise
 
 
-async def get_session(
-    ctx: Context,
-    session_id: str = Field(..., description="The ID of the session to retrieve (unique identifier string)")
-) -> dict:
-    """Get session details by ID.
-    
-    Args:
-        session_id: The ID of the session to retrieve (unique identifier string)
-    
-    Returns:
-        Session details including associated traces, timestamps, and metrics
-    """
-    state = cast(MCPState, ctx.request_context.lifespan_context)
-    
-    try:
-        # Fetch traces with this session ID
-        response = state.langfuse_client.fetch_traces(
-            session_id=session_id,
-            limit=50  # Get a reasonable number of traces for this session
-        )
-        
-        # If no traces were found, return an empty dict
-        if not response.data:
-            logger.info(f"No session found with ID: {session_id}")
-            return {
-                "id": session_id,
-                "traces": [],
-                "found": False
-            }
-            
-        # Convert traces to a serializable format
-        traces = [trace.dict() if hasattr(trace, 'dict') else trace for trace in response.data]
-        
-        # Create a session object with all traces that have this session ID
-        session = {
-            "id": session_id,
-            "traces": traces,
-            "trace_count": len(traces),
-            "first_timestamp": traces[0].get("timestamp") if traces else None,
-            "last_timestamp": traces[-1].get("timestamp") if traces else None,
-            "user_id": traces[0].get("user_id") if traces else None,
-            "found": True
-        }
-        
-        logger.info(f"Found session {session_id} with {len(traces)} traces")
-        return session
-    except Exception as e:
-        logger.error(f"Error getting session {session_id}: {str(e)}")
-        logger.exception(e)
-        raise
-
-
-async def get_user_sessions(
-    ctx: Context,
-    user_id: str,
-    age: int = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)")
-) -> List[dict]:
-    """Get sessions for a user within a time range.
-    
-    Args:
-        user_id: The ID of the user to retrieve sessions for (unique identifier string)
-        age: Minutes ago to start looking (e.g., 1440 for 24 hours)
-    
-    Returns:
-        List of session objects associated with the user in the specified time range
-    """
-    state = cast(MCPState, ctx.request_context.lifespan_context)
-    
-    # Calculate timestamp from age
-    from_timestamp = datetime.now(UTC) - timedelta(minutes=age)
-    logger.info(f"Calculated from_timestamp from age {age} minutes: {from_timestamp}")
-    
-    try:
-        # Fetch traces for this user
-        logger.debug(f"Calling fetch_traces with params: user_id={user_id}, "
-                    f"from_timestamp={from_timestamp} (type: {type(from_timestamp)}), "
-                    f"limit=100")
-        
-        response = state.langfuse_client.fetch_traces(
-            user_id=user_id,
-            from_timestamp=from_timestamp,
-            limit=100  # Get a reasonable number of traces
-        )
-        
-        # If no traces were found, return an empty list
-        if not response.data:
-            logger.info(f"No sessions found for user: {user_id}")
-            return []
-            
-        # Convert traces to a serializable format
-        traces = [trace.dict() if hasattr(trace, 'dict') else trace for trace in response.data]
-        
-        # Group traces by session_id
-        sessions_dict = {}
-        for trace in traces:
-            session_id = trace.get("session_id")
-            if not session_id:
-                continue
-                
-            if session_id not in sessions_dict:
-                sessions_dict[session_id] = {
-                    "id": session_id,
-                    "traces": [],
-                    "first_timestamp": None,
-                    "last_timestamp": None,
-                    "user_id": user_id
-                }
-                
-            # Add trace to this session
-            sessions_dict[session_id]["traces"].append(trace)
-            
-            # Update timestamps
-            trace_timestamp = trace.get("timestamp")
-            if trace_timestamp:
-                if not sessions_dict[session_id]["first_timestamp"] or trace_timestamp < sessions_dict[session_id]["first_timestamp"]:
-                    sessions_dict[session_id]["first_timestamp"] = trace_timestamp
-                if not sessions_dict[session_id]["last_timestamp"] or trace_timestamp > sessions_dict[session_id]["last_timestamp"]:
-                    sessions_dict[session_id]["last_timestamp"] = trace_timestamp
-        
-        # Convert to list and add trace counts
-        sessions = list(sessions_dict.values())
-        for session in sessions:
-            session["trace_count"] = len(session["traces"])
-        
-        # Sort sessions by most recent last_timestamp
-        sessions.sort(key=lambda x: x["last_timestamp"] if x["last_timestamp"] else "", reverse=True)
-        
-        logger.info(f"Found {len(sessions)} sessions for user {user_id}")
-        return sessions
-    except Exception as e:
-        logger.error(f"Error getting sessions for user {user_id}: {str(e)}")
-        logger.exception(e)
-        raise
-
-
-async def get_error_count(
-    ctx: Context,
-    age: ValidatedAge = Field(
-        ..., 
-        description="Number of minutes to look back (positive integer, max 100 minutes)",
-        gt=0,
-        le=100
-    )
-) -> dict:
-    """Get number of traces with exceptions in last N minutes.
-    
-    Args:
-        age: Number of minutes to look back (positive integer, max 100 minutes)
-    
-    Returns:
-        Dictionary with error statistics including trace count, observation count, and exception count
-    """
-    state = cast(MCPState, ctx.request_context.lifespan_context)
-    
-    # Calculate from_timestamp based on age
-    from_timestamp = datetime.now(UTC) - timedelta(minutes=age)
-    to_timestamp = datetime.now(UTC)
-    
-    try:
-        # Fetch all SPAN observations since they may contain exceptions
-        response = state.langfuse_client.fetch_observations(
-            type="SPAN",
-            from_start_time=from_timestamp,
-            to_start_time=to_timestamp,
-            limit=100  # Limit to 100 as per API constraints
-        )
-        
-        # Count traces and observations with exceptions
-        trace_ids_with_exceptions = set()
-        observations_with_exceptions = 0
-        total_exceptions = 0
-        
-        for observation in response.data:
-            has_exception = False
-            exception_count = 0
-            
-            # Check if this observation has exception events
-            if hasattr(observation, 'events'):
-                for event in observation.events:
-                    if not isinstance(event, dict):
-                        event_dict = event.dict() if hasattr(event, 'dict') else {}
-                    else:
-                        event_dict = event
-                        
-                    # Check if this is an exception event
-                    if event_dict.get('attributes', {}).get('exception.type'):
-                        has_exception = True
-                        exception_count += 1
-            
-            if has_exception:
-                observations_with_exceptions += 1
-                total_exceptions += exception_count
-                
-                # Add the trace ID to our set
-                if hasattr(observation, 'trace_id') and observation.trace_id:
-                    trace_ids_with_exceptions.add(observation.trace_id)
-        
-        result = {
-            "age_minutes": age,
-            "from_timestamp": from_timestamp.isoformat(),
-            "to_timestamp": to_timestamp.isoformat(),
-            "trace_count": len(trace_ids_with_exceptions),
-            "observation_count": observations_with_exceptions,
-            "exception_count": total_exceptions
-        }
-        
-        logger.info(f"Found {total_exceptions} exceptions in {observations_with_exceptions} observations across {len(trace_ids_with_exceptions)} traces")
-        return result
-    except Exception as e:
-        logger.error(f"Error getting error count for the last {age} minutes: {str(e)}")
-        logger.exception(e)
-        raise
-
-
 async def get_exception_details(
     ctx: Context,
     trace_id: str = Field(..., description="The ID of the trace to analyze for exceptions (unique identifier string)"),
-    span_id: Optional[str] = Field(None, description="Optional span ID to filter by specific span (unique identifier string)")
+    span_id: str = Field(None, description="Optional span ID to filter by specific span (unique identifier string)")
 ) -> List[dict]:
     """Get detailed exception info for a trace/span.
     
@@ -755,6 +811,85 @@ async def get_exception_details(
         return exceptions
     except Exception as e:
         logger.error(f"Error getting exception details for trace {trace_id}: {str(e)}")
+        logger.exception(e)
+        raise
+
+
+async def get_error_count(
+    ctx: Context,
+    age: ValidatedAge = Field(
+        ..., 
+        description="Number of minutes to look back (positive integer, max 100 minutes)",
+        gt=0,
+        le=100
+    )
+) -> dict:
+    """Get number of traces with exceptions in last N minutes.
+    
+    Args:
+        age: Number of minutes to look back (positive integer, max 100 minutes)
+    
+    Returns:
+        Dictionary with error statistics including trace count, observation count, and exception count
+    """
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+    
+    # Calculate from_timestamp based on age
+    from_timestamp = datetime.now(UTC) - timedelta(minutes=age)
+    to_timestamp = datetime.now(UTC)
+    
+    try:
+        # Fetch all SPAN observations since they may contain exceptions
+        response = state.langfuse_client.fetch_observations(
+            type="SPAN",
+            from_start_time=from_timestamp,
+            to_start_time=to_timestamp,
+            limit=100  # Limit to 100 as per API constraints
+        )
+        
+        # Count traces and observations with exceptions
+        trace_ids_with_exceptions = set()
+        observations_with_exceptions = 0
+        total_exceptions = 0
+        
+        for observation in response.data:
+            has_exception = False
+            exception_count = 0
+            
+            # Check if this observation has exception events
+            if hasattr(observation, 'events'):
+                for event in observation.events:
+                    if not isinstance(event, dict):
+                        event_dict = event.dict() if hasattr(event, 'dict') else {}
+                    else:
+                        event_dict = event
+                        
+                    # Check if this is an exception event
+                    if event_dict.get('attributes', {}).get('exception.type'):
+                        has_exception = True
+                        exception_count += 1
+            
+            if has_exception:
+                observations_with_exceptions += 1
+                total_exceptions += exception_count
+                
+                # Add the trace ID to our set
+                if hasattr(observation, 'trace_id') and observation.trace_id:
+                    trace_ids_with_exceptions.add(observation.trace_id)
+        
+        result = {
+            "age_minutes": age,
+            "from_timestamp": from_timestamp.isoformat(),
+            "to_timestamp": to_timestamp.isoformat(),
+            "trace_count": len(trace_ids_with_exceptions),
+            "observation_count": observations_with_exceptions,
+            "exception_count": total_exceptions
+        }
+        
+        logger.info(f"Found {total_exceptions} exceptions in {observations_with_exceptions} observations across {len(trace_ids_with_exceptions)} traces")
+        return result
+    except Exception as e:
+        logger.error(f"Error getting error count for the last {age} minutes: {str(e)}")
         logger.exception(e)
         raise
 
@@ -869,120 +1004,6 @@ Scores are evaluations attached to traces or observations.
     return schema
 
 
-async def get_trace(
-    ctx: Context,
-    trace_id: str = Field(..., description="The ID of the trace to fetch (unique identifier string)")
-) -> dict:
-    """Get a single trace by ID with full details.
-    
-    Args:
-        trace_id: The ID of the trace to fetch (unique identifier string)
-    
-    Returns:
-        Complete trace object with all associated observations and metadata
-    """
-    state = cast(MCPState, ctx.request_context.lifespan_context)
-    
-    try:
-        # Use the fetch_trace method provided by the Langfuse SDK
-        response = state.langfuse_client.fetch_trace(trace_id)
-        
-        # Convert response to a serializable format
-        trace = response.data.dict() if hasattr(response.data, 'dict') else response.data
-        
-        logger.info(f"Retrieved trace {trace_id}")
-        return trace
-    except Exception as e:
-        logger.error(f"Error fetching trace {trace_id}: {str(e)}")
-        logger.exception(e)
-        raise
-
-
-async def get_observation(
-    ctx: Context,
-    observation_id: str = Field(..., description="The ID of the observation to fetch (unique identifier string)")
-) -> dict:
-    """Get a single observation by ID.
-    
-    Args:
-        observation_id: The ID of the observation to fetch (unique identifier string)
-    
-    Returns:
-        Complete observation object with all associated events and metadata
-    """
-    state = cast(MCPState, ctx.request_context.lifespan_context)
-    
-    try:
-        # Use the fetch_observation method provided by the Langfuse SDK
-        response = state.langfuse_client.fetch_observation(observation_id)
-        
-        # Convert response to a serializable format
-        observation = response.data.dict() if hasattr(response.data, 'dict') else response.data
-        
-        logger.info(f"Retrieved observation {observation_id}")
-        return observation
-    except Exception as e:
-        logger.error(f"Error fetching observation {observation_id}: {str(e)}")
-        logger.exception(e)
-        raise
-
-
-async def get_observations_by_type(
-    ctx: Context,
-    type: Literal["SPAN", "GENERATION", "EVENT"] = Field(..., description="The observation type to filter by ('SPAN', 'GENERATION', or 'EVENT')"),
-    age: int = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)"),
-    name: Optional[str] = Field(None, description="Optional name filter (string pattern to match)"),
-    user_id: Optional[str] = Field(None, description="Optional user ID filter (exact match)"),
-    trace_id: Optional[str] = Field(None, description="Optional trace ID filter (exact match)"),
-    parent_observation_id: Optional[str] = Field(None, description="Optional parent observation ID filter (exact match)"),
-    page: int = Field(1, description="Page number for pagination (starts at 1)"),
-    limit: int = Field(50, description="Maximum number of observations to return per page")
-) -> List[dict]:
-    """Get observations filtered by type.
-    
-    Args:
-        type: The observation type to filter by ("SPAN", "GENERATION", or "EVENT")
-        age: Minutes ago to start looking (e.g., 1440 for 24 hours)
-        name: Optional name filter (string pattern to match)
-        user_id: Optional user ID filter (exact match)
-        trace_id: Optional trace ID filter (exact match)
-        parent_observation_id: Optional parent observation ID filter (exact match)
-        page: Page number for pagination (starts at 1)
-        limit: Maximum number of observations to return per page
-    
-    Returns:
-        List of observation objects matching the filters
-    """
-    state = cast(MCPState, ctx.request_context.lifespan_context)
-    
-    # Calculate timestamps from age
-    from_start_time = datetime.now(UTC) - timedelta(minutes=age)
-    logger.info(f"Calculated from_start_time from age {age} minutes: {from_start_time}")
-    
-    try:
-        # Use the fetch_observations method provided by the Langfuse SDK
-        response = state.langfuse_client.fetch_observations(
-            type=type,
-            name=name,
-            user_id=user_id,
-            trace_id=trace_id,
-            parent_observation_id=parent_observation_id,
-            from_start_time=from_start_time,
-            page=page,
-            limit=limit
-        )
-        
-        # Convert response to a serializable format
-        observations = [obs.dict() if hasattr(obs, 'dict') else obs for obs in response.data]
-        
-        logger.info(f"Found {len(observations)} observations of type '{type}'")
-        return observations
-    except Exception as e:
-        logger.error(f"Error fetching observations of type '{type}': {str(e)}")
-        logger.exception(e)
-        raise
-
-
 def app_factory(public_key: str, secret_key: str, host: str, no_auth_check: bool = False, cache_size: int = 100) -> FastMCP:
     """Create a FastMCP server with Langfuse tools.
     
@@ -1041,18 +1062,19 @@ def app_factory(public_key: str, secret_key: str, host: str, no_auth_check: bool
     # Create the MCP server with lifespan context manager
     mcp = FastMCP("Langfuse MCP Server", lifespan=lifespan)
     
-    # Register all tools
+    # Register tools that match the Langfuse SDK signatures
     mcp.tool()(fetch_traces)
+    mcp.tool()(fetch_trace)
+    mcp.tool()(fetch_observations)
+    mcp.tool()(fetch_observation)
+    mcp.tool()(fetch_sessions)
+    mcp.tool()(get_session_details)
+    mcp.tool()(get_user_sessions)
     mcp.tool()(find_exceptions)
     mcp.tool()(find_exceptions_in_file)
-    mcp.tool()(get_session)
-    mcp.tool()(get_user_sessions)
-    mcp.tool()(get_error_count)
     mcp.tool()(get_exception_details)
+    mcp.tool()(get_error_count)
     mcp.tool()(get_data_schema)
-    mcp.tool()(get_trace)
-    mcp.tool()(get_observation)
-    mcp.tool()(get_observations_by_type)
     
     return mcp
 
