@@ -87,7 +87,7 @@ packages = ["langfuse_mcp"]
 dev = ["ruff"]
 
 [tool.ruff]
-line-length = 100
+line-length = 140
 target-version = "py310"
 
 [tool.ruff.lint]
@@ -98,8 +98,13 @@ select = [
     "FA",     # https://docs.astral.sh/ruff/rules/#flake8-future-annotations-fa
     "UP",     # https://docs.astral.sh/ruff/rules/#pyupgrade-up
     "RUF100", # https://docs.astral.sh/ruff/rules/#ruff-specific-rules-ruf
+    "D",      # Enforce the use of Google-style docstrings
+    "D401",   # Augment the convention by requiring an imperative mood for all docstrings
 ]
 ignore = ["UP031"] # https://docs.astral.sh/ruff/rules/printf-string-formatting/
 
 [tool.ruff.lint.isort]
-combine-as-imports = true 
+combine-as-imports = true
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
