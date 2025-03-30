@@ -1168,14 +1168,13 @@ Scores are evaluations attached to traces or observations.
     return schema
 
 
-def app_factory(public_key: str, secret_key: str, host: str, no_auth_check: bool = False, cache_size: int = 100) -> FastMCP:
+def app_factory(public_key: str, secret_key: str, host: str, cache_size: int = 100) -> FastMCP:
     """Create a FastMCP server with Langfuse tools.
     
     Args:
         public_key: Langfuse public key
         secret_key: Langfuse secret key
         host: Langfuse API host URL
-        no_auth_check: Skip authentication check
         cache_size: Size of LRU caches used for caching data
         
     Returns:
@@ -1208,12 +1207,6 @@ def app_factory(public_key: str, secret_key: str, host: str, no_auth_check: bool
             exception_type_map=LRUCache(maxsize=cache_size),
             exceptions_by_filepath=LRUCache(maxsize=cache_size)
         )
-        
-        if not no_auth_check:
-            logger.info("Running authentication check...")
-            auth_result = state.langfuse_client.auth_check()
-            if not auth_result:
-                raise ValueError("Authentication failed with provided credentials")
         
         try:
             yield state
@@ -1270,11 +1263,6 @@ def main():
         help="Langfuse host URL"
     )
     parser.add_argument(
-        "--no-auth-check",
-        action="store_true",
-        help="Skip authentication check"
-    )
-    parser.add_argument(
         "--cache-size",
         type=int,
         default=100,
@@ -1283,12 +1271,11 @@ def main():
     
     args = parser.parse_args()
     
-    logger.info(f"Starting MCP - host:{args.host} auth:{not args.no_auth_check} cache:{args.cache_size} keys:{args.public_key[:4]}.../{args.secret_key[:4]}...")
+    logger.info(f"Starting MCP - host:{args.host} cache:{args.cache_size} keys:{args.public_key[:4]}.../{args.secret_key[:4]}...")
     app = app_factory(
         public_key=args.public_key,
         secret_key=args.secret_key,
         host=args.host,
-        no_auth_check=args.no_auth_check,
         cache_size=args.cache_size
     )
     

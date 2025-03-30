@@ -178,3 +178,5 @@ data/
 
 # Logs
 *.log.*
+
+run_mcp.py
