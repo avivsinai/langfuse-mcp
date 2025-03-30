@@ -12,7 +12,6 @@ from logging.handlers import RotatingFileHandler
 from typing import Annotated, Any, Literal, Optional, Union, cast, List
 
 from cachetools import LRUCache
-from dateutil import parser as dateutil_parser
 from langfuse import Langfuse
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import AfterValidator, BaseModel, Field
@@ -38,7 +37,7 @@ file_handler.setFormatter(formatter)
 
 # Configure root logger
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,  # Change from DEBUG to INFO to reduce verbosity
     handlers=[file_handler]  # Only use file handler
 )
 
@@ -205,23 +204,16 @@ async def _efficient_fetch_observations(
     return observations
 
 
-async def find_traces(
+async def fetch_traces(
     ctx: Context,
+    age: int = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)"),
     name: Optional[str] = Field(None, description="Name of the trace to filter by"),
     user_id: Optional[str] = Field(None, description="User ID to filter traces by"),
     session_id: Optional[str] = Field(None, description="Session ID to filter traces by"),
     metadata: Optional[dict] = Field(None, description="Metadata fields to filter by"),
-    from_timestamp: Optional[Union[datetime, str]] = Field(
-        None, 
-        description="Start time for filtering traces (ISO format string 'YYYY-MM-DDTHH:MM:SS.sssZ' or datetime object)"
-    ),
-    to_timestamp: Optional[Union[datetime, str]] = Field(
-        None, 
-        description="End time for filtering traces (ISO format string 'YYYY-MM-DDTHH:MM:SS.sssZ' or datetime object)"
-    ),
     page: int = Field(1, description="Page number for pagination (starts at 1)"),
     limit: int = Field(50, description="Maximum number of traces to return per page"),
-    tags: Optional[Union[str, List[str]]] = Field(None, description="Tag or list of tags to filter traces by"),
+    tags: Optional[str] = Field(None, description="Tag or list of tags to filter traces by")
 ) -> List[dict]:
     """Find traces based on filters.
     
@@ -230,16 +222,11 @@ async def find_traces(
     for that field.
     
     Args:
+        age: Minutes ago to start looking (e.g., 1440 for 24 hours)
         name: Name of the trace to filter by (optional)
         user_id: User ID to filter traces by (optional)
         session_id: Session ID to filter traces by (optional)
         metadata: Metadata fields to filter by (optional)
-        from_timestamp: Start time for filtering traces. Can be a datetime object or 
-                       an ISO format string like '2023-04-01T12:00:00Z' 
-                       (optional, no lower time bound if not provided)
-        to_timestamp: End time for filtering traces. Can be a datetime object or 
-                     an ISO format string like '2023-04-01T12:00:00Z'
-                     (optional, no upper time bound if not provided)
         page: Page number for pagination (starts at 1)
         limit: Maximum number of traces to return per page
         tags: Tag or list of tags to filter traces by
@@ -251,29 +238,16 @@ async def find_traces(
     
     # Log the filters being used
     filters_log = {k: v for k, v in locals().items() if k not in ['ctx', 'state']}
-    logger.info(f"Finding traces with filters: {filters_log}")
+    logger.info(f"Fetching traces with filters: {filters_log}")
     
-    # Convert string timestamps to datetime objects if needed
-    if from_timestamp and isinstance(from_timestamp, str):
-        try:
-            from_timestamp = dateutil_parser.parse(from_timestamp)
-            logger.info(f"Converted from_timestamp string to datetime: {from_timestamp}")
-        except ValueError as e:
-            logger.error(f"Invalid from_timestamp format: {from_timestamp}. Error: {str(e)}")
-            raise ValueError(f"Invalid from_timestamp format: {from_timestamp}. Expected ISO format string or any recognizable datetime string.")
-            
-    if to_timestamp and isinstance(to_timestamp, str):
-        try:
-            to_timestamp = dateutil_parser.parse(to_timestamp)
-            logger.info(f"Converted to_timestamp string to datetime: {to_timestamp}")
-        except ValueError as e:
-            logger.error(f"Invalid to_timestamp format: {to_timestamp}. Error: {str(e)}")
-            raise ValueError(f"Invalid to_timestamp format: {to_timestamp}. Expected ISO format string or any recognizable datetime string.")
+    # Calculate timestamps from age
+    from_timestamp = datetime.now(UTC) - timedelta(minutes=age)
+    logger.info(f"Calculated from_timestamp from age {age} minutes: {from_timestamp}")
     
     try:
         # Use the fetch_traces method provided by the Langfuse SDK
         logger.debug(f"Calling fetch_traces with params: name={name}, user_id={user_id}, session_id={session_id}, " 
-                    f"from_timestamp={from_timestamp}, to_timestamp={to_timestamp}, "
+                    f"from_timestamp={from_timestamp}, "
                     f"page={page}, limit={limit}, tags={tags}")
         
         response = state.langfuse_client.fetch_traces(
@@ -281,7 +255,6 @@ async def find_traces(
             user_id=user_id,
             session_id=session_id,
             from_timestamp=from_timestamp,
-            to_timestamp=to_timestamp,
             page=page,
             limit=limit,
             tags=tags
@@ -294,10 +267,9 @@ async def find_traces(
         logger.info(f"Found {len(traces)} traces")
         return traces
     except Exception as e:
-        logger.error(f"Error finding traces: {str(e)}")
+        logger.error(f"Error fetching traces: {str(e)}")
         logger.error(f"Parameters: name={name}, user_id={user_id}, session_id={session_id}, "
                     f"from_timestamp={from_timestamp} (type: {type(from_timestamp)}), "
-                    f"to_timestamp={to_timestamp} (type: {type(to_timestamp)}), "
                     f"page={page}, limit={limit}, tags={tags}")
         logger.exception(e)
         raise
@@ -537,49 +509,32 @@ async def get_session(
 async def get_user_sessions(
     ctx: Context,
     user_id: str,
-    from_timestamp: Optional[Union[datetime, str]] = None,
-    to_timestamp: Optional[Union[datetime, str]] = None
+    age: int = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)")
 ) -> List[dict]:
     """Get sessions for a user within a time range.
     
     Args:
         user_id: The ID of the user to retrieve sessions for (unique identifier string)
-        from_timestamp: Optional start time for filtering (ISO format string 'YYYY-MM-DDTHH:MM:SS.sssZ' or datetime object)
-        to_timestamp: Optional end time for filtering (ISO format string 'YYYY-MM-DDTHH:MM:SS.sssZ' or datetime object)
+        age: Minutes ago to start looking (e.g., 1440 for 24 hours)
     
     Returns:
         List of session objects associated with the user in the specified time range
     """
     state = cast(MCPState, ctx.request_context.lifespan_context)
     
-    # Convert string timestamps to datetime objects if needed
-    if from_timestamp and isinstance(from_timestamp, str):
-        try:
-            from_timestamp = dateutil_parser.parse(from_timestamp)
-            logger.info(f"Converted from_timestamp string to datetime: {from_timestamp}")
-        except ValueError as e:
-            logger.error(f"Invalid from_timestamp format: {from_timestamp}. Error: {str(e)}")
-            raise ValueError(f"Invalid from_timestamp format: {from_timestamp}. Expected ISO format string or any recognizable datetime string.")
-            
-    if to_timestamp and isinstance(to_timestamp, str):
-        try:
-            to_timestamp = dateutil_parser.parse(to_timestamp)
-            logger.info(f"Converted to_timestamp string to datetime: {to_timestamp}")
-        except ValueError as e:
-            logger.error(f"Invalid to_timestamp format: {to_timestamp}. Error: {str(e)}")
-            raise ValueError(f"Invalid to_timestamp format: {to_timestamp}. Expected ISO format string or any recognizable datetime string.")
+    # Calculate timestamp from age
+    from_timestamp = datetime.now(UTC) - timedelta(minutes=age)
+    logger.info(f"Calculated from_timestamp from age {age} minutes: {from_timestamp}")
     
     try:
         # Fetch traces for this user
         logger.debug(f"Calling fetch_traces with params: user_id={user_id}, "
                     f"from_timestamp={from_timestamp} (type: {type(from_timestamp)}), "
-                    f"to_timestamp={to_timestamp} (type: {type(to_timestamp)}), "
                     f"limit=100")
         
         response = state.langfuse_client.fetch_traces(
             user_id=user_id,
             from_timestamp=from_timestamp,
-            to_timestamp=to_timestamp,
             limit=100  # Get a reasonable number of traces
         )
         
@@ -975,18 +930,11 @@ async def get_observation(
 async def get_observations_by_type(
     ctx: Context,
     type: Literal["SPAN", "GENERATION", "EVENT"] = Field(..., description="The observation type to filter by ('SPAN', 'GENERATION', or 'EVENT')"),
+    age: int = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)"),
     name: Optional[str] = Field(None, description="Optional name filter (string pattern to match)"),
     user_id: Optional[str] = Field(None, description="Optional user ID filter (exact match)"),
     trace_id: Optional[str] = Field(None, description="Optional trace ID filter (exact match)"),
     parent_observation_id: Optional[str] = Field(None, description="Optional parent observation ID filter (exact match)"),
-    from_start_time: Optional[Union[datetime, str]] = Field(
-        None, 
-        description="Optional start time filter (ISO format string 'YYYY-MM-DDTHH:MM:SS.sssZ' or datetime object)"
-    ),
-    to_start_time: Optional[Union[datetime, str]] = Field(
-        None, 
-        description="Optional end time filter (ISO format string 'YYYY-MM-DDTHH:MM:SS.sssZ' or datetime object)"
-    ),
     page: int = Field(1, description="Page number for pagination (starts at 1)"),
     limit: int = Field(50, description="Maximum number of observations to return per page")
 ) -> List[dict]:
@@ -994,12 +942,11 @@ async def get_observations_by_type(
     
     Args:
         type: The observation type to filter by ("SPAN", "GENERATION", or "EVENT")
+        age: Minutes ago to start looking (e.g., 1440 for 24 hours)
         name: Optional name filter (string pattern to match)
         user_id: Optional user ID filter (exact match)
         trace_id: Optional trace ID filter (exact match)
         parent_observation_id: Optional parent observation ID filter (exact match)
-        from_start_time: Optional start time filter (ISO format string 'YYYY-MM-DDTHH:MM:SS.sssZ' or datetime object)
-        to_start_time: Optional end time filter (ISO format string 'YYYY-MM-DDTHH:MM:SS.sssZ' or datetime object)
         page: Page number for pagination (starts at 1)
         limit: Maximum number of observations to return per page
     
@@ -1008,22 +955,9 @@ async def get_observations_by_type(
     """
     state = cast(MCPState, ctx.request_context.lifespan_context)
     
-    # Convert string timestamps to datetime objects if needed
-    if from_start_time and isinstance(from_start_time, str):
-        try:
-            from_start_time = dateutil_parser.parse(from_start_time)
-            logger.info(f"Converted from_start_time string to datetime: {from_start_time}")
-        except ValueError as e:
-            logger.error(f"Invalid from_start_time format: {from_start_time}. Error: {str(e)}")
-            raise ValueError(f"Invalid from_start_time format: {from_start_time}. Expected ISO format string or any recognizable datetime string.")
-            
-    if to_start_time and isinstance(to_start_time, str):
-        try:
-            to_start_time = dateutil_parser.parse(to_start_time)
-            logger.info(f"Converted to_start_time string to datetime: {to_start_time}")
-        except ValueError as e:
-            logger.error(f"Invalid to_start_time format: {to_start_time}. Error: {str(e)}")
-            raise ValueError(f"Invalid to_start_time format: {to_start_time}. Expected ISO format string or any recognizable datetime string.")
+    # Calculate timestamps from age
+    from_start_time = datetime.now(UTC) - timedelta(minutes=age)
+    logger.info(f"Calculated from_start_time from age {age} minutes: {from_start_time}")
     
     try:
         # Use the fetch_observations method provided by the Langfuse SDK
@@ -1034,7 +968,6 @@ async def get_observations_by_type(
             trace_id=trace_id,
             parent_observation_id=parent_observation_id,
             from_start_time=from_start_time,
-            to_start_time=to_start_time,
             page=page,
             limit=limit
         )
@@ -1079,7 +1012,11 @@ def app_factory(public_key: str, secret_key: str, host: str, no_auth_check: bool
                 public_key=public_key,
                 secret_key=secret_key,
                 host=host,
-                debug=True
+                debug=False,  # Disable debug mode since we're only querying
+                threads=1,    # Reduce thread count since we're not sending telemetry
+                flush_at=0,   # Disable automatic flushing since we're not sending data
+                flush_interval=None,  # Disable flush interval
+                enabled=True  # Keep enabled for API queries
             ),
             observation_cache=LRUCache(maxsize=cache_size),
             file_to_observations_map=LRUCache(maxsize=cache_size),
@@ -1105,7 +1042,7 @@ def app_factory(public_key: str, secret_key: str, host: str, no_auth_check: bool
     mcp = FastMCP("Langfuse MCP Server", lifespan=lifespan)
     
     # Register all tools
-    mcp.tool()(find_traces)
+    mcp.tool()(fetch_traces)
     mcp.tool()(find_exceptions)
     mcp.tool()(find_exceptions_in_file)
     mcp.tool()(get_session)
