@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27.0", "uv-dynamic-versioning>=0.7.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.version]
@@ -9,10 +9,11 @@ source = "uv-dynamic-versioning"
 vcs = "git"
 style = "pep440"
 bump = true
+tag-pattern = "v*"
 
 [project]
 name = "langfuse-mcp"
-version = "0.1.1"
+dynamic = ["version"]
 description = "Langfuse MCP server for accessing and analyzing telemetry data via natural language"
 authors = [
     {name = "Aviv Sinai", email = "avivsinai@gmail.com"}

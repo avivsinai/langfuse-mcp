@@ -9,6 +9,31 @@ This project provides a Model Control Plane (MCP) server for Langfuse, allowing 
 - Exception and error tracking capabilities
 - Session and user activity monitoring
 
+## Version Management
+
+This project uses dynamic versioning based on Git tags:
+
+1. The version is automatically determined from git tags using `uv-dynamic-versioning`
+2. To create a new release:
+   - Tag your commit with `git tag v0.1.2` (following semantic versioning)
+   - Push the tag with `git push --tags`
+   - Create a GitHub release from the tag
+3. The GitHub workflow will automatically build and publish the package with the correct version to PyPI
+
+## Development
+
+To run the server locally:
+
+```bash
+uvx langfuse-mcp --public-key YOUR_KEY --secret-key YOUR_SECRET --host https://cloud.langfuse.com
+```
+
+## Installation
+
+```bash
+pip install langfuse-mcp
+```
+
 ## Setup and Installation
 
 1. Clone the repository:

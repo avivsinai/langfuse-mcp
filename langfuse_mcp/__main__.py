@@ -11,13 +11,18 @@ from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from logging.handlers import RotatingFileHandler
 from typing import Annotated, Any, Literal, Union, cast, List, Dict
+from importlib.metadata import version, PackageNotFoundError
 
 from cachetools import LRUCache
 from langfuse import Langfuse
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import AfterValidator, BaseModel, Field
 
-__version__ = "0.1.0"
+try:
+    __version__ = version("langfuse-mcp")
+except PackageNotFoundError:
+    # Package is not installed (development mode)
+    __version__ = "0.1.1.dev0"
 
 # Set up logging with rotation
 LOG_FILE = "/tmp/langfuse_mcp.log"
