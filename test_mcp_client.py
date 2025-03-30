@@ -2,8 +2,8 @@
 import asyncio
 import json
 import logging
-import subprocess
 import sys
+import argparse
 from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, List, Union
 
@@ -16,35 +16,36 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("/tmp/langfuse_mcp_test.log")
+        logging.FileHandler("/tmp/langfuse_mcp_runner.log")
     ]
 )
-logger = logging.getLogger("langfuse-mcp-test")
+logger = logging.getLogger("langfuse-mcp-runner")
 
 logger.info("=" * 80)
-logger.info("Langfuse MCP Test Client")
+logger.info("Langfuse MCP Runner")
 logger.info(f"Python version: {sys.version}")
 logger.info(f"Running from: {__file__}")
 logger.info("=" * 80)
 
-async def main():
-    # Parameters from mcp.json
-    public_key = "pk-lf-c6231d33-f98d-4393-9b28-4205f74984ae"
-    secret_key = "sk-lf-e23afc03-982b-4f68-a4c2-f721af28691a"
-    host = "https://cloud.langfuse.com"
+async def run_mcp_tools(public_key: str, secret_key: str, host: str):
+    """Run all available MCP tools and display their results.
     
+    Args:
+        public_key: Langfuse public key
+        secret_key: Langfuse secret key
+        host: Langfuse API host URL
+    """
     # Create stdio server parameters
     server_params = StdioServerParameters(
         command="uv",  # Using uv consistently
         args=["run", "-m", "langfuse_mcp", 
               "--public-key", public_key, 
               "--secret-key", secret_key, 
-              "--host", host,
-              "--no-auth-check"]  # Added for testing
+              "--host", host]
     )
     
     logger.info("=" * 80)
-    logger.info("Starting MCP client test...")
+    logger.info("Starting MCP runner...")
     logger.info(f"Server command: {server_params.command} {' '.join(server_params.args)}")
     logger.info("=" * 80)
     
@@ -72,177 +73,106 @@ async def main():
             for tool in sorted(tool_names):
                 logger.info(f"  - {tool}")
             
-            # Get error count
-            logger.info("\nTesting get_error_count tool...")
+            # Get error count for last hour
+            logger.info("\nGetting error count for last hour...")
             try:
                 result = await session.call_tool("get_error_count", {"age": 60})
-                logger.info("Tool execution successful!")
-                
-                # Display result data safely
                 if hasattr(result, 'content') and result.content:
                     error_count_text = result.content[0].text if result.content[0].text else "{}"
                     error_count_data = json.loads(error_count_text)
-                    logger.info(f"Error count data: {error_count_data}")
-                else:
-                    logger.info(f"Result: {result}")
+                    logger.info("Error count results:")
+                    for key, value in error_count_data.items():
+                        logger.info(f"  {key}: {value}")
             except Exception as e:
-                logger.error(f"Error executing tool: {e}")
+                logger.error(f"Error getting error count: {e}")
             
-            # Find traces from the past 48 hours
-            logger.info("\nRetrieving traces from the past 48 hours...")
-            trace_id = None  # Will store trace ID for detailed lookup
-            
+            # Find traces from the past 24 hours
+            logger.info("\nRetrieving traces from the past 24 hours...")
             try:
-                # Calculate age in minutes for 48 hours
-                age_minutes = 48 * 60  # 48 hours in minutes
-                
-                # Fetch traces with age parameter explicitly provided
                 result = await session.call_tool("fetch_traces", {
-                    "age": age_minutes,
-                    "limit": 20,
+                    "age": 24 * 60,  # 24 hours in minutes
+                    "limit": 10,
                     "page": 1
                 })
-                logger.info("Retrieved traces successfully!")
                 
-                # Extract and display trace information
                 if hasattr(result, 'content') and result.content:
-                    # Parse JSON from the text content
                     text_content = result.content[0].text if result.content[0].text else "[]"
-                    logger.info(f"Raw response length: {len(text_content)} chars")  # Show length of response
+                    traces_data = json.loads(text_content)
                     
-                    try:
-                        traces_data = json.loads(text_content)
-                        
-                        # Handle both single trace (dict) and multiple traces (list)
-                        traces_list = []
-                        if isinstance(traces_data, dict):
-                            # Single trace
-                            traces_list = [traces_data]
-                            logger.info("Found a single trace")
-                        elif isinstance(traces_data, list):
-                            # Multiple traces
-                            traces_list = traces_data
-                            logger.info(f"Found {len(traces_list)} traces")
-                        
-                        if not traces_list:
-                            logger.info("No traces found in the past 48 hours. Check if your Langfuse account has traces.")
-                        else:
-                            # Display details of each trace (up to 5)
-                            for i, trace in enumerate(traces_list[:5]):
-                                trace_id = trace.get("id", "unknown")
-                                trace_name = trace.get("name", "unnamed")
-                                trace_time = trace.get("timestamp", "unknown")
-                                
-                                logger.info(f"Trace {i+1}: ID={trace_id}, Name={trace_name}, Time={trace_time}")
-                                
-                                # If the trace has observations, count them
-                                observations = trace.get("observations", [])
-                                if observations:
-                                    logger.info(f"  - Contains {len(observations)} observations")
-                                
-                                # Display user info if available
-                                user_id = trace.get("user_id")
-                                if user_id:
-                                    logger.info(f"  - User ID: {user_id}")
-                                
-                                # Save the first trace ID for detailed lookup
-                                if i == 0:
-                                    trace_id = trace_id
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Error parsing JSON response: {e}")
-                        logger.info(f"First 100 chars of response: {text_content[:100]}")
-                else:
-                    logger.info(f"Raw result: {result}")
+                    # Handle both single trace and multiple traces
+                    traces_list = traces_data if isinstance(traces_data, list) else [traces_data]
+                    
+                    if not traces_list:
+                        logger.info("No traces found in the past 24 hours")
+                    else:
+                        logger.info(f"Found {len(traces_list)} traces:")
+                        for i, trace in enumerate(traces_list[:5], 1):
+                            logger.info(f"\nTrace {i}:")
+                            logger.info(f"  ID: {trace.get('id', 'unknown')}")
+                            logger.info(f"  Name: {trace.get('name', 'unnamed')}")
+                            logger.info(f"  Time: {trace.get('timestamp', 'unknown')}")
+                            logger.info(f"  User ID: {trace.get('user_id', 'none')}")
+                            
+                            observations = trace.get("observations", [])
+                            if observations:
+                                logger.info(f"  Observations: {len(observations)}")
             except Exception as e:
                 logger.error(f"Error retrieving traces: {e}")
-                logger.exception(e)
             
-            # Get detailed information about a specific trace
-            if trace_id and trace_id != "unknown":
-                logger.info(f"\nFetching detailed information for trace: {trace_id}")
-                try:
-                    trace_result = await session.call_tool("fetch_trace", {
-                        "trace_id": trace_id
-                    })
-                    
-                    if hasattr(trace_result, 'content') and trace_result.content:
-                        detailed_content = trace_result.content[0].text if trace_result.content[0].text else "{}"
-                        try:
-                            detailed_trace = json.loads(detailed_content)
-                            
-                            # Display trace details
-                            logger.info("Trace details:")
-                            logger.info(f"  Name: {detailed_trace.get('name')}")
-                            logger.info(f"  Start time: {detailed_trace.get('timestamp')}")
-                            logger.info(f"  Duration: {detailed_trace.get('duration_ms')} ms")
-                            
-                            # Display metadata if available
-                            metadata = detailed_trace.get('metadata')
-                            if metadata:
-                                logger.info(f"  Metadata: {json.dumps(metadata, indent=2)[:200]}...")
-                            
-                            # Display observations
-                            observations = detailed_trace.get('observations', [])
-                            logger.info(f"  Observations: {len(observations)}")
-                            
-                            # Show details for first few observations
-                            for i, obs in enumerate(observations[:3]):
-                                logger.info(f"    Observation {i+1}: Type={obs.get('type')}, Name={obs.get('name')}")
-                                
-                            # Log full response length for verification
-                            logger.info(f"Full trace response length: {len(detailed_content)} characters")
-                            logger.info(f"First observation has truncated fields: {'...' in json.dumps(observations[0]) if observations else False}")
-                            
-                            # Check if any input or output fields were truncated
-                            truncated_count = 0
-                            for obs in observations:
-                                if isinstance(obs.get('input'), str) and '...' in obs.get('input', ''):
-                                    truncated_count += 1
-                                if isinstance(obs.get('output'), str) and '...' in obs.get('output', ''):
-                                    truncated_count += 1
-                            
-                            logger.info(f"Number of truncated input/output fields found: {truncated_count}")
-                        except json.JSONDecodeError as e:
-                            logger.error(f"Error parsing trace JSON: {e}")
-                            logger.info(f"First 100 chars of trace response: {detailed_content[:100]}")
-                except Exception as e:
-                    logger.error(f"Error retrieving trace details: {e}")
-                    logger.exception(e)
-            
-            # Test find_exceptions
-            logger.info("\nTesting find_exceptions tool...")
+            # Find exceptions
+            logger.info("\nFinding exceptions from the past 24 hours...")
             try:
-                result = await session.call_tool("find_exceptions", {"age": 1440, "group_by": "file"})
-                logger.info("find_exceptions executed successfully!")
+                result = await session.call_tool("find_exceptions", {
+                    "age": 24 * 60,
+                    "group_by": "file"
+                })
                 
                 if hasattr(result, 'content') and result.content:
                     exceptions_text = result.content[0].text if result.content[0].text else "[]"
-                    try:
-                        exceptions_data = json.loads(exceptions_text)
-                        logger.info(f"Found {len(exceptions_data)} exception groups")
-                        
-                        # Display first few exception groups
-                        for i, exception in enumerate(exceptions_data[:3]):
-                            logger.info(f"  Exception group {i+1}: {exception.get('group')} - Count: {exception.get('count')}")
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Error parsing exceptions JSON: {e}")
-                        logger.info(f"First 100 chars of exceptions response: {exceptions_text[:100]}")
+                    exceptions_data = json.loads(exceptions_text)
+                    
+                    if not exceptions_data:
+                        logger.info("No exceptions found")
+                    else:
+                        logger.info(f"Found {len(exceptions_data)} exception groups:")
+                        for i, exception in enumerate(exceptions_data[:5], 1):
+                            logger.info(f"  Group {i}: {exception.get('group')} - Count: {exception.get('count')}")
             except Exception as e:
-                logger.error(f"Error executing find_exceptions: {e}")
-                logger.exception(e)
+                logger.error(f"Error finding exceptions: {e}")
             
-            # Shutdown session
-            logger.info("\nShutting down session...")
-    
-    logger.info("=" * 80)
-    logger.info("Test completed successfully!")
-    logger.info("=" * 80)
+            logger.info("\nMCP runner completed successfully!")
 
-if __name__ == "__main__":
+def main():
+    """Main entry point for the MCP runner."""
+    parser = argparse.ArgumentParser(description="Langfuse MCP Runner")
+    parser.add_argument(
+        "--public-key",
+        type=str,
+        required=True,
+        help="Langfuse public key"
+    )
+    parser.add_argument(
+        "--secret-key",
+        type=str,
+        required=True,
+        help="Langfuse secret key"
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="https://cloud.langfuse.com",
+        help="Langfuse host URL"
+    )
+    
+    args = parser.parse_args()
+    
     try:
-        asyncio.run(main())
+        asyncio.run(run_mcp_tools(args.public_key, args.secret_key, args.host))
     except Exception as e:
         logger.error("=" * 80)
-        logger.error(f"Test failed with error: {e}")
+        logger.error(f"Runner failed with error: {e}")
         logger.error("=" * 80)
-        sys.exit(1) 
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main() 
