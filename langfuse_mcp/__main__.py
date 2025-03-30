@@ -988,15 +988,15 @@ async def get_error_count(
     ctx: Context,
     age: ValidatedAge = Field(
         ..., 
-        description="Number of minutes to look back (positive integer, max 100 minutes)",
+        description="Number of minutes to look back (positive integer, max 7 days/10080 minutes)",
         gt=0,
-        le=100
+        le=7 * DAY
     )
 ) -> dict:
     """Get number of traces with exceptions in last N minutes.
     
     Args:
-        age: Number of minutes to look back (positive integer, max 100 minutes)
+        age: Number of minutes to look back (positive integer, max 7 days/10080 minutes)
     
     Returns:
         Dictionary with error statistics including trace count, observation count, and exception count
