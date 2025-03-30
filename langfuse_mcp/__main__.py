@@ -2,6 +2,7 @@ import argparse
 import logging
 import sys
 import os
+import json
 from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -51,7 +52,140 @@ logger.info("=" * 80)
 # Constants
 HOUR = 60  # minutes
 DAY = 24 * HOUR
+MAX_FIELD_LENGTH = 500  # Maximum string length for field values
+MAX_RESPONSE_SIZE = 20000  # Maximum size of response object in characters
+TRUNCATE_SUFFIX = "..." # Suffix to add to truncated fields
 
+# Common field names that often contain large values
+LARGE_FIELDS = [
+    "input", "output", "content", "prompt", "completion", "system_prompt", 
+    "user_prompt", "message", "exception.stacktrace", "exception.message", 
+    "stacktrace"
+]
+
+def truncate_large_strings(obj: Any, max_length: int = MAX_FIELD_LENGTH, 
+                           max_response_size: int = MAX_RESPONSE_SIZE,
+                           path: str = "", current_size: int = 0) -> tuple[Any, int]:
+    """Recursively process an object and truncate large string values.
+    
+    Args:
+        obj: The object to process (dict, list, string, etc.)
+        max_length: Maximum length for string values
+        max_response_size: Maximum total response size in characters
+        path: Current path in the object (for nested objects)
+        current_size: Current size of the processed object
+        
+    Returns:
+        Tuple of (processed object, size of processed object)
+    """
+    # Base case: if we've already exceeded max response size, return minimal representation
+    if current_size > max_response_size:
+        return "[TRUNCATED]", len("[TRUNCATED]")
+    
+    # Handle different types
+    if isinstance(obj, dict):
+        result = {}
+        result_size = 2  # Count braces
+        
+        # First pass: process known large fields and essential IDs
+        for key in list(obj.keys()):
+            # Always process IDs and essential fields first
+            if key in ["id", "trace_id", "observation_id", "name", "type"]:
+                processed_value, value_size = truncate_large_strings(
+                    obj[key], max_length, max_response_size, 
+                    f"{path}.{key}" if path else key, current_size + result_size
+                )
+                result[key] = processed_value
+                result_size += len(str(key)) + 2 + value_size  # key + colon + value size
+                
+            # Process known large fields next
+            elif key in LARGE_FIELDS or any(field in key for field in LARGE_FIELDS):
+                value = obj[key]
+                if isinstance(value, str) and len(value) > max_length:
+                    result[key] = value[:max_length] + TRUNCATE_SUFFIX
+                    logger.debug(f"Truncated field {path}.{key} from {len(value)} to {max_length} chars")
+                    result_size += len(str(key)) + 2 + max_length + len(TRUNCATE_SUFFIX)
+                else:
+                    processed_value, value_size = truncate_large_strings(
+                        value, max_length, max_response_size, 
+                        f"{path}.{key}" if path else key, current_size + result_size
+                    )
+                    result[key] = processed_value
+                    result_size += len(str(key)) + 2 + value_size
+        
+        # Second pass: process remaining fields if we have size budget remaining
+        for key in obj:
+            if key not in result:
+                # Skip if we're approaching max size
+                if current_size + result_size > max_response_size * 0.9:
+                    result["_note"] = f"Response truncated to {max_response_size} characters"
+                    result_size += len("_note") + 2 + len(result["_note"])
+                    break
+                    
+                processed_value, value_size = truncate_large_strings(
+                    obj[key], max_length, max_response_size, 
+                    f"{path}.{key}" if path else key, current_size + result_size
+                )
+                result[key] = processed_value
+                result_size += len(str(key)) + 2 + value_size
+                
+        return result, result_size
+        
+    elif isinstance(obj, list):
+        result = []
+        result_size = 2  # Count brackets
+        
+        for i, item in enumerate(obj):
+            # Skip if we're approaching max size
+            if current_size + result_size > max_response_size * 0.9:
+                result.append({"_note": f"Array truncated, {len(obj) - i} of {len(obj)} items omitted"})
+                result_size += 2 + len(result[-1]["_note"])
+                break
+                
+            processed_item, item_size = truncate_large_strings(
+                item, max_length, max_response_size, 
+                f"{path}[{i}]", current_size + result_size
+            )
+            result.append(processed_item)
+            result_size += item_size
+            if i < len(obj) - 1:
+                result_size += 1  # Count comma
+                
+        return result, result_size
+        
+    elif isinstance(obj, str):
+        # Simple string truncation
+        if len(obj) > max_length:
+            # Special logic for stacktraces and large text - truncate more aggressively
+            if "stacktrace" in path.lower() or len(obj) > max_length * 2:
+                truncated = obj[:max_length] + TRUNCATE_SUFFIX
+                logger.debug(f"Truncated string at {path} from {len(obj)} to {len(truncated)} chars")
+                return truncated, len(truncated)
+            elif current_size + len(obj) > max_response_size:
+                # If this string would push us over the limit, truncate it
+                available_space = max(0, max_response_size - current_size)
+                if available_space < len(TRUNCATE_SUFFIX) + 10:
+                    return "[...]", 5
+                truncated = obj[:available_space - len(TRUNCATE_SUFFIX)] + TRUNCATE_SUFFIX
+                return truncated, len(truncated)
+        return obj, len(obj)
+        
+    else:
+        # For other types (int, float, bool, None), return as is
+        return obj, len(str(obj))
+
+def process_response_data(data: Any) -> Any:
+    """Process response data to truncate large values.
+    
+    Args:
+        data: The response data to process
+        
+    Returns:
+        Processed data with large values truncated
+    """
+    processed_data, size = truncate_large_strings(data)
+    logger.debug(f"Processed response data: original size unknown, processed size {size} chars")
+    return processed_data
 
 @dataclass
 class MCPState:
@@ -252,7 +386,10 @@ async def fetch_traces(
         )
         
         # Convert response to a serializable format
-        traces = [trace.dict() if hasattr(trace, 'dict') else trace for trace in response.data]
+        raw_traces = [trace.dict() if hasattr(trace, 'dict') else trace for trace in response.data]
+        
+        # Process and truncate large values
+        traces = process_response_data(raw_traces)
         
         logger.info(f"Found {len(traces)} traces")
         return traces
@@ -281,7 +418,10 @@ async def fetch_trace(
         response = state.langfuse_client.fetch_trace(trace_id)
         
         # Convert response to a serializable format
-        trace = response.data.dict() if hasattr(response.data, 'dict') else response.data
+        raw_trace = response.data.dict() if hasattr(response.data, 'dict') else response.data
+        
+        # Process and truncate large values
+        trace = process_response_data(raw_trace)
         
         logger.info(f"Retrieved trace {trace_id}")
         return trace
@@ -336,7 +476,10 @@ async def fetch_observations(
         )
         
         # Convert response to a serializable format
-        observations = [obs.dict() if hasattr(obs, 'dict') else obs for obs in response.data]
+        raw_observations = [obs.dict() if hasattr(obs, 'dict') else obs for obs in response.data]
+        
+        # Process and truncate large values
+        observations = process_response_data(raw_observations)
         
         logger.info(f"Found {len(observations)} observations")
         return observations
@@ -365,7 +508,10 @@ async def fetch_observation(
         response = state.langfuse_client.fetch_observation(observation_id)
         
         # Convert response to a serializable format
-        observation = response.data.dict() if hasattr(response.data, 'dict') else response.data
+        raw_observation = response.data.dict() if hasattr(response.data, 'dict') else response.data
+        
+        # Process and truncate large values
+        observation = process_response_data(raw_observation)
         
         logger.info(f"Retrieved observation {observation_id}")
         return observation
@@ -405,7 +551,10 @@ async def fetch_sessions(
         )
         
         # Convert response to a serializable format
-        sessions = [session.dict() if hasattr(session, 'dict') else session for session in response.data]
+        raw_sessions = [session.dict() if hasattr(session, 'dict') else session for session in response.data]
+        
+        # Process and truncate large values
+        sessions = process_response_data(raw_sessions)
         
         logger.info(f"Found {len(sessions)} sessions")
         return sessions
@@ -446,7 +595,10 @@ async def get_session_details(
             }
             
         # Convert traces to a serializable format
-        traces = [trace.dict() if hasattr(trace, 'dict') else trace for trace in response.data]
+        raw_traces = [trace.dict() if hasattr(trace, 'dict') else trace for trace in response.data]
+        
+        # Process and truncate large values in traces
+        traces = process_response_data(raw_traces)
         
         # Create a session object with all traces that have this session ID
         session = {
@@ -500,7 +652,10 @@ async def get_user_sessions(
             return []
             
         # Convert traces to a serializable format
-        traces = [trace.dict() if hasattr(trace, 'dict') else trace for trace in response.data]
+        raw_traces = [trace.dict() if hasattr(trace, 'dict') else trace for trace in response.data]
+        
+        # Process and truncate large values in traces
+        traces = process_response_data(raw_traces)
         
         # Group traces by session_id
         sessions_dict = {}
@@ -716,8 +871,14 @@ async def find_exceptions_in_file(
         # Sort exceptions by timestamp (newest first)
         exceptions.sort(key=lambda x: x['timestamp'] if isinstance(x['timestamp'], str) else '', reverse=True)
         
-        logger.info(f"Found {len(exceptions)} exceptions in file {filepath}")
-        return exceptions[:10]  # Return at most 10 exceptions
+        # Only take the top 10 exceptions
+        top_exceptions = exceptions[:10]
+        
+        # Process and truncate large values
+        processed_exceptions = process_response_data(top_exceptions)
+        
+        logger.info(f"Found {len(processed_exceptions)} exceptions in file {filepath}")
+        return processed_exceptions
     except Exception as e:
         logger.error(f"Error finding exceptions in file {filepath}: {str(e)}")
         logger.exception(e)
@@ -807,8 +968,11 @@ async def get_exception_details(
         # Sort exceptions by timestamp (newest first)
         exceptions.sort(key=lambda x: x['timestamp'] if isinstance(x['timestamp'], str) else '', reverse=True)
         
-        logger.info(f"Found {len(exceptions)} exceptions in trace {trace_id}")
-        return exceptions
+        # Process and truncate large values in exception details
+        processed_exceptions = process_response_data(exceptions)
+        
+        logger.info(f"Found {len(processed_exceptions)} exceptions in trace {trace_id}")
+        return processed_exceptions
     except Exception as e:
         logger.error(f"Error getting exception details for trace {trace_id}: {str(e)}")
         logger.exception(e)
