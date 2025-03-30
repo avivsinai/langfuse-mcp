@@ -6,7 +6,7 @@ alwaysApply: true
 
 # General Rules for working in langfuse-mcp project
 
+- We **ONLY** use `uv`/`uvx` in order to run, build our app, **do not use vanilla Python or scripts**
 - For debugging Cursor MCP client, the logs exist in: `~/Library/Application\ Support/Cursor/logs/`
 - In order to only find MCP related logs one can use `find ~/Library/Application\ Support/Cursor/logs/ -type f -exec grep -i "mcp" {} \; `
 - Since we aren't using SSE and there are many SSE implementations that are used, one can also use `find ~/Library/Application\ Support/Cursor/logs/ -type f -exec grep -i "mcp" {} \; | grep -v "SSE error"`
-- We **ONLY** use `uv`/`uvx` in order to run, build our app, **do not use vanilla Python or scripts**
