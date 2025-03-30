@@ -91,16 +91,14 @@ async def main():
             trace_id = None  # Will store trace ID for detailed lookup
             
             try:
-                # Calculate timestamps for past 48 hours
-                now = datetime.now(UTC)
-                two_days_ago = datetime.now(UTC) - timedelta(days=2)
+                # Calculate age in minutes for 48 hours
+                age_minutes = 48 * 60  # 48 hours in minutes
                 
-                # Find traces with a larger limit and time range
-                result = await session.call_tool("find_traces", {
+                # Fetch traces with age parameter explicitly provided
+                result = await session.call_tool("fetch_traces", {
+                    "age": age_minutes,
                     "limit": 20,
-                    "page": 1,
-                    "from_timestamp": two_days_ago,
-                    "to_timestamp": now
+                    "page": 1
                 })
                 logger.info("Retrieved traces successfully!")
                 
