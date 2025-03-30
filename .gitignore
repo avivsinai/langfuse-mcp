@@ -179,4 +179,7 @@ data/
 # Logs
 *.log.*
 
+# Project specific
+.cursor/mcp.json
+
 run_mcp.py
