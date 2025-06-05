@@ -35,10 +35,13 @@ jobs:
       continue-on-error: ${{ matrix.langfuse-pin == 'v3' }}
       run: |
         source .venv/bin/activate
-        uv run -m pytest
+        echo "Running comprehensive test suite including regressions..."
+        uv run -m pytest -v --tb=short
       
     - name: Run linting
       run: |
         source .venv/bin/activate
+        echo "Running linting checks..."
         uv run -m ruff check .
+        echo "Running formatting checks..."
         uv run -m ruff format --check . 
