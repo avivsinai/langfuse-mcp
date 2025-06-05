@@ -44,10 +44,6 @@ dev = [
     "pytest-mock",
     "ruff",
 ]
-# When experimenting with the new SDK locally:
-dev-v3 = [
-    "langfuse>=3.0.0rc0,<4.0.0",
-]
 
 [project.scripts]
 langfuse-mcp = "langfuse_mcp.__main__:main"

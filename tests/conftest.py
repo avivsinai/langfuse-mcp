@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import types
+
 import pytest
 
 from tests.fakes import FakeLangfuse
@@ -63,10 +64,10 @@ def patch_dependencies(monkeypatch: pytest.MonkeyPatch):
     class BaseModel:
         pass
 
-    def Field(*args, **kwargs):
-        return None
+    def Field(default=None, **kwargs):
+        return default
 
-    class AfterValidator:  # noqa: D401 - placeholder decorator
+    class AfterValidator:
         def __init__(self, fn):
             self.fn = fn
 
@@ -83,4 +84,3 @@ def patch_dependencies(monkeypatch: pytest.MonkeyPatch):
     # Cleanup modules inserted during the test session
     for name in ["mcp.server.fastmcp", "mcp.server", "mcp", "langfuse"]:
         sys.modules.pop(name, None)
-

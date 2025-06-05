@@ -4,6 +4,12 @@ import json
 import logging
 
 import pytest
+
+# Skip the entire module if the `mcp` package is not available. This keeps the
+# integration tests optional so that they don't fail in environments where the
+# dependency isn't installed (e.g. open source CI).
+pytest.importorskip("mcp")
+
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
