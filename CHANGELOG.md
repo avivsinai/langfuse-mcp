@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] - 2025-01-05
+
+### Changed
+- Pinned Langfuse dependency to stable v2 branch (`>=2.60,<3.0.0`) for compatibility
+- Enhanced CI matrix to test both Langfuse v2 and v3 (v3 allowed to fail)
+- Removed uv.lock from version control as recommended for libraries
+
+### Added
+- Optional dev-v3 dependency group for future Langfuse v3 migration testing
+
 ## [0.1.6] - 2025-04-01
 
 ## [0.1.5] - 2025-03-31
