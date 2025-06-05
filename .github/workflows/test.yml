@@ -13,6 +13,7 @@ jobs:
     strategy:
       matrix:
         python-version: ['3.10', '3.12']
+        langfuse-pin: ['v2', 'v3']
 
     steps:
     - uses: actions/checkout@v4
@@ -20,13 +21,18 @@ jobs:
     - name: Install uv
       uses: astral-sh/setup-uv@v3
       
-    - name: Setup virtual environment and install dependencies
+    - name: Install pinned or future Langfuse
       run: |
         uv venv
         source .venv/bin/activate
-        uv pip install -e ".[dev]"
+        if [ "${{ matrix.langfuse-pin }}" == "v3" ]; then
+          uv pip install -e ".[dev,dev-v3]"
+        else
+          uv pip install -e ".[dev]"
+        fi
       
     - name: Run tests
+      continue-on-error: ${{ matrix.langfuse-pin == 'v3' }}
       run: |
         source .venv/bin/activate
         uv run -m pytest
