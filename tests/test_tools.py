@@ -1,3 +1,4 @@
+"""Unit tests for langfuse-mcp tool functions."""
 from __future__ import annotations
 
 import asyncio
@@ -16,6 +17,7 @@ def state(tmp_path):
 
 
 def test_fetch_traces_with_observations(state):
+    """Test fetching traces with observations included."""
     from langfuse_mcp.__main__ import fetch_traces
 
     ctx = FakeContext(state)
@@ -41,6 +43,7 @@ def test_fetch_traces_with_observations(state):
 
 
 def test_fetch_trace(state):
+    """Test fetching a single trace by ID."""
     from langfuse_mcp.__main__ import fetch_trace
 
     ctx = FakeContext(state)
@@ -50,6 +53,7 @@ def test_fetch_trace(state):
 
 
 def test_fetch_observations(state):
+    """Test fetching observations with filters."""
     from langfuse_mcp.__main__ import fetch_observations
 
     ctx = FakeContext(state)
@@ -72,6 +76,7 @@ def test_fetch_observations(state):
 
 
 def test_fetch_observation(state):
+    """Test fetching a single observation by ID."""
     from langfuse_mcp.__main__ import fetch_observation
 
     ctx = FakeContext(state)
@@ -80,6 +85,7 @@ def test_fetch_observation(state):
 
 
 def test_fetch_sessions(state):
+    """Test fetching sessions with filters."""
     from langfuse_mcp.__main__ import fetch_sessions
 
     ctx = FakeContext(state)
@@ -89,6 +95,7 @@ def test_fetch_sessions(state):
 
 
 def test_get_session_details(state):
+    """Test getting detailed session information."""
     from langfuse_mcp.__main__ import get_session_details
 
     ctx = FakeContext(state)

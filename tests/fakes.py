@@ -1,3 +1,4 @@
+"""Fake classes for testing langfuse-mcp without real dependencies."""
 from __future__ import annotations
 
 import types
@@ -7,6 +8,8 @@ from typing import Any
 
 @dataclass
 class FakeResponse:
+    """Mock response object that mimics Langfuse SDK responses."""
+    
     data: Any
 
 
@@ -14,6 +17,7 @@ class FakeLangfuse:
     """Simple stand-in for the real Langfuse SDK."""
 
     def __init__(self) -> None:
+        """Initialize fake Langfuse client with test data."""
         self._traces = [
             {
                 "id": "trace_1",
@@ -81,4 +85,5 @@ class FakeContext:
     """Mimic `mcp.server.fastmcp.Context` used by the tools."""
 
     def __init__(self, state: Any) -> None:
+        """Initialize fake context with the provided state."""
         self.request_context = types.SimpleNamespace(lifespan_context=state)

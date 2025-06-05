@@ -1,3 +1,4 @@
+"""Test configuration and fixtures for langfuse-mcp package."""
 from __future__ import annotations
 
 import sys
