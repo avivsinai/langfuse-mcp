@@ -1,4 +1,5 @@
 """Fake classes for testing langfuse-mcp without real dependencies."""
+
 from __future__ import annotations
 
 import types
@@ -9,7 +10,7 @@ from typing import Any
 @dataclass
 class FakeResponse:
     """Mock response object that mimics Langfuse SDK responses."""
-    
+
     data: Any
 
 

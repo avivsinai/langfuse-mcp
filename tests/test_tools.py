@@ -1,4 +1,5 @@
 """Unit tests for langfuse-mcp tool functions."""
+
 from __future__ import annotations
 
 import asyncio
