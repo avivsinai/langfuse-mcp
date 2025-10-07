@@ -120,6 +120,28 @@ Use `--log-level` (e.g., `--log-level DEBUG`) and `--log-to-console` to control 
 
 ### Run with Docker
 
+#### Option 1: Pull from GitHub Container Registry (Recommended)
+
+Pull and run the pre-built image:
+
+```bash
+docker pull ghcr.io/avivsinai/langfuse-mcp:latest
+docker run --rm -i \
+  -e LANGFUSE_PUBLIC_KEY=YOUR_PUBLIC_KEY \
+  -e LANGFUSE_SECRET_KEY=YOUR_SECRET_KEY \
+  -e LANGFUSE_HOST=https://cloud.langfuse.com \
+  -e LANGFUSE_MCP_LOG_FILE=/logs/langfuse_mcp.log \
+  -v "$(pwd)/logs:/logs" \
+  ghcr.io/avivsinai/langfuse-mcp:latest
+```
+
+Available tags:
+- `latest` - Most recent release
+- `v0.2.0` - Specific version
+- `0.2` - Major.minor version
+
+#### Option 2: Build from source
+
 Build the image from the repository root so the container installs the current checkout instead of the latest PyPI release:
 
 ```bash
