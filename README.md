@@ -2,7 +2,7 @@
 
 [![Test](https://github.com/avivsinai/langfuse-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/avivsinai/langfuse-mcp/actions/workflows/test.yml)
 [![PyPI version](https://badge.fury.io/py/langfuse-mcp.svg)](https://badge.fury.io/py/langfuse-mcp)
-[![Python 3.10-3.13](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.10-3.14](https://img.shields.io/badge/python-3.10%E2%80%933.14-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 This project provides a Model Context Protocol (MCP) server for Langfuse, allowing AI agents to query Langfuse trace data for better debugging and observability.
@@ -29,26 +29,44 @@ cursor://anysphere.cursor-deeplink/mcp/install?name=langfuse-mcp&config=eyJjb21t
 ## Features
 
 - Integration with Langfuse for trace and observation data
+- **Prompt management** - get, list, create, and update prompts
 - Tool suite for AI agents to query trace data
 - Exception and error tracking capabilities
 - Session and user activity monitoring
 
 ## Available Tools
 
-The MCP server provides the following tools for AI agents:
+The MCP server exposes **18 tools**, grouped by domain:
 
-- `fetch_traces` - Find traces based on criteria like user ID, session ID, etc.
-- `fetch_trace` - Get a specific trace by ID
-- `fetch_observations` - Get observations filtered by type
-- `fetch_observation` - Get a specific observation by ID
-- `fetch_sessions` - List sessions in the current project
-- `get_session_details` - Get detailed information about a session
+### Traces
+- `fetch_traces` - Search/filter traces with pagination
+- `fetch_trace` - Fetch a specific trace by ID
+
+### Observations
+- `fetch_observations` - Search/filter observations with pagination
+- `fetch_observation` - Fetch a specific observation by ID
+
+### Sessions
+- `fetch_sessions` - List recent sessions with pagination
+- `get_session_details` - Get detailed session info by ID
 - `get_user_sessions` - Get all sessions for a user
-- `find_exceptions` - Find exceptions and errors in traces
+
+### Exceptions
+- `find_exceptions` - Find exceptions grouped by file/function/type
 - `find_exceptions_in_file` - Find exceptions in a specific file
-- `get_exception_details` - Get detailed information about an exception
-- `get_error_count` - Get the count of errors
-- `get_data_schema` - Get schema information for the data structures
+- `get_exception_details` - Get detailed info about a specific exception
+- `get_error_count` - Get total error count
+
+### Prompts
+- `get_prompt` - Fetch prompt with resolved dependencies
+- `get_prompt_unresolved` - Fetch prompt with dependency tags intact
+- `list_prompts` - List/filter prompts with pagination
+- `create_text_prompt` - Create new text prompt version
+- `create_chat_prompt` - Create new chat prompt version
+- `update_prompt_labels` - Update labels for a prompt version
+
+### Schema
+- `get_data_schema` - Get schema information for the data structures used in responses
 
 ## Setup
 
@@ -60,7 +78,7 @@ If you already have an older version of `uv` installed, you might need to update
 
 ### Installation
 
-> **Requirement**: The server now depends on the Langfuse Python SDK v3. Installations automatically pull `langfuse>=3.0.0` and require Python 3.10–3.13 while upstream SDK support for 3.14 is pending.
+> **Requirement**: The server depends on the Langfuse Python SDK v3. Installations automatically pull `langfuse>=3.0.0` and require Python 3.10+.
 
 ```bash
 uv pip install langfuse-mcp
@@ -117,6 +135,20 @@ langfuse-mcp --public-key YOUR_KEY --secret-key YOUR_SECRET --host https://cloud
 
 The server writes diagnostic logs to `/tmp/langfuse_mcp.log`. Remove the `--host` switch if you are targeting the default Cloud endpoint.
 Use `--log-level` (e.g., `--log-level DEBUG`) and `--log-to-console` to control verbosity during debugging.
+
+### Selective Tool Loading
+
+Use `--tools` to load only specific tool groups, reducing token overhead:
+
+```bash
+# Load only trace and prompt tools
+langfuse-mcp --tools traces,prompts
+
+# Available groups: traces, observations, sessions, exceptions, prompts, schema
+# Default: all
+```
+
+Or set via environment: `LANGFUSE_MCP_TOOLS=traces,prompts`
 
 ### Run with Docker
 
@@ -255,12 +287,11 @@ This project uses dynamic versioning based on Git tags:
 
 For a detailed history of changes, please see the [CHANGELOG.md](CHANGELOG.md) file.
 
-## Langfuse 3.x migration notes
+## v1.0 Update Notes
 
-- The MCP server now uses the Langfuse Python SDK v3 resource clients (`langfuse.api.trace.list`, `langfuse.api.observations.get_many`, etc.) and must currently run on Python 3.10–3.13 because the upstream SDK still relies on Pydantic v1 internals.
-- Unit tests use a v3-style fake client that fails if legacy `fetch_*` helpers are invoked, helping catch regressions early.
-- Tool responses now include pagination metadata when the Langfuse API returns cursors, while retaining the existing MCP interface.
-- Diagnostic logs continue to stream to `/tmp/langfuse_mcp.log`; this is useful when verifying the upgraded integration against a live Langfuse deployment.
+- **Prompt management** - get, list, create, and update prompts directly from your AI agent
+- **Python 3.10–3.14 support** - removed Python version restrictions
+- **Dependency upgrades** - `mcp[cli]>=1.20.0`, `langfuse>=3.0.0` (no upper bound)
 
 ## Contributing
 

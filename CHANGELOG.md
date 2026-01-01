@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-01-01
+
+### Added
+- **Prompt management tools** - get, list, create, and update Langfuse prompts:
+  - `get_prompt`, `get_prompt_unresolved`, `list_prompts`
+  - `create_text_prompt`, `create_chat_prompt`, `update_prompt_labels`
+- **Selective tool loading** via `--tools` flag or `LANGFUSE_MCP_TOOLS` env var
+  - Load only needed tool groups (traces, observations, sessions, exceptions, prompts, schema)
+  - Reduces token overhead when full toolset not required
+- Unit tests covering new prompt tools
+
+### Changed
+- Removed Python 3.14 block; Python support is now 3.10–3.14
+- Upgraded dependencies: `mcp[cli]>=1.20.0`, `langfuse>=3.0.0` (no upper bound)
+- Tool responses still use the standard envelope format `{"data": ..., "metadata": {...}}`
+
 ## [0.2.1] - 2025-10-20
 
 ### Fixed
