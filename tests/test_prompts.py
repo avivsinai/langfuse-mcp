@@ -67,7 +67,7 @@ def test_create_chat_prompt(state):
 
 
 def test_update_prompt_labels(state):
-    """update_prompt_labels should replace labels for a prompt version."""
+    """update_prompt_labels should add labels for a prompt version."""
     from langfuse_mcp.__main__ import create_text_prompt, update_prompt_labels
 
     ctx = FakeContext(state)
@@ -77,5 +77,5 @@ def test_update_prompt_labels(state):
     data = result["data"]
     assert data["name"] == "greeting"
     assert data["version"] == 1
-    assert data["labels"] == ["production"]
+    assert data["labels"] == ["production", "staging"]
     assert state.langfuse_client.last_update_kwargs["new_labels"] == ["production"]

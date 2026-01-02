@@ -2,7 +2,7 @@
 
 [![Test](https://github.com/avivsinai/langfuse-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/avivsinai/langfuse-mcp/actions/workflows/test.yml)
 [![PyPI version](https://badge.fury.io/py/langfuse-mcp.svg)](https://badge.fury.io/py/langfuse-mcp)
-[![Python 3.10-3.14](https://img.shields.io/badge/python-3.10%E2%80%933.14-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 This project provides a Model Context Protocol (MCP) server for Langfuse, allowing AI agents to query Langfuse trace data for better debugging and observability.
@@ -290,7 +290,7 @@ For a detailed history of changes, please see the [CHANGELOG.md](CHANGELOG.md) f
 ## v1.0 Update Notes
 
 - **Prompt management** - get, list, create, and update prompts directly from your AI agent
-- **Python 3.10–3.14 support** - removed Python version restrictions
+- **Python 3.10+ support** - removed Python version restrictions
 - **Dependency upgrades** - `mcp[cli]>=1.20.0`, `langfuse>=3.0.0` (no upper bound)
 
 ## Contributing

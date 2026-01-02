@@ -355,7 +355,9 @@ class FakeLangfuse:
         new_labels_list = list(new_labels or [])
         for prompt in versions:
             if prompt.version == version:
-                prompt.labels = new_labels_list
+                # Add new labels while preserving existing ones (new labels first).
+                merged = list(dict.fromkeys([*new_labels_list, *prompt.labels]))
+                prompt.labels = merged
                 prompt.updated_at = datetime.now(timezone.utc)
                 updated = prompt
             else:

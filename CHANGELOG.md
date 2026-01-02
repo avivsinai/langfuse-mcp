@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit tests covering new prompt tools
 
 ### Changed
-- Removed Python 3.14 block; Python support is now 3.10–3.14
+- Removed Python 3.14 block; Python support is now 3.10+
 - Upgraded dependencies: `mcp[cli]>=1.20.0`, `langfuse>=3.0.0` (no upper bound)
 - Tool responses still use the standard envelope format `{"data": ..., "metadata": {...}}`
 

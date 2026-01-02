@@ -2289,22 +2289,29 @@ async def get_prompt(
 
         # Extract prompt content based on type
         prompt_content: Any
-        prompt_type: str
+        prompt_type = getattr(prompt, "type", None)
+        if isinstance(prompt_type, str):
+            prompt_type = prompt_type.lower()
+        else:
+            prompt_type = None
+
         if hasattr(prompt, "prompt"):
             prompt_content = prompt.prompt
-            prompt_type = "text"
+            if prompt_type is None:
+                prompt_type = "chat" if isinstance(prompt_content, list) else "text"
         elif hasattr(prompt, "messages"):
-            prompt_content = prompt.messages if hasattr(prompt, "messages") else None
-            prompt_type = "chat"
+            prompt_content = getattr(prompt, "messages")
+            if prompt_type is None:
+                prompt_type = "chat"
         else:
             prompt_content = str(prompt)
-            prompt_type = "unknown"
+            prompt_type = prompt_type or "unknown"
 
         # Build response
         result = {
             "name": name,
             "version": getattr(prompt, "version", None),
-            "type": prompt_type,
+            "type": prompt_type or "unknown",
             "prompt": prompt_content,
             "labels": getattr(prompt, "labels", []),
             "tags": getattr(prompt, "tags", []),
@@ -2356,14 +2363,20 @@ async def get_prompt_unresolved(
 
     try:
         # Use API directly to get unresolved prompt
-        api_kwargs: dict[str, Any] = {"name": name}
+        api_kwargs: dict[str, Any] = {"name": name, "resolve": False}
         if label:
             api_kwargs["label"] = label
         if version:
             api_kwargs["version"] = version
 
-        # Access the prompts API directly
-        prompt_response = state.langfuse_client.api.prompts.get(**api_kwargs)
+        # Access the prompts API directly. If resolve isn't supported, fail loudly.
+        try:
+            prompt_response = state.langfuse_client.api.prompts.get(**api_kwargs)
+        except TypeError as e:
+            logger.error("Langfuse SDK does not support resolve=false for prompts.get; cannot fetch unresolved prompt")
+            raise RuntimeError(
+                "Langfuse SDK does not support resolve=false for prompts.get; upgrade the SDK to use this tool."
+            ) from e
 
         if prompt_response is None:
             label_msg = f" with label '{label}'" if label else ""
@@ -2596,17 +2609,56 @@ async def update_prompt_labels(
     ctx: Context,
     name: str = Field(..., description="The name of the prompt to update"),
     version: int = Field(..., ge=1, description="The prompt version to update"),
-    labels: list[str] = Field(..., description="New labels to assign (can be empty to remove all labels)"),
+    labels: list[str] = Field(
+        ...,
+        description=(
+            "Labels to add to this version (can be empty to add none). "
+            "Existing labels are preserved; labels are unique across versions."
+        ),
+    ),
 ) -> ResponseDict:
     """Update labels for a specific prompt version.
 
-    This is the only supported mutation for existing prompts. Labels are unique across
-    versions, and the 'latest' label is managed by Langfuse.
+    This is the only supported mutation for existing prompts. Provided labels are added
+    to the version (existing labels are preserved). Labels are unique across versions,
+    and the 'latest' label is managed by Langfuse.
     """
     state = cast(MCPState, ctx.request_context.lifespan_context)
 
     try:
-        updated_prompt = state.langfuse_client.update_prompt(name=name, version=version, new_labels=labels)
+        def _try_update(update_fn: Any) -> Any | None:
+            try:
+                return update_fn(name=name, version=version, new_labels=labels)
+            except TypeError:
+                pass
+            try:
+                return update_fn(name=name, version=version, newLabels=labels)
+            except TypeError:
+                pass
+            try:
+                return update_fn(name=name, version=version, labels=labels)
+            except TypeError:
+                return None
+
+        updated_prompt = None
+        if hasattr(state.langfuse_client, "update_prompt"):
+            updated_prompt = _try_update(state.langfuse_client.update_prompt)
+        elif hasattr(state.langfuse_client, "api"):
+            api = state.langfuse_client.api
+            for attr in ("prompt_version", "promptVersion", "prompt_versions", "promptVersions"):
+                if not hasattr(api, attr):
+                    continue
+                updater = getattr(api, attr)
+                if not hasattr(updater, "update"):
+                    continue
+                updated_prompt = _try_update(updater.update)
+                if updated_prompt is not None:
+                    break
+
+        if updated_prompt is None:
+            raise RuntimeError(
+                "Langfuse SDK does not expose a prompt label update method; upgrade the SDK to use this tool."
+            )
 
         result = {
             "name": getattr(updated_prompt, "name", name),
@@ -2700,7 +2752,7 @@ def app_factory(
 
     # Register only enabled tool groups
     registered = []
-    for group in enabled_tools:
+    for group in sorted(enabled_tools):
         if group in TOOL_GROUPS:
             for tool_name in TOOL_GROUPS[group]:
                 if tool_name in tool_funcs:
