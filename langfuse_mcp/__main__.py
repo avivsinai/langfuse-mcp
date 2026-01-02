@@ -2374,9 +2374,7 @@ async def get_prompt_unresolved(
             prompt_response = state.langfuse_client.api.prompts.get(**api_kwargs)
         except TypeError as e:
             logger.error("Langfuse SDK does not support resolve=false for prompts.get; cannot fetch unresolved prompt")
-            raise RuntimeError(
-                "Langfuse SDK does not support resolve=false for prompts.get; upgrade the SDK to use this tool."
-            ) from e
+            raise RuntimeError("Langfuse SDK does not support resolve=false for prompts.get; upgrade the SDK to use this tool.") from e
 
         if prompt_response is None:
             label_msg = f" with label '{label}'" if label else ""
@@ -2444,15 +2442,17 @@ async def list_prompts(
         # Simplify each prompt to metadata
         prompt_list = []
         for p in raw_prompts:
-            prompt_list.append({
-                "name": p.get("name"),
-                "type": p.get("type"),
-                "versions": p.get("versions", []),
-                "labels": p.get("labels", []),
-                "tags": p.get("tags", []),
-                "lastUpdatedAt": p.get("lastUpdatedAt") or p.get("updatedAt"),
-                "lastConfig": p.get("lastConfig") or p.get("config"),
-            })
+            prompt_list.append(
+                {
+                    "name": p.get("name"),
+                    "type": p.get("type"),
+                    "versions": p.get("versions", []),
+                    "labels": p.get("labels", []),
+                    "tags": p.get("tags", []),
+                    "lastUpdatedAt": p.get("lastUpdatedAt") or p.get("updatedAt"),
+                    "lastConfig": p.get("lastConfig") or p.get("config"),
+                }
+            )
 
         logger.info(f"Listed {len(prompt_list)} prompts (page={page}, limit={limit})")
 
@@ -2476,9 +2476,7 @@ async def create_text_prompt(
     name: str = Field(..., description="The name of the prompt to create"),
     prompt: str = Field(..., description="Prompt text content (supports {{variables}})"),
     labels: list[str] | None = Field(None, description="Labels to assign (e.g., ['production', 'staging'])"),
-    config: dict[str, Any] | None = Field(
-        None, description="Optional JSON config (e.g., {model: 'gpt-4', temperature: 0.7})"
-    ),
+    config: dict[str, Any] | None = Field(None, description="Optional JSON config (e.g., {model: 'gpt-4', temperature: 0.7})"),
     tags: list[str] | None = Field(None, description="Optional tags for organization (e.g., ['experimental', 'v2'])"),
     commit_message: str | None = Field(None, description="Optional commit message describing the changes"),
 ) -> ResponseDict:
@@ -2541,9 +2539,7 @@ async def create_chat_prompt(
         ..., description="Chat messages in the format [{role: 'system'|'user'|'assistant', content: '...'}]"
     ),
     labels: list[str] | None = Field(None, description="Labels to assign (e.g., ['production', 'staging'])"),
-    config: dict[str, Any] | None = Field(
-        None, description="Optional JSON config (e.g., {model: 'gpt-4', temperature: 0.7})"
-    ),
+    config: dict[str, Any] | None = Field(None, description="Optional JSON config (e.g., {model: 'gpt-4', temperature: 0.7})"),
     tags: list[str] | None = Field(None, description="Optional tags for organization (e.g., ['experimental', 'v2'])"),
     commit_message: str | None = Field(None, description="Optional commit message describing the changes"),
 ) -> ResponseDict:
@@ -2612,8 +2608,7 @@ async def update_prompt_labels(
     labels: list[str] = Field(
         ...,
         description=(
-            "Labels to add to this version (can be empty to add none). "
-            "Existing labels are preserved; labels are unique across versions."
+            "Labels to add to this version (can be empty to add none). Existing labels are preserved; labels are unique across versions."
         ),
     ),
 ) -> ResponseDict:
@@ -2626,6 +2621,7 @@ async def update_prompt_labels(
     state = cast(MCPState, ctx.request_context.lifespan_context)
 
     try:
+
         def _try_update(update_fn: Any) -> Any | None:
             try:
                 return update_fn(name=name, version=version, new_labels=labels)
@@ -2656,9 +2652,7 @@ async def update_prompt_labels(
                     break
 
         if updated_prompt is None:
-            raise RuntimeError(
-                "Langfuse SDK does not expose a prompt label update method; upgrade the SDK to use this tool."
-            )
+            raise RuntimeError("Langfuse SDK does not expose a prompt label update method; upgrade the SDK to use this tool.")
 
         result = {
             "name": getattr(updated_prompt, "name", name),
