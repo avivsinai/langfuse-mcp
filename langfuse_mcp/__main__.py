@@ -35,6 +35,11 @@ from mcp.server.fastmcp import Context, FastMCP
 from pydantic import AfterValidator, BaseModel, Field
 
 try:
+    from pydantic.fields import FieldInfo
+except ImportError:  # pragma: no cover - pydantic stubbed in tests
+    FieldInfo = None
+
+try:
     __version__ = version("langfuse-mcp")
 except PackageNotFoundError:
     # Package is not installed (development mode)
@@ -307,6 +312,13 @@ def _sdk_object_to_python(obj: Any) -> Any:
         return _sdk_object_to_python(data)
 
     return obj
+
+
+def _normalize_field_default(value: Any) -> Any:
+    """Treat pydantic FieldInfo defaults as unset values for direct function calls."""
+    if FieldInfo is not None and isinstance(value, FieldInfo):
+        return None
+    return value
 
 
 def _prompts_get(prompts_client: Any, *, name: str, **kwargs: Any) -> Any:
@@ -2419,9 +2431,7 @@ async def get_prompt_unresolved(
             msg = str(e)
             if "resolve" in msg or "unexpected keyword" in msg:
                 logger.error("Langfuse SDK does not support resolve=false for prompts.get; cannot fetch unresolved prompt")
-                raise RuntimeError(
-                    "Langfuse SDK does not support resolve=false for prompts.get; upgrade the SDK to use this tool."
-                ) from e
+                raise RuntimeError("Langfuse SDK does not support resolve=false for prompts.get; upgrade the SDK to use this tool.") from e
             raise
 
         if prompt_response is None:
@@ -2436,9 +2446,7 @@ async def get_prompt_unresolved(
         if resolved:
             logger.warning("Prompt resolve=false is not supported by the SDK; returning resolved prompt content.")
 
-        logger.info(
-            f"Retrieved prompt '{name}' (version={raw_prompt.get('version')}, resolved={resolved})"
-        )
+        logger.info(f"Retrieved prompt '{name}' (version={raw_prompt.get('version')}, resolved={resolved})")
         return {"data": raw_prompt, "metadata": {"found": True, "resolved": resolved}}
 
     except Exception as e:
@@ -2542,6 +2550,11 @@ async def create_text_prompt(
     state = cast(MCPState, ctx.request_context.lifespan_context)
 
     try:
+        labels = _normalize_field_default(labels)
+        tags = _normalize_field_default(tags)
+        config = _normalize_field_default(config)
+        commit_message = _normalize_field_default(commit_message)
+
         if labels is not None and not isinstance(labels, list):
             raise ValueError("labels must be a list of strings")
         if labels is not None and not all(isinstance(label, str) for label in labels):
@@ -2611,6 +2624,11 @@ async def create_chat_prompt(
     state = cast(MCPState, ctx.request_context.lifespan_context)
 
     try:
+        labels = _normalize_field_default(labels)
+        tags = _normalize_field_default(tags)
+        config = _normalize_field_default(config)
+        commit_message = _normalize_field_default(commit_message)
+
         if labels is not None and not isinstance(labels, list):
             raise ValueError("labels must be a list of strings")
         if labels is not None and not all(isinstance(label, str) for label in labels):
