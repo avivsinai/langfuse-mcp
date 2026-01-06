@@ -184,3 +184,6 @@ run_mcp.py
 dump/
 *.out
 .vscode
+
+# AMQ co-op mode
+.agent-mail/

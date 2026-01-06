@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-01-06
+
+### Added
+- **Prompt management tools** - get, list, create, and update Langfuse prompts:
+  - `get_prompt`, `get_prompt_unresolved`, `list_prompts`
+  - `create_text_prompt`, `create_chat_prompt`, `update_prompt_labels`
+- **Selective tool loading** via `--tools` flag or `LANGFUSE_MCP_TOOLS` env var
+  - Load only needed tool groups (traces, observations, sessions, exceptions, prompts, schema)
+  - Reduces token overhead when full toolset not required
+- Unit tests covering new prompt tools
+
+### Changed
+- Bumped Langfuse SDK minimum version to `3.11.2` (still capped below 4.0.0).
+
 ## [0.2.1] - 2025-10-20
 
 ### Fixed

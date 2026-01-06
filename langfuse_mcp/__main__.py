@@ -35,6 +35,11 @@ from mcp.server.fastmcp import Context, FastMCP
 from pydantic import AfterValidator, BaseModel, Field
 
 try:
+    from pydantic.fields import FieldInfo
+except ImportError:  # pragma: no cover - pydantic stubbed in tests
+    FieldInfo = None
+
+try:
     __version__ = version("langfuse-mcp")
 except PackageNotFoundError:
     # Package is not installed (development mode)
@@ -87,6 +92,17 @@ DAY = 24 * HOUR
 MAX_FIELD_LENGTH = 500  # Maximum string length for field values
 MAX_RESPONSE_SIZE = 20000  # Maximum size of response object in characters
 TRUNCATE_SUFFIX = "..."  # Suffix to add to truncated fields
+
+# Tool groups for selective loading (reduces token overhead)
+TOOL_GROUPS = {
+    "traces": ["fetch_traces", "fetch_trace"],
+    "observations": ["fetch_observations", "fetch_observation"],
+    "sessions": ["fetch_sessions", "get_session_details", "get_user_sessions"],
+    "exceptions": ["find_exceptions", "find_exceptions_in_file", "get_exception_details", "get_error_count"],
+    "prompts": ["get_prompt", "get_prompt_unresolved", "list_prompts", "create_text_prompt", "create_chat_prompt", "update_prompt_labels"],
+    "schema": ["get_data_schema"],
+}
+ALL_TOOL_GROUPS = set(TOOL_GROUPS.keys())
 
 # Common field names that often contain large values
 LARGE_FIELDS = [
@@ -254,6 +270,15 @@ def _build_arg_parser(env_defaults: dict[str, Any]) -> argparse.ArgumentParser:
         dest="log_to_console",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--tools",
+        type=str,
+        default=os.getenv("LANGFUSE_MCP_TOOLS", "all"),
+        help=(
+            "Comma-separated tool groups to enable: traces,observations,sessions,exceptions,prompts,schema "
+            "or 'all' (default). Reduces token overhead when only specific capabilities needed."
+        ),
+    )
 
     return parser
 
@@ -287,6 +312,37 @@ def _sdk_object_to_python(obj: Any) -> Any:
         return _sdk_object_to_python(data)
 
     return obj
+
+
+def _normalize_field_default(value: Any) -> Any:
+    """Treat pydantic FieldInfo defaults as unset values for direct function calls."""
+    if FieldInfo is not None and isinstance(value, FieldInfo):
+        return None
+    return value
+
+
+def _prompts_get(prompts_client: Any, *, name: str, **kwargs: Any) -> Any:
+    """Call prompts.get with the correct parameter name across SDK versions."""
+    try:
+        params = inspect.signature(prompts_client.get).parameters
+    except (TypeError, ValueError):
+        params = {}
+
+    call_kwargs = dict(kwargs)
+    if "prompt_name" in params:
+        call_kwargs["prompt_name"] = name
+    else:
+        call_kwargs["name"] = name
+
+    return prompts_client.get(**call_kwargs)
+
+
+def _prompts_get_supports_resolve(prompts_client: Any) -> bool:
+    try:
+        params = inspect.signature(prompts_client.get).parameters
+    except (TypeError, ValueError):
+        return False
+    return "resolve" in params
 
 
 def _extract_items_from_response(response: Any) -> tuple[list[Any], dict[str, Any]]:
@@ -1011,64 +1067,22 @@ async def fetch_traces(
         description=(
             "If True, fetch and include the full observation objects instead of just IDs. "
             "Use this when you need access to system prompts, model parameters, or other details stored "
-            "within observations. Significantly increases response time but provides complete data. "
-            "Pairs well with output_mode='full_json_file' for complete dumps."
+            "within observations. Significantly increases response time but provides complete data."
         ),
     ),
     output_mode: OUTPUT_MODE_LITERAL = Field(
         OutputMode.COMPACT,
         description=(
-            "Controls the output format and action. "
-            "'compact' (default): Returns a summarized JSON object optimized for direct agent consumption. "
-            "'full_json_string': Returns the complete, raw JSON data serialized as a string. "
-            "'full_json_file': Returns a summarized JSON object AND saves the complete data to a file."
+            "Controls the output format: 'compact' (default) returns summarized JSON, "
+            "'full_json_string' returns complete raw JSON as string, "
+            "'full_json_file' saves complete data to file and returns summary with path."
         ),
     ),
 ) -> ResponseDict | str:
-    """Find traces based on filters.
-
-    Uses the Langfuse API to search for traces that match the provided filters.
-    All filter parameters are optional - if not provided, no filtering is applied
-    for that field.
-
-    Args:
-        ctx: Context object containing lifespan context with Langfuse client
-        age: Minutes ago to start looking (e.g., 1440 for 24 hours)
-        name: Name of the trace to filter by (optional)
-        user_id: User ID to filter traces by (optional)
-        session_id: Session ID to filter traces by (optional)
-        metadata: Metadata fields to filter by (optional)
-        page: Page number for pagination (starts at 1)
-        limit: Maximum number of traces to return per page
-        tags: Tag or comma-separated list of tags to filter traces by
-        include_observations: If True, fetch and include the full observation objects instead of just IDs.
-            Use this when you need access to system prompts, model parameters, or other details stored
-            within observations. Significantly increases response time but provides complete data.
-        output_mode: Controls the output format and detail level
-
-    Returns:
-        One of the following based on output_mode:
-        - For 'compact' and 'full_json_file': A response dictionary with the structure:
-          {
-              "data": List of trace objects,
-              "metadata": {
-                  "item_count": Number of traces,
-                  "file_path": Path to saved file (only for full_json_file mode),
-                  "file_info": File save details (only for full_json_file mode)
-              }
-          }
-        - For 'full_json_string': A string containing the full JSON response
-
-    Usage Tips:
-        - For quick browsing: use include_observations=False with output_mode="compact"
-        - For full data but viewable in responses: use include_observations=True with output_mode="compact"
-        - For complete data dumps: use include_observations=True with output_mode="full_json_file"
-    """
+    """Find traces based on filters. All filter parameters are optional."""
     age = validate_age(age)
 
     state = cast(MCPState, ctx.request_context.lifespan_context)
-
-    age = validate_age(age)
 
     # Calculate timestamps from age
     from_timestamp = datetime.now(UTC) - timedelta(minutes=age)
@@ -2251,44 +2265,559 @@ Scores are evaluations attached to traces or observations.
     return schema
 
 
-def app_factory(public_key: str, secret_key: str, host: str, cache_size: int = 100, dump_dir: str = None) -> FastMCP:
+# =============================================================================
+# Prompt Management Tools
+# =============================================================================
+
+
+async def get_prompt(
+    ctx: Context,
+    name: str = Field(..., description="The name of the prompt to fetch"),
+    label: str | None = Field(
+        None,
+        description="Label to fetch (e.g., 'production', 'staging'). Mutually exclusive with version.",
+    ),
+    version: int | None = Field(
+        None,
+        description="Specific version number to fetch. Mutually exclusive with label.",
+    ),
+) -> ResponseDict:
+    """Fetch a specific prompt by name with resolved dependencies.
+
+    Retrieves a prompt from Langfuse with all dependency tags resolved. Uses the SDK's
+    built-in caching for optimal performance.
+
+    Args:
+        ctx: Context object containing lifespan context with Langfuse client
+        name: The name of the prompt to fetch
+        label: Optional label to fetch (e.g., 'production'). Cannot be used with version.
+        version: Optional specific version number. Cannot be used with label.
+
+    Returns:
+        A dictionary containing the prompt details:
+        - id: Unique prompt identifier
+        - name: Prompt name
+        - version: Version number
+        - type: 'text' or 'chat'
+        - prompt: The prompt content (string for text, list for chat)
+        - labels: List of labels assigned to this version
+        - tags: List of tags
+        - config: Model configuration (temperature, model, etc.)
+
+    Raises:
+        ValueError: If both label and version are specified
+        LookupError: If prompt not found
+    """
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+
+    if label and version:
+        raise ValueError("Cannot specify both label and version - they are mutually exclusive")
+
+    try:
+        # Use SDK's get_prompt for caching benefits
+        kwargs: dict[str, Any] = {"name": name}
+        if label:
+            kwargs["label"] = label
+        if version:
+            kwargs["version"] = version
+
+        prompt = state.langfuse_client.get_prompt(**kwargs)
+
+        if prompt is None:
+            label_msg = f" with label '{label}'" if label else ""
+            version_msg = f" with version {version}" if version else ""
+            raise LookupError(f"Prompt '{name}' not found{label_msg}{version_msg}")
+
+        # Extract prompt content based on type
+        prompt_content: Any
+        prompt_type = getattr(prompt, "type", None)
+        if isinstance(prompt_type, str):
+            prompt_type = prompt_type.lower()
+        else:
+            prompt_type = None
+
+        if hasattr(prompt, "prompt"):
+            prompt_content = prompt.prompt
+            if prompt_type is None:
+                prompt_type = "chat" if isinstance(prompt_content, list) else "text"
+        elif hasattr(prompt, "messages"):
+            prompt_content = getattr(prompt, "messages")
+            if prompt_type is None:
+                prompt_type = "chat"
+        else:
+            prompt_content = str(prompt)
+            prompt_type = prompt_type or "unknown"
+
+        # Build response
+        result = {
+            "name": name,
+            "version": getattr(prompt, "version", None),
+            "type": prompt_type or "unknown",
+            "prompt": prompt_content,
+            "labels": getattr(prompt, "labels", []),
+            "tags": getattr(prompt, "tags", []),
+            "config": getattr(prompt, "config", {}),
+        }
+        prompt_id = getattr(prompt, "id", None)
+        if prompt_id is None and isinstance(prompt, dict):
+            prompt_id = prompt.get("id")
+        if prompt_id is not None:
+            result["id"] = prompt_id
+
+        logger.info(f"Retrieved prompt '{name}' (version={result['version']}, type={prompt_type})")
+        return {"data": result, "metadata": {"found": True}}
+
+    except Exception as e:
+        logger.error(f"Error fetching prompt '{name}': {e}")
+        raise
+
+
+async def get_prompt_unresolved(
+    ctx: Context,
+    name: str = Field(..., description="The name of the prompt to fetch"),
+    label: str | None = Field(
+        None,
+        description="Label to fetch (e.g., 'production', 'staging'). Mutually exclusive with version.",
+    ),
+    version: int | None = Field(
+        None,
+        description="Specific version number to fetch. Mutually exclusive with label.",
+    ),
+) -> ResponseDict:
+    """Fetch a specific prompt by name WITHOUT resolving dependencies.
+
+    Returns raw prompt content with dependency tags intact (e.g., @@@langfusePrompt:name=xxx@@@) when
+    the SDK supports resolve=false. Otherwise returns the resolved prompt and marks metadata.resolved=True.
+    Useful for analyzing prompt composition and debugging dependency chains.
+
+    Args:
+        ctx: Context object containing lifespan context with Langfuse client
+        name: The name of the prompt to fetch
+        label: Optional label to fetch. Cannot be used with version.
+        version: Optional specific version number. Cannot be used with label.
+
+    Returns:
+        A dictionary containing the raw prompt details with dependency tags preserved.
+
+    Raises:
+        ValueError: If both label and version are specified
+        LookupError: If prompt not found
+    """
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+
+    if label and version:
+        raise ValueError("Cannot specify both label and version - they are mutually exclusive")
+
+    try:
+        # Use API directly to get unresolved prompt
+        api_kwargs: dict[str, Any] = {}
+        if label:
+            api_kwargs["label"] = label
+        if version:
+            api_kwargs["version"] = version
+
+        # Access the prompts API directly.
+        if not hasattr(state.langfuse_client, "api") or not hasattr(state.langfuse_client.api, "prompts"):
+            raise RuntimeError("Langfuse SDK does not expose prompts.get; upgrade the SDK to use this tool.")
+        if not hasattr(state.langfuse_client.api.prompts, "get"):
+            raise RuntimeError("Langfuse SDK does not expose prompts.get; upgrade the SDK to use this tool.")
+        supports_resolve = _prompts_get_supports_resolve(state.langfuse_client.api.prompts)
+        try:
+            if supports_resolve:
+                prompt_response = _prompts_get(state.langfuse_client.api.prompts, name=name, resolve=False, **api_kwargs)
+            else:
+                prompt_response = _prompts_get(state.langfuse_client.api.prompts, name=name, **api_kwargs)
+        except TypeError as e:
+            msg = str(e)
+            if "resolve" in msg or "unexpected keyword" in msg:
+                logger.error("Langfuse SDK does not support resolve=false for prompts.get; cannot fetch unresolved prompt")
+                raise RuntimeError("Langfuse SDK does not support resolve=false for prompts.get; upgrade the SDK to use this tool.") from e
+            raise
+
+        if prompt_response is None:
+            label_msg = f" with label '{label}'" if label else ""
+            version_msg = f" with version {version}" if version else ""
+            raise LookupError(f"Prompt '{name}' not found{label_msg}{version_msg}")
+
+        # Convert to dict
+        raw_prompt = _sdk_object_to_python(prompt_response)
+
+        resolved = not supports_resolve
+        if resolved:
+            logger.warning("Prompt resolve=false is not supported by the SDK; returning resolved prompt content.")
+
+        logger.info(f"Retrieved prompt '{name}' (version={raw_prompt.get('version')}, resolved={resolved})")
+        return {"data": raw_prompt, "metadata": {"found": True, "resolved": resolved}}
+
+    except Exception as e:
+        logger.error(f"Error fetching unresolved prompt '{name}': {e}")
+        raise
+
+
+async def list_prompts(
+    ctx: Context,
+    name: str | None = Field(None, description="Filter by exact prompt name"),
+    label: str | None = Field(None, description="Filter by label (e.g., 'production', 'staging')"),
+    tag: str | None = Field(None, description="Filter by tag"),
+    page: int = Field(1, ge=1, description="Page number for pagination (starts at 1)"),
+    limit: int = Field(50, ge=1, le=100, description="Items per page (max 100)"),
+) -> ResponseDict:
+    """List and filter prompts in the project.
+
+    Returns metadata about prompts including versions, labels, tags, and last updated time.
+
+    Args:
+        ctx: Context object containing lifespan context with Langfuse client
+        name: Optional filter by exact prompt name
+        label: Optional filter by label on any version
+        tag: Optional filter by tag
+        page: Page number for pagination (starts at 1)
+        limit: Maximum items per page (max 100)
+
+    Returns:
+        A dictionary containing:
+        - data: List of prompt metadata objects
+        - metadata: Pagination info (page, limit, total)
+    """
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+
+    try:
+        # Build API kwargs
+        api_kwargs: dict[str, Any] = {
+            "page": page,
+            "limit": limit,
+        }
+        if name:
+            api_kwargs["name"] = name
+        if label:
+            api_kwargs["label"] = label
+        if tag:
+            api_kwargs["tag"] = tag
+
+        # Call prompts list API
+        response = state.langfuse_client.api.prompts.list(**api_kwargs)
+
+        # Extract items and pagination
+        items, pagination = _extract_items_from_response(response)
+        raw_prompts = [_sdk_object_to_python(p) for p in items]
+
+        # Simplify each prompt to metadata
+        prompt_list = []
+        for p in raw_prompts:
+            prompt_list.append(
+                {
+                    "name": p.get("name"),
+                    "type": p.get("type"),
+                    "versions": p.get("versions", []),
+                    "labels": p.get("labels", []),
+                    "tags": p.get("tags", []),
+                    "lastUpdatedAt": p.get("lastUpdatedAt") or p.get("updatedAt"),
+                    "lastConfig": p.get("lastConfig") or p.get("config"),
+                }
+            )
+
+        logger.info(f"Listed {len(prompt_list)} prompts (page={page}, limit={limit})")
+
+        return {
+            "data": prompt_list,
+            "metadata": {
+                "page": page,
+                "limit": limit,
+                "item_count": len(prompt_list),
+                "total": pagination.get("total"),
+            },
+        }
+
+    except Exception as e:
+        logger.error(f"Error listing prompts: {e}")
+        raise
+
+
+async def create_text_prompt(
+    ctx: Context,
+    name: str = Field(..., description="The name of the prompt to create"),
+    prompt: str = Field(..., description="Prompt text content (supports {{variables}})"),
+    labels: list[str] | None = Field(None, description="Labels to assign (e.g., ['production', 'staging'])"),
+    config: dict[str, Any] | None = Field(None, description="Optional JSON config (e.g., {model: 'gpt-4', temperature: 0.7})"),
+    tags: list[str] | None = Field(None, description="Optional tags for organization (e.g., ['experimental', 'v2'])"),
+    commit_message: str | None = Field(None, description="Optional commit message describing the changes"),
+) -> ResponseDict:
+    """Create a new text prompt version in Langfuse.
+
+    Prompts are immutable; creating a new version is the only way to update prompt content.
+    Labels are unique across versions - assigning a label here will move it from other versions.
+    """
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+
+    try:
+        labels = _normalize_field_default(labels)
+        tags = _normalize_field_default(tags)
+        config = _normalize_field_default(config)
+        commit_message = _normalize_field_default(commit_message)
+
+        if labels is not None and not isinstance(labels, list):
+            raise ValueError("labels must be a list of strings")
+        if labels is not None and not all(isinstance(label, str) for label in labels):
+            raise ValueError("labels must be a list of strings")
+        if labels is not None and not all(isinstance(label, str) for label in labels):
+            raise ValueError("labels must be a list of strings")
+        if tags is not None and not isinstance(tags, list):
+            raise ValueError("tags must be a list of strings")
+        if tags is not None and not all(isinstance(tag, str) for tag in tags):
+            raise ValueError("tags must be a list of strings")
+        if config is not None and not isinstance(config, dict):
+            raise ValueError("config must be a JSON object")
+        if commit_message is not None and not isinstance(commit_message, str):
+            raise ValueError("commit_message must be a string")
+
+        create_kwargs: dict[str, Any] = {
+            "name": name,
+            "prompt": prompt,
+            "labels": labels or [],
+            "tags": tags,
+            "type": "text",
+            "config": config or {},
+        }
+        if commit_message is not None:
+            create_kwargs["commit_message"] = commit_message
+
+        created_prompt = state.langfuse_client.create_prompt(**create_kwargs)
+
+        result = {
+            "name": getattr(created_prompt, "name", name),
+            "version": getattr(created_prompt, "version", None),
+            "type": "text",
+            "prompt": getattr(created_prompt, "prompt", prompt),
+            "labels": getattr(created_prompt, "labels", labels or []),
+            "tags": getattr(created_prompt, "tags", tags or []),
+            "config": getattr(created_prompt, "config", config or {}),
+        }
+        if hasattr(created_prompt, "commit_message"):
+            result["commit_message"] = getattr(created_prompt, "commit_message", commit_message)
+        if hasattr(created_prompt, "id"):
+            result["id"] = getattr(created_prompt, "id")
+
+        logger.info(f"Created text prompt '{result['name']}' (version={result['version']})")
+        return {"data": result, "metadata": {"created": True}}
+
+    except Exception as e:
+        logger.error(f"Error creating text prompt '{name}': {e}")
+        raise
+
+
+async def create_chat_prompt(
+    ctx: Context,
+    name: str = Field(..., description="The name of the prompt to create"),
+    prompt: list[dict[str, Any]] = Field(
+        ..., description="Chat messages in the format [{role: 'system'|'user'|'assistant', content: '...'}]"
+    ),
+    labels: list[str] | None = Field(None, description="Labels to assign (e.g., ['production', 'staging'])"),
+    config: dict[str, Any] | None = Field(None, description="Optional JSON config (e.g., {model: 'gpt-4', temperature: 0.7})"),
+    tags: list[str] | None = Field(None, description="Optional tags for organization (e.g., ['experimental', 'v2'])"),
+    commit_message: str | None = Field(None, description="Optional commit message describing the changes"),
+) -> ResponseDict:
+    """Create a new chat prompt version in Langfuse.
+
+    Chat prompts are arrays of role/content messages. Prompts are immutable; create a new
+    version to update content. Labels are unique across versions.
+    """
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+
+    try:
+        labels = _normalize_field_default(labels)
+        tags = _normalize_field_default(tags)
+        config = _normalize_field_default(config)
+        commit_message = _normalize_field_default(commit_message)
+
+        if labels is not None and not isinstance(labels, list):
+            raise ValueError("labels must be a list of strings")
+        if labels is not None and not all(isinstance(label, str) for label in labels):
+            raise ValueError("labels must be a list of strings")
+        if tags is not None and not isinstance(tags, list):
+            raise ValueError("tags must be a list of strings")
+        if tags is not None and not all(isinstance(tag, str) for tag in tags):
+            raise ValueError("tags must be a list of strings")
+        if config is not None and not isinstance(config, dict):
+            raise ValueError("config must be a JSON object")
+        if commit_message is not None and not isinstance(commit_message, str):
+            raise ValueError("commit_message must be a string")
+
+        create_kwargs: dict[str, Any] = {
+            "name": name,
+            "prompt": prompt,
+            "labels": labels or [],
+            "tags": tags,
+            "type": "chat",
+            "config": config or {},
+        }
+        if commit_message is not None:
+            create_kwargs["commit_message"] = commit_message
+
+        created_prompt = state.langfuse_client.create_prompt(**create_kwargs)
+
+        prompt_content = None
+        if hasattr(created_prompt, "prompt"):
+            prompt_content = getattr(created_prompt, "prompt")
+        elif hasattr(created_prompt, "messages"):
+            prompt_content = getattr(created_prompt, "messages")
+
+        result = {
+            "name": getattr(created_prompt, "name", name),
+            "version": getattr(created_prompt, "version", None),
+            "type": "chat",
+            "prompt": prompt_content if prompt_content is not None else prompt,
+            "labels": getattr(created_prompt, "labels", labels or []),
+            "tags": getattr(created_prompt, "tags", tags or []),
+            "config": getattr(created_prompt, "config", config or {}),
+        }
+        if hasattr(created_prompt, "commit_message"):
+            result["commit_message"] = getattr(created_prompt, "commit_message", commit_message)
+        if hasattr(created_prompt, "id"):
+            result["id"] = getattr(created_prompt, "id")
+
+        logger.info(f"Created chat prompt '{result['name']}' (version={result['version']})")
+        return {"data": result, "metadata": {"created": True}}
+
+    except Exception as e:
+        logger.error(f"Error creating chat prompt '{name}': {e}")
+        raise
+
+
+async def update_prompt_labels(
+    ctx: Context,
+    name: str = Field(..., description="The name of the prompt to update"),
+    version: int = Field(..., ge=1, description="The prompt version to update"),
+    labels: list[str] = Field(
+        ...,
+        description=(
+            "Labels to add to this version (can be empty to add none). Existing labels are preserved; labels are unique across versions."
+        ),
+    ),
+) -> ResponseDict:
+    """Update labels for a specific prompt version.
+
+    This is the only supported mutation for existing prompts. Provided labels are added
+    to the version (existing labels are preserved). Labels are unique across versions,
+    and the 'latest' label is managed by Langfuse.
+    """
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+
+    try:
+        if labels is not None and not isinstance(labels, list):
+            raise ValueError("labels must be a list of strings")
+        labels_list = list(labels or [])
+
+        def _merge_labels(existing: list[str], additions: list[str]) -> list[str]:
+            return list(dict.fromkeys([*additions, *existing]))
+
+        def _get_existing_labels() -> list[str]:
+            try:
+                if hasattr(state.langfuse_client, "get_prompt"):
+                    prompt_obj = state.langfuse_client.get_prompt(name=name, version=version)
+                elif hasattr(state.langfuse_client, "api") and hasattr(state.langfuse_client.api, "prompts"):
+                    prompt_obj = _prompts_get(state.langfuse_client.api.prompts, name=name, version=version)
+                else:
+                    prompt_obj = None
+            except Exception as exc:
+                logger.warning(f"Unable to fetch existing labels for prompt '{name}' version {version}: {exc}")
+                prompt_obj = None
+
+            if prompt_obj is None:
+                return []
+
+            if isinstance(prompt_obj, dict):
+                existing = prompt_obj.get("labels") or []
+            else:
+                existing = getattr(prompt_obj, "labels", []) or []
+            return list(existing)
+
+        def _try_update(update_fn: Any) -> Any | None:
+            try:
+                return update_fn(name=name, version=version, new_labels=labels_list)
+            except TypeError:
+                pass
+            try:
+                return update_fn(name=name, version=version, newLabels=labels_list)
+            except TypeError:
+                pass
+            merged = _merge_labels(_get_existing_labels(), labels_list)
+            try:
+                return update_fn(name=name, version=version, labels=merged)
+            except TypeError:
+                return None
+
+        updated_prompt = None
+        if hasattr(state.langfuse_client, "update_prompt"):
+            updated_prompt = _try_update(state.langfuse_client.update_prompt)
+        elif hasattr(state.langfuse_client, "api"):
+            api = state.langfuse_client.api
+            for attr in ("prompt_version", "promptVersion", "prompt_versions", "promptVersions"):
+                if not hasattr(api, attr):
+                    continue
+                updater = getattr(api, attr)
+                if not hasattr(updater, "update"):
+                    continue
+                updated_prompt = _try_update(updater.update)
+                if updated_prompt is not None:
+                    break
+
+        if updated_prompt is None:
+            raise RuntimeError("Langfuse SDK does not expose a prompt label update method; upgrade the SDK to use this tool.")
+
+        result = {
+            "name": getattr(updated_prompt, "name", name),
+            "version": getattr(updated_prompt, "version", version),
+            "labels": getattr(updated_prompt, "labels", labels),
+        }
+        if hasattr(updated_prompt, "id"):
+            result["id"] = getattr(updated_prompt, "id")
+
+        logger.info(f"Updated labels for prompt '{result['name']}' (version={result['version']})")
+        return {"data": result, "metadata": {"updated": True}}
+
+    except Exception as e:
+        logger.error(f"Error updating labels for prompt '{name}' (version={version}): {e}")
+        raise
+
+
+def app_factory(
+    public_key: str,
+    secret_key: str,
+    host: str,
+    cache_size: int = 100,
+    dump_dir: str = None,
+    enabled_tools: set[str] | None = None,
+) -> FastMCP:
     """Create a FastMCP server with Langfuse tools.
 
     Args:
         public_key: Langfuse public key
         secret_key: Langfuse secret key
         host: Langfuse API host URL
-        cache_size: Size of LRU caches used for caching data
-        dump_dir: Directory to save full JSON dumps when 'output_mode' is 'full_json_file'.
-            The directory will be created if it doesn't exist.
-
-    Returns:
-        FastMCP server instance
+        cache_size: Size of LRU caches
+        dump_dir: Directory for full_json_file output mode
+        enabled_tools: Tool groups to enable (default: all). Options: traces, observations, sessions, exceptions, prompts, schema
     """
+    if enabled_tools is None:
+        enabled_tools = ALL_TOOL_GROUPS
+    else:
+        enabled_tools = {tool for tool in enabled_tools if tool in TOOL_GROUPS}
+        if not enabled_tools:
+            enabled_tools = ALL_TOOL_GROUPS
 
     @asynccontextmanager
     async def lifespan(server: FastMCP) -> AsyncIterator[MCPState]:
-        """Initialize and cleanup MCP server state.
-
-        Args:
-            server: MCP server instance
-
-        Returns:
-            AsyncIterator yielding MCPState
-        """
-        # Initialize state
         init_params = inspect.signature(Langfuse.__init__).parameters
         langfuse_kwargs = {
             "public_key": public_key,
             "secret_key": secret_key,
             "host": host,
-            "debug": False,  # Disable debug mode since we're only querying
-            "flush_at": 0,  # Disable automatic flushing since we're not sending data
-            "flush_interval": None,  # Disable flush interval for pull-only usage
+            "debug": False,
+            "flush_at": 0,
+            "flush_interval": None,
         }
-
         if "tracing_enabled" in init_params:
-            langfuse_kwargs["tracing_enabled"] = False  # type: ignore[assignment]
+            langfuse_kwargs["tracing_enabled"] = False
 
         state = MCPState(
             langfuse_client=Langfuse(**langfuse_kwargs),
@@ -2298,32 +2827,47 @@ def app_factory(public_key: str, secret_key: str, host: str, cache_size: int = 1
             exceptions_by_filepath=LRUCache(maxsize=cache_size),
             dump_dir=dump_dir,
         )
-
         try:
             yield state
         finally:
-            # Cleanup
             logger.info("Cleaning up Langfuse client")
             state.langfuse_client.flush()
             state.langfuse_client.shutdown()
 
-    # Create the MCP server with lifespan context manager
     mcp = FastMCP("Langfuse MCP Server", lifespan=lifespan)
 
-    # Register tools that match the Langfuse SDK signatures
-    mcp.tool()(fetch_traces)
-    mcp.tool()(fetch_trace)
-    mcp.tool()(fetch_observations)
-    mcp.tool()(fetch_observation)
-    mcp.tool()(fetch_sessions)
-    mcp.tool()(get_session_details)
-    mcp.tool()(get_user_sessions)
-    mcp.tool()(find_exceptions)
-    mcp.tool()(find_exceptions_in_file)
-    mcp.tool()(get_exception_details)
-    mcp.tool()(get_error_count)
-    mcp.tool()(get_data_schema)
+    # Tool function lookup
+    tool_funcs = {
+        "fetch_traces": fetch_traces,
+        "fetch_trace": fetch_trace,
+        "fetch_observations": fetch_observations,
+        "fetch_observation": fetch_observation,
+        "fetch_sessions": fetch_sessions,
+        "get_session_details": get_session_details,
+        "get_user_sessions": get_user_sessions,
+        "find_exceptions": find_exceptions,
+        "find_exceptions_in_file": find_exceptions_in_file,
+        "get_exception_details": get_exception_details,
+        "get_error_count": get_error_count,
+        "get_prompt": get_prompt,
+        "get_prompt_unresolved": get_prompt_unresolved,
+        "list_prompts": list_prompts,
+        "create_text_prompt": create_text_prompt,
+        "create_chat_prompt": create_chat_prompt,
+        "update_prompt_labels": update_prompt_labels,
+        "get_data_schema": get_data_schema,
+    }
 
+    # Register only enabled tool groups
+    registered = []
+    for group in sorted(enabled_tools):
+        if group in TOOL_GROUPS:
+            for tool_name in TOOL_GROUPS[group]:
+                if tool_name in tool_funcs:
+                    mcp.tool()(tool_funcs[tool_name])
+                    registered.append(tool_name)
+
+    logger.info(f"Registered {len(registered)} tools from groups: {sorted(enabled_tools)}")
     return mcp
 
 
@@ -2354,9 +2898,27 @@ def main():
             logger.error(f"Failed to create dump directory {args.dump_dir}: {e}")
             args.dump_dir = None
 
-    logger.info(f"Starting MCP - host:{args.host} cache:{args.cache_size} keys:{args.public_key[:4]}.../{args.secret_key[:4]}...")
+    # Parse enabled tool groups
+    if args.tools.lower() == "all":
+        enabled_tools = ALL_TOOL_GROUPS
+    else:
+        enabled_tools = {t.strip().lower() for t in args.tools.split(",") if t.strip()}
+        invalid = enabled_tools - ALL_TOOL_GROUPS
+        if invalid:
+            logger.warning(f"Unknown tool groups ignored: {invalid}. Valid: {ALL_TOOL_GROUPS}")
+            enabled_tools = enabled_tools & ALL_TOOL_GROUPS
+        if not enabled_tools:
+            logger.warning("No valid tool groups provided; defaulting to all tools.")
+            enabled_tools = ALL_TOOL_GROUPS
+
+    logger.info(f"Starting MCP - host:{args.host} cache:{args.cache_size} tools:{sorted(enabled_tools)}")
     app = app_factory(
-        public_key=args.public_key, secret_key=args.secret_key, host=args.host, cache_size=args.cache_size, dump_dir=args.dump_dir
+        public_key=args.public_key,
+        secret_key=args.secret_key,
+        host=args.host,
+        cache_size=args.cache_size,
+        dump_dir=args.dump_dir,
+        enabled_tools=enabled_tools,
     )
 
     app.run(transport="stdio")
