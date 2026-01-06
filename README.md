@@ -2,7 +2,7 @@
 
 [![Test](https://github.com/avivsinai/langfuse-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/avivsinai/langfuse-mcp/actions/workflows/test.yml)
 [![PyPI version](https://badge.fury.io/py/langfuse-mcp.svg)](https://badge.fury.io/py/langfuse-mcp)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.10-3.13](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 This project provides a Model Context Protocol (MCP) server for Langfuse, allowing AI agents to query Langfuse trace data for better debugging and observability.
@@ -59,7 +59,7 @@ The MCP server exposes **18 tools**, grouped by domain:
 
 ### Prompts
 - `get_prompt` - Fetch prompt with resolved dependencies
-- `get_prompt_unresolved` - Fetch prompt with dependency tags intact
+- `get_prompt_unresolved` - Fetch prompt with dependency tags intact (falls back to resolved content if SDK lacks resolve support)
 - `list_prompts` - List/filter prompts with pagination
 - `create_text_prompt` - Create new text prompt version
 - `create_chat_prompt` - Create new chat prompt version
@@ -78,7 +78,7 @@ If you already have an older version of `uv` installed, you might need to update
 
 ### Installation
 
-> **Requirement**: The server depends on the Langfuse Python SDK v3. Installations automatically pull `langfuse>=3.0.0` and require Python 3.10+.
+> **Requirement**: The server depends on the Langfuse Python SDK v3. Installations automatically pull `langfuse>=3.11.2` and require Python 3.10–3.13 while upstream SDK support for 3.14 is pending.
 
 ```bash
 uv pip install langfuse-mcp
@@ -287,11 +287,10 @@ This project uses dynamic versioning based on Git tags:
 
 For a detailed history of changes, please see the [CHANGELOG.md](CHANGELOG.md) file.
 
-## v1.0 Update Notes
+## Update Notes
 
 - **Prompt management** - get, list, create, and update prompts directly from your AI agent
-- **Python 3.10+ support** - removed Python version restrictions
-- **Dependency upgrades** - `mcp[cli]>=1.20.0`, `langfuse>=3.0.0` (no upper bound)
+- **SDK floor** - `langfuse>=3.11.2` (capped at `<4.0.0`)
 
 ## Contributing
 

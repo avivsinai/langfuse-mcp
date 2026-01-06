@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-01-01
+## [0.3.0] - 2026-01-06
 
 ### Added
 - **Prompt management tools** - get, list, create, and update Langfuse prompts:
@@ -19,9 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit tests covering new prompt tools
 
 ### Changed
-- Removed Python 3.14 block; Python support is now 3.10+
-- Upgraded dependencies: `mcp[cli]>=1.20.0`, `langfuse>=3.0.0` (no upper bound)
-- Tool responses still use the standard envelope format `{"data": ..., "metadata": {...}}`
+- Bumped Langfuse SDK minimum version to `3.11.2` (still capped below 4.0.0).
 
 ## [0.2.1] - 2025-10-20
 

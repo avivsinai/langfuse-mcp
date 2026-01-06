@@ -64,7 +64,15 @@ def patch_dependencies(monkeypatch: pytest.MonkeyPatch):
     pydantic_mod = types.ModuleType("pydantic")
 
     class BaseModel:
-        pass
+        def __init__(self, **kwargs):
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+        def model_dump(self):
+            return dict(self.__dict__)
+
+        def dict(self):
+            return dict(self.__dict__)
 
     def Field(default=None, **kwargs):
         return default

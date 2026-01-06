@@ -23,6 +23,13 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
 from cachetools import LRUCache
+
+if sys.version_info >= (3, 14):
+    raise SystemExit(
+        "langfuse-mcp currently requires Python 3.13 or earlier. "
+        "Please rerun with `uvx --python 3.13 langfuse-mcp` or pin a supported interpreter."
+    )
+
 from langfuse import Langfuse
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import AfterValidator, BaseModel, Field
@@ -300,6 +307,30 @@ def _sdk_object_to_python(obj: Any) -> Any:
         return _sdk_object_to_python(data)
 
     return obj
+
+
+def _prompts_get(prompts_client: Any, *, name: str, **kwargs: Any) -> Any:
+    """Call prompts.get with the correct parameter name across SDK versions."""
+    try:
+        params = inspect.signature(prompts_client.get).parameters
+    except (TypeError, ValueError):
+        params = {}
+
+    call_kwargs = dict(kwargs)
+    if "prompt_name" in params:
+        call_kwargs["prompt_name"] = name
+    else:
+        call_kwargs["name"] = name
+
+    return prompts_client.get(**call_kwargs)
+
+
+def _prompts_get_supports_resolve(prompts_client: Any) -> bool:
+    try:
+        params = inspect.signature(prompts_client.get).parameters
+    except (TypeError, ValueError):
+        return False
+    return "resolve" in params
 
 
 def _extract_items_from_response(response: Any) -> tuple[list[Any], dict[str, Any]]:
@@ -1040,8 +1071,6 @@ async def fetch_traces(
     age = validate_age(age)
 
     state = cast(MCPState, ctx.request_context.lifespan_context)
-
-    age = validate_age(age)
 
     # Calculate timestamps from age
     from_timestamp = datetime.now(UTC) - timedelta(minutes=age)
@@ -2317,6 +2346,11 @@ async def get_prompt(
             "tags": getattr(prompt, "tags", []),
             "config": getattr(prompt, "config", {}),
         }
+        prompt_id = getattr(prompt, "id", None)
+        if prompt_id is None and isinstance(prompt, dict):
+            prompt_id = prompt.get("id")
+        if prompt_id is not None:
+            result["id"] = prompt_id
 
         logger.info(f"Retrieved prompt '{name}' (version={result['version']}, type={prompt_type})")
         return {"data": result, "metadata": {"found": True}}
@@ -2340,7 +2374,8 @@ async def get_prompt_unresolved(
 ) -> ResponseDict:
     """Fetch a specific prompt by name WITHOUT resolving dependencies.
 
-    Returns raw prompt content with dependency tags intact (e.g., @@@langfusePrompt:name=xxx@@@).
+    Returns raw prompt content with dependency tags intact (e.g., @@@langfusePrompt:name=xxx@@@) when
+    the SDK supports resolve=false. Otherwise returns the resolved prompt and marks metadata.resolved=True.
     Useful for analyzing prompt composition and debugging dependency chains.
 
     Args:
@@ -2363,18 +2398,31 @@ async def get_prompt_unresolved(
 
     try:
         # Use API directly to get unresolved prompt
-        api_kwargs: dict[str, Any] = {"name": name, "resolve": False}
+        api_kwargs: dict[str, Any] = {}
         if label:
             api_kwargs["label"] = label
         if version:
             api_kwargs["version"] = version
 
-        # Access the prompts API directly. If resolve isn't supported, fail loudly.
+        # Access the prompts API directly.
+        if not hasattr(state.langfuse_client, "api") or not hasattr(state.langfuse_client.api, "prompts"):
+            raise RuntimeError("Langfuse SDK does not expose prompts.get; upgrade the SDK to use this tool.")
+        if not hasattr(state.langfuse_client.api.prompts, "get"):
+            raise RuntimeError("Langfuse SDK does not expose prompts.get; upgrade the SDK to use this tool.")
+        supports_resolve = _prompts_get_supports_resolve(state.langfuse_client.api.prompts)
         try:
-            prompt_response = state.langfuse_client.api.prompts.get(**api_kwargs)
+            if supports_resolve:
+                prompt_response = _prompts_get(state.langfuse_client.api.prompts, name=name, resolve=False, **api_kwargs)
+            else:
+                prompt_response = _prompts_get(state.langfuse_client.api.prompts, name=name, **api_kwargs)
         except TypeError as e:
-            logger.error("Langfuse SDK does not support resolve=false for prompts.get; cannot fetch unresolved prompt")
-            raise RuntimeError("Langfuse SDK does not support resolve=false for prompts.get; upgrade the SDK to use this tool.") from e
+            msg = str(e)
+            if "resolve" in msg or "unexpected keyword" in msg:
+                logger.error("Langfuse SDK does not support resolve=false for prompts.get; cannot fetch unresolved prompt")
+                raise RuntimeError(
+                    "Langfuse SDK does not support resolve=false for prompts.get; upgrade the SDK to use this tool."
+                ) from e
+            raise
 
         if prompt_response is None:
             label_msg = f" with label '{label}'" if label else ""
@@ -2384,8 +2432,14 @@ async def get_prompt_unresolved(
         # Convert to dict
         raw_prompt = _sdk_object_to_python(prompt_response)
 
-        logger.info(f"Retrieved unresolved prompt '{name}' (version={raw_prompt.get('version')})")
-        return {"data": raw_prompt, "metadata": {"found": True, "resolved": False}}
+        resolved = not supports_resolve
+        if resolved:
+            logger.warning("Prompt resolve=false is not supported by the SDK; returning resolved prompt content.")
+
+        logger.info(
+            f"Retrieved prompt '{name}' (version={raw_prompt.get('version')}, resolved={resolved})"
+        )
+        return {"data": raw_prompt, "metadata": {"found": True, "resolved": resolved}}
 
     except Exception as e:
         logger.error(f"Error fetching unresolved prompt '{name}': {e}")
@@ -2489,13 +2543,19 @@ async def create_text_prompt(
 
     try:
         if labels is not None and not isinstance(labels, list):
-            labels = None
+            raise ValueError("labels must be a list of strings")
+        if labels is not None and not all(isinstance(label, str) for label in labels):
+            raise ValueError("labels must be a list of strings")
+        if labels is not None and not all(isinstance(label, str) for label in labels):
+            raise ValueError("labels must be a list of strings")
         if tags is not None and not isinstance(tags, list):
-            tags = None
+            raise ValueError("tags must be a list of strings")
+        if tags is not None and not all(isinstance(tag, str) for tag in tags):
+            raise ValueError("tags must be a list of strings")
         if config is not None and not isinstance(config, dict):
-            config = None
+            raise ValueError("config must be a JSON object")
         if commit_message is not None and not isinstance(commit_message, str):
-            commit_message = None
+            raise ValueError("commit_message must be a string")
 
         create_kwargs: dict[str, Any] = {
             "name": name,
@@ -2552,13 +2612,17 @@ async def create_chat_prompt(
 
     try:
         if labels is not None and not isinstance(labels, list):
-            labels = None
+            raise ValueError("labels must be a list of strings")
+        if labels is not None and not all(isinstance(label, str) for label in labels):
+            raise ValueError("labels must be a list of strings")
         if tags is not None and not isinstance(tags, list):
-            tags = None
+            raise ValueError("tags must be a list of strings")
+        if tags is not None and not all(isinstance(tag, str) for tag in tags):
+            raise ValueError("tags must be a list of strings")
         if config is not None and not isinstance(config, dict):
-            config = None
+            raise ValueError("config must be a JSON object")
         if commit_message is not None and not isinstance(commit_message, str):
-            commit_message = None
+            raise ValueError("commit_message must be a string")
 
         create_kwargs: dict[str, Any] = {
             "name": name,
@@ -2621,18 +2685,46 @@ async def update_prompt_labels(
     state = cast(MCPState, ctx.request_context.lifespan_context)
 
     try:
+        if labels is not None and not isinstance(labels, list):
+            raise ValueError("labels must be a list of strings")
+        labels_list = list(labels or [])
+
+        def _merge_labels(existing: list[str], additions: list[str]) -> list[str]:
+            return list(dict.fromkeys([*additions, *existing]))
+
+        def _get_existing_labels() -> list[str]:
+            try:
+                if hasattr(state.langfuse_client, "get_prompt"):
+                    prompt_obj = state.langfuse_client.get_prompt(name=name, version=version)
+                elif hasattr(state.langfuse_client, "api") and hasattr(state.langfuse_client.api, "prompts"):
+                    prompt_obj = _prompts_get(state.langfuse_client.api.prompts, name=name, version=version)
+                else:
+                    prompt_obj = None
+            except Exception as exc:
+                logger.warning(f"Unable to fetch existing labels for prompt '{name}' version {version}: {exc}")
+                prompt_obj = None
+
+            if prompt_obj is None:
+                return []
+
+            if isinstance(prompt_obj, dict):
+                existing = prompt_obj.get("labels") or []
+            else:
+                existing = getattr(prompt_obj, "labels", []) or []
+            return list(existing)
 
         def _try_update(update_fn: Any) -> Any | None:
             try:
-                return update_fn(name=name, version=version, new_labels=labels)
+                return update_fn(name=name, version=version, new_labels=labels_list)
             except TypeError:
                 pass
             try:
-                return update_fn(name=name, version=version, newLabels=labels)
+                return update_fn(name=name, version=version, newLabels=labels_list)
             except TypeError:
                 pass
+            merged = _merge_labels(_get_existing_labels(), labels_list)
             try:
-                return update_fn(name=name, version=version, labels=labels)
+                return update_fn(name=name, version=version, labels=merged)
             except TypeError:
                 return None
 
@@ -2690,6 +2782,10 @@ def app_factory(
     """
     if enabled_tools is None:
         enabled_tools = ALL_TOOL_GROUPS
+    else:
+        enabled_tools = {tool for tool in enabled_tools if tool in TOOL_GROUPS}
+        if not enabled_tools:
+            enabled_tools = ALL_TOOL_GROUPS
 
     @asynccontextmanager
     async def lifespan(server: FastMCP) -> AsyncIterator[MCPState]:
@@ -2793,6 +2889,9 @@ def main():
         if invalid:
             logger.warning(f"Unknown tool groups ignored: {invalid}. Valid: {ALL_TOOL_GROUPS}")
             enabled_tools = enabled_tools & ALL_TOOL_GROUPS
+        if not enabled_tools:
+            logger.warning("No valid tool groups provided; defaulting to all tools.")
+            enabled_tools = ALL_TOOL_GROUPS
 
     logger.info(f"Starting MCP - host:{args.host} cache:{args.cache_size} tools:{sorted(enabled_tools)}")
     app = app_factory(
