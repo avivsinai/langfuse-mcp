@@ -3,6 +3,7 @@
 import json
 import logging
 import sys
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -17,6 +18,29 @@ from mcp.client.stdio import stdio_client
 # Configure logging to console only
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("langfuse-mcp-test")
+
+
+def _is_connection_closed_error(exc: BaseException) -> bool:
+    """Recursively check if exception is a connection closed error."""
+    if "Connection closed" in str(exc):
+        return True
+    # Check nested ExceptionGroup
+    if hasattr(exc, "exceptions"):
+        return all(_is_connection_closed_error(e) for e in exc.exceptions)
+    return False
+
+
+@asynccontextmanager
+async def graceful_stdio_client(server_params):
+    """Wrap stdio_client to handle cleanup errors gracefully."""
+    try:
+        async with stdio_client(server_params) as transport:
+            yield transport
+    except BaseException as e:
+        if _is_connection_closed_error(e):
+            logger.debug("Ignoring connection closed during cleanup")
+        else:
+            raise
 
 
 async def run_get_schema_test():
@@ -35,10 +59,11 @@ async def run_get_schema_test():
         ],
     )
 
-    async with stdio_client(server_params) as stdio_transport:
+    async with graceful_stdio_client(server_params) as stdio_transport:
         read, write = stdio_transport
         async with ClientSession(read, write) as session:
             await session.initialize()
+            await session.list_tools()  # Pre-cache to avoid in-flight request during teardown
             result = await session.call_tool("get_data_schema", {})
 
             assert result is not None
