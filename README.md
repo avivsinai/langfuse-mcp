@@ -1,309 +1,267 @@
-# Langfuse MCP (Model Context Protocol)
+# Langfuse MCP Server
 
 [![Test](https://github.com/avivsinai/langfuse-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/avivsinai/langfuse-mcp/actions/workflows/test.yml)
 [![PyPI version](https://badge.fury.io/py/langfuse-mcp.svg)](https://badge.fury.io/py/langfuse-mcp)
-[![Python 3.10-3.13](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%E2%80%933.14-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-This project provides a Model Context Protocol (MCP) server for Langfuse, allowing AI agents to query Langfuse trace data for better debugging and observability.
+A comprehensive [Model Context Protocol](https://modelcontextprotocol.io) server for [Langfuse](https://langfuse.com) observability. Provides **18 tools** for AI agents to query traces, debug errors, analyze sessions, and manage prompts.
 
-## Quick Start with Cursor
-
-<a href="cursor://anysphere.cursor-deeplink/mcp/install?name=langfuse-mcp&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJsYW5nZnVzZS1tY3AiLCItLXB1YmxpYy1rZXkiLCJZT1VSX1BVQkxJQ19LRVkiLCItLXNlY3JldC1rZXkiLCJZT1VSX1NFQ1JFVF9LRVkiLCItLWhvc3QiLCJodHRwczovL2Nsb3VkLmxhbmdmdXNlLmNvbSJdfQ==">
-  <img src="https://img.shields.io/badge/Add%20to-Cursor-blue?style=for-the-badge&logo=cursor" alt="Add to Cursor">
-</a>
-
-### Installation Options
-
-🎯 **From Cursor IDE**: Click the button above (works seamlessly!)  
-🌐 **From GitHub Web**: Copy this deeplink and paste into your browser address bar:
-```
-cursor://anysphere.cursor-deeplink/mcp/install?name=langfuse-mcp&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJsYW5nZnVzZS1tY3AiLCItLXB1YmxpYy1rZXkiLCJZT1VSX1BVQkxJQ19LRVkiLCItLXNlY3JldC1rZXkiLCJZT1VSX1NFQ1JFVF9LRVkiLCItLWhvc3QiLCJodHRwczovL2Nsb3VkLmxhbmdmdXNlLmNvbSJdfQ==
-```
-⚙️ **Manual Setup**: See [Configuration](#configuration-with-mcp-clients) section below
-
-> **💡 Note**: The "Add to Cursor" button only works from within Cursor IDE due to browser security restrictions on custom protocols (`cursor://`). This is normal and expected behavior per [Cursor's documentation](https://docs.cursor.com/deeplinks).
-
-**After installation**: Replace `YOUR_PUBLIC_KEY` and `YOUR_SECRET_KEY` with your actual Langfuse credentials in Cursor's MCP settings.
-
-## Features
-
-- Integration with Langfuse for trace and observation data
-- **Prompt management** - get, list, create, and update prompts
-- Tool suite for AI agents to query trace data
-- Exception and error tracking capabilities
-- Session and user activity monitoring
-
-## Available Tools
-
-The MCP server exposes **18 tools**, grouped by domain:
-
-### Traces
-- `fetch_traces` - Search/filter traces with pagination
-- `fetch_trace` - Fetch a specific trace by ID
-
-### Observations
-- `fetch_observations` - Search/filter observations with pagination
-- `fetch_observation` - Fetch a specific observation by ID
-
-### Sessions
-- `fetch_sessions` - List recent sessions with pagination
-- `get_session_details` - Get detailed session info by ID
-- `get_user_sessions` - Get all sessions for a user
-
-### Exceptions
-- `find_exceptions` - Find exceptions grouped by file/function/type
-- `find_exceptions_in_file` - Find exceptions in a specific file
-- `get_exception_details` - Get detailed info about a specific exception
-- `get_error_count` - Get total error count
-
-### Prompts
-- `get_prompt` - Fetch prompt with resolved dependencies
-- `get_prompt_unresolved` - Fetch prompt with dependency tags intact (falls back to resolved content if SDK lacks resolve support)
-- `list_prompts` - List/filter prompts with pagination
-- `create_text_prompt` - Create new text prompt version
-- `create_chat_prompt` - Create new chat prompt version
-- `update_prompt_labels` - Update labels for a prompt version
-
-### Schema
-- `get_data_schema` - Get schema information for the data structures used in responses
-
-## Setup
-
-### Install `uv`
-
-First, make sure `uv` is installed. For installation instructions, see the [`uv` installation docs](https://docs.astral.sh/uv/getting-started/installation/).
-
-If you already have an older version of `uv` installed, you might need to update it with `uv self update`.
-
-### Installation
-
-> **Requirement**: The server depends on the Langfuse Python SDK v3. Installations automatically pull `langfuse>=3.11.2` and require Python 3.10–3.13 while upstream SDK support for 3.14 is pending.
-
-```bash
-uv pip install langfuse-mcp
-```
-
-If you're iterating on this repository, install the local checkout instead of PyPI:
-
-```bash
-# from the repo root
-uv pip install --editable .
-```
-
-### Recommended local environment
-
-For development we suggest creating an isolated environment pinned to Python 3.11 (the version used in CI):
-
-```bash
-uv venv --python 3.11 .venv
-source .venv/bin/activate  # On Windows use: .venv\Scripts\activate
-uv pip install --python .venv/bin/python -e .
-```
-
-All subsequent examples assume the virtual environment is activated.
-
-### Obtain Langfuse credentials
-
-You'll need your Langfuse credentials:
-- Public key
-- Secret key
-- Host URL (usually https://cloud.langfuse.com or your self-hosted URL)
-
-You can store these in a local `.env` file instead of passing CLI flags each time:
-
-```
-LANGFUSE_PUBLIC_KEY=your_public_key
-LANGFUSE_SECRET_KEY=your_secret_key
-LANGFUSE_HOST=https://cloud.langfuse.com
-```
-
-When present, the MCP server reads these values automatically. CLI arguments still override the environment if provided.
-
-## Running the Server
-
-Run the server using `uvx` or the project virtual environment:
+## Quick Start
 
 ```bash
 uvx langfuse-mcp --public-key YOUR_KEY --secret-key YOUR_SECRET --host https://cloud.langfuse.com
-
-# or, once inside the repo virtual environment
-langfuse-mcp --public-key YOUR_KEY --secret-key YOUR_SECRET --host https://cloud.langfuse.com
 ```
 
-> **Local checkout tip**: During development run `uv run --from /path/to/langfuse-mcp langfuse-mcp ...` (or `uv run python -m langfuse_mcp ...`) so `uv` executes the code in your working tree. Using the PyPI shortcut skips repository-only changes such as the new environment-based credential defaults and logging tweaks.
+Or set environment variables and run without flags:
+```bash
+export LANGFUSE_PUBLIC_KEY=pk-...
+export LANGFUSE_SECRET_KEY=sk-...
+export LANGFUSE_HOST=https://cloud.langfuse.com
+uvx langfuse-mcp
+```
 
-The server writes diagnostic logs to `/tmp/langfuse_mcp.log`. Remove the `--host` switch if you are targeting the default Cloud endpoint.
-Use `--log-level` (e.g., `--log-level DEBUG`) and `--log-to-console` to control verbosity during debugging.
+## Why langfuse-mcp?
+
+| | langfuse-mcp | Official Langfuse MCP |
+|-|--------------|----------------------|
+| **Tools** | 18 | 2-4 |
+| **Traces & Observations** | Yes | No |
+| **Sessions & Users** | Yes | No |
+| **Exception Tracking** | Yes | No |
+| **Prompt Management** | Yes | Yes |
+| **Language** | Python | TypeScript |
+| **Selective Tool Loading** | Yes | No |
+
+This project provides a **full observability toolkit** — traces, observations, sessions, exceptions, and prompts — while the [official Langfuse MCP](https://github.com/langfuse/mcp-server-langfuse) focuses on prompt management only.
+
+## Available Tools
+
+### Traces
+| Tool | Description |
+|------|-------------|
+| `fetch_traces` | Search/filter traces with pagination |
+| `fetch_trace` | Fetch a specific trace by ID |
+
+### Observations
+| Tool | Description |
+|------|-------------|
+| `fetch_observations` | Search/filter observations with pagination |
+| `fetch_observation` | Fetch a specific observation by ID |
+
+### Sessions
+| Tool | Description |
+|------|-------------|
+| `fetch_sessions` | List recent sessions with pagination |
+| `get_session_details` | Get detailed session info by ID |
+| `get_user_sessions` | Get all sessions for a user |
+
+### Exceptions
+| Tool | Description |
+|------|-------------|
+| `find_exceptions` | Find exceptions grouped by file/function/type |
+| `find_exceptions_in_file` | Find exceptions in a specific file |
+| `get_exception_details` | Get detailed info about a specific exception |
+| `get_error_count` | Get total error count |
+
+### Prompts
+| Tool | Description |
+|------|-------------|
+| `get_prompt` | Fetch prompt with resolved dependencies |
+| `get_prompt_unresolved` | Fetch prompt with dependency tags intact |
+| `list_prompts` | List/filter prompts with pagination |
+| `create_text_prompt` | Create new text prompt version |
+| `create_chat_prompt` | Create new chat prompt version |
+| `update_prompt_labels` | Update labels for a prompt version |
+
+### Schema
+| Tool | Description |
+|------|-------------|
+| `get_data_schema` | Get schema information for response structures |
+
+## Installation
+
+### Using uvx (recommended)
+```bash
+uvx langfuse-mcp --help
+```
+
+### Using pip
+```bash
+pip install langfuse-mcp
+langfuse-mcp --help
+```
+
+### Using Docker
+```bash
+docker pull ghcr.io/avivsinai/langfuse-mcp:latest
+docker run --rm -i \
+  -e LANGFUSE_PUBLIC_KEY=pk-... \
+  -e LANGFUSE_SECRET_KEY=sk-... \
+  -e LANGFUSE_HOST=https://cloud.langfuse.com \
+  ghcr.io/avivsinai/langfuse-mcp:latest
+```
+
+## Configuration
+
+### Claude Code
+
+Create `.mcp.json` in your project root:
+```json
+{
+  "mcpServers": {
+    "langfuse": {
+      "command": "uvx",
+      "args": ["langfuse-mcp"],
+      "env": {
+        "LANGFUSE_PUBLIC_KEY": "pk-...",
+        "LANGFUSE_SECRET_KEY": "sk-...",
+        "LANGFUSE_HOST": "https://cloud.langfuse.com"
+      }
+    }
+  }
+}
+```
+
+### Codex CLI
+
+Add to `~/.codex/config.toml`:
+```toml
+[mcp_servers.langfuse]
+command = "uvx"
+args = ["langfuse-mcp"]
+
+[mcp_servers.langfuse.env]
+LANGFUSE_PUBLIC_KEY = "pk-..."
+LANGFUSE_SECRET_KEY = "sk-..."
+LANGFUSE_HOST = "https://cloud.langfuse.com"
+```
+
+Or via CLI:
+```bash
+codex mcp add langfuse \
+  --env LANGFUSE_PUBLIC_KEY=pk-... \
+  --env LANGFUSE_SECRET_KEY=sk-... \
+  --env LANGFUSE_HOST=https://cloud.langfuse.com \
+  -- uvx langfuse-mcp
+```
+
+### Cursor
+
+Create `.cursor/mcp.json` in your project:
+```json
+{
+  "mcpServers": {
+    "langfuse": {
+      "command": "uvx",
+      "args": ["langfuse-mcp"],
+      "env": {
+        "LANGFUSE_PUBLIC_KEY": "pk-...",
+        "LANGFUSE_SECRET_KEY": "sk-...",
+        "LANGFUSE_HOST": "https://cloud.langfuse.com"
+      }
+    }
+  }
+}
+```
+
+Or use the deeplink for quick setup:
+```
+cursor://anysphere.cursor-deeplink/mcp/install?name=langfuse-mcp&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJsYW5nZnVzZS1tY3AiXX0=
+```
+
+### Claude Desktop
+
+Add to Claude Desktop settings:
+```json
+{
+  "mcpServers": {
+    "langfuse": {
+      "command": "uvx",
+      "args": ["langfuse-mcp"],
+      "env": {
+        "LANGFUSE_PUBLIC_KEY": "pk-...",
+        "LANGFUSE_SECRET_KEY": "sk-...",
+        "LANGFUSE_HOST": "https://cloud.langfuse.com"
+      }
+    }
+  }
+}
+```
+
+## Usage
 
 ### Selective Tool Loading
 
-Use `--tools` to load only specific tool groups, reducing token overhead:
+Load only the tool groups you need to reduce token overhead:
 
 ```bash
 # Load only trace and prompt tools
 langfuse-mcp --tools traces,prompts
 
 # Available groups: traces, observations, sessions, exceptions, prompts, schema
-# Default: all
 ```
 
-Or set via environment: `LANGFUSE_MCP_TOOLS=traces,prompts`
+Or via environment variable:
+```bash
+export LANGFUSE_MCP_TOOLS=traces,prompts
+```
 
-### Run with Docker
+### Output Modes
 
-#### Option 1: Pull from GitHub Container Registry (Recommended)
+Each tool supports different output modes:
 
-Pull and run the pre-built image:
+| Mode | Description |
+|------|-------------|
+| `compact` | Summary with large values truncated (default) |
+| `full_json_string` | Complete data as JSON string |
+| `full_json_file` | Save to file, return summary with path |
+
+### Logging
 
 ```bash
-docker pull ghcr.io/avivsinai/langfuse-mcp:latest
-docker run --rm -i \
-  -e LANGFUSE_PUBLIC_KEY=YOUR_PUBLIC_KEY \
-  -e LANGFUSE_SECRET_KEY=YOUR_SECRET_KEY \
-  -e LANGFUSE_HOST=https://cloud.langfuse.com \
-  -e LANGFUSE_MCP_LOG_FILE=/logs/langfuse_mcp.log \
-  -v "$(pwd)/logs:/logs" \
-  ghcr.io/avivsinai/langfuse-mcp:latest
+# Debug logging to console
+langfuse-mcp --log-level DEBUG --log-to-console
+
+# Custom log file location
+export LANGFUSE_MCP_LOG_FILE=/var/log/langfuse_mcp.log
 ```
 
-Available tags:
-- `latest` - Most recent release
-- `v0.2.0` - Specific version
-- `0.2` - Major.minor version
-
-#### Option 2: Build from source
-
-Build the image from the repository root so the container installs the current checkout instead of the latest PyPI release:
-
-```bash
-docker build -t langfuse-logs-mcp .
-docker run --rm -i \
-  -e LANGFUSE_PUBLIC_KEY=YOUR_PUBLIC_KEY \
-  -e LANGFUSE_SECRET_KEY=YOUR_SECRET_KEY \
-  -e LANGFUSE_HOST=https://cloud.langfuse.com \
-  -e LANGFUSE_MCP_LOG_FILE=/logs/langfuse_mcp.log \
-  -v "$(pwd)/logs:/logs" \
-  langfuse-logs-mcp
-```
-
-> **Why no `-t`?** Allocating a pseudo-TTY can interfere with MCP stdio clients. Use `-i` only so the server communicates over plain stdin/stdout.
-
-The Dockerfile copies the local source tree and installs it with `pip install .`, so the container always runs your latest commits - a must while testing features that have not shipped on PyPI.
-
-
-## Configuration with MCP clients
-
-### Configure for Cursor
-
-Create a `.cursor/mcp.json` file in your project root:
-
-```json
-{
-  "mcpServers": {
-    "langfuse": {
-      "command": "uvx",
-      "args": ["langfuse-mcp", "--public-key", "YOUR_KEY", "--secret-key", "YOUR_SECRET", "--host", "https://cloud.langfuse.com"]
-    }
-  }
-}
-```
-
-### Configure for Claude Desktop
-
-Add to your Claude settings:
-
-```json
-{
-  "command": ["uvx"],
-  "args": ["langfuse-mcp"],
-  "type": "stdio",
-  "env": {
-    "LANGFUSE_PUBLIC_KEY": "YOUR_KEY",
-    "LANGFUSE_SECRET_KEY": "YOUR_SECRET",
-    "LANGFUSE_HOST": "https://cloud.langfuse.com"
-  }
-}
-```
-
-## Output Modes
-
-Each tool supports different output modes to control the level of detail in responses:
-
-- `compact` (default): Returns a summary with large values truncated
-- `full_json_string`: Returns the complete data as a JSON string
-- `full_json_file`: Saves the complete data to a file and returns a summary with file information
+Default log location: `/tmp/langfuse_mcp.log`
 
 ## Development
 
-### Clone the repository
-
 ```bash
-git clone https://github.com/yourusername/langfuse-mcp.git
+git clone https://github.com/avivsinai/langfuse-mcp.git
 cd langfuse-mcp
-```
 
-### Create a virtual environment and install dependencies
-
-```bash
+# Create virtual environment
 uv venv --python 3.11 .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-uv pip install --python .venv/bin/python -e ".[dev]"
-```
+source .venv/bin/activate
 
-### Set up environment variables
+# Install with dev dependencies
+uv pip install -e ".[dev]"
 
-```bash
-export LANGFUSE_SECRET_KEY="your-secret-key"
-export LANGFUSE_PUBLIC_KEY="your-public-key"
-export LANGFUSE_HOST="https://cloud.langfuse.com"  # Or your self-hosted URL
-```
-
-### Testing
-
-Run the unit test suite (mirrors CI):
-
-```bash
+# Run tests
 pytest
+
+# Lint and format
+ruff check --fix . && ruff format .
 ```
-
-To run the demo client:
-
-```bash
-uv run examples/langfuse_client_demo.py --public-key YOUR_PUBLIC_KEY --secret-key YOUR_SECRET_KEY
-```
-
 
 ## Version Management
 
-This project uses dynamic versioning based on Git tags:
+This project uses Git tags for versioning:
+1. Tag: `git tag v1.0.0`
+2. Push: `git push --tags`
+3. GitHub Actions builds and publishes to PyPI
 
-1. The version is automatically determined from git tags using `uv-dynamic-versioning`
-2. To create a new release:
-   - Tag your commit with `git tag v0.1.2` (following semantic versioning)
-   - Push the tag with `git push --tags`
-   - Create a GitHub release from the tag
-3. The GitHub workflow will automatically build and publish the package with the correct version to PyPI
-
-For a detailed history of changes, please see the [CHANGELOG.md](CHANGELOG.md) file.
-
-## Update Notes
-
-- **Prompt management** - get, list, create, and update prompts directly from your AI agent
-- **SDK floor** - `langfuse>=3.11.2` (capped at `<4.0.0`)
+See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions welcome! Please submit a Pull Request.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Cache Management
-
-We use the `cachetools` library to implement efficient caching with proper size limits:
-
-- Uses `cachetools.LRUCache` for better reliability
-- Configurable cache size via the `CACHE_SIZE` constant
-- Automatically evicts the least recently used items when caches exceed their size limits
+MIT License - see [LICENSE](LICENSE) for details.
