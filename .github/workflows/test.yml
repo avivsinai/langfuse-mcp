@@ -29,13 +29,10 @@ jobs:
     - name: Run tests
       run: |
         source .venv/bin/activate
-        echo "Running comprehensive test suite including regressions..."
-        uv run -m pytest -v --tb=short
-      
+        pytest -v --tb=short
+
     - name: Run linting
       run: |
         source .venv/bin/activate
-        echo "Running linting checks..."
-        uv run -m ruff check .
-        echo "Running formatting checks..."
-        uv run -m ruff format --check . 
+        ruff check .
+        ruff format --check . 
