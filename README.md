@@ -245,6 +245,51 @@ export LANGFUSE_TIMEOUT=60
 
 If you experience timeout errors, try increasing the timeout value. The Langfuse cloud API occasionally experiences latency spikes.
 
+## Skills
+
+This project includes a skill for Claude Code and Codex CLI that provides guided workflows for using the MCP tools. The skill helps with:
+
+- **Setup Workflow**: Interactive MCP configuration with credential prompts
+- **Exception Triage**: Find and debug errors in your AI code
+- **Trace Deep-Dive**: Investigate specific AI interactions
+- **Session Analysis**: Understand user behavior patterns
+- **Prompt Management**: Manage prompt versions and deployments
+
+### Installation
+
+**Project-level** (available only in this project):
+```bash
+# Already included when you clone this repo
+# Skills are in .claude/skills/langfuse/ and .codex/skills/langfuse/
+```
+
+**User-level** (available in ALL projects):
+```bash
+# Claude Code - global installation
+cp -r skills/langfuse ~/.claude/skills/
+
+# Codex CLI - global installation
+cp -r skills/langfuse ~/.codex/skills/
+```
+
+**Via skills-marketplace**:
+```bash
+# Claude Code
+/plugin marketplace add avivsinai/skills-marketplace
+/plugin install langfuse@avivsinai-marketplace
+```
+
+### Skill Scopes
+
+| Scope | Claude Code | Codex CLI |
+|-------|-------------|-----------|
+| Project | `.claude/skills/` | `.codex/skills/` |
+| User/Global | `~/.claude/skills/` | `~/.codex/skills/` |
+
+User-level skills take precedence in Claude Code. Project-level skills take precedence in Codex CLI.
+
+See `skills/langfuse/SKILL.md` for the full skill documentation.
+
 ## Development
 
 ```bash
