@@ -11,7 +11,7 @@ If you prefer manual configuration over `claude mcp add`:
   "mcpServers": {
     "langfuse": {
       "command": "uvx",
-      "args": ["langfuse-mcp"],
+      "args": ["--python", "3.11", "langfuse-mcp"],
       "env": {
         "LANGFUSE_PUBLIC_KEY": "pk-...",
         "LANGFUSE_SECRET_KEY": "sk-...",
@@ -42,6 +42,20 @@ Never commit credentials to version control.
 - Secret key must start with `sk-`
 - Host must match your Langfuse instance (cloud vs self-hosted)
 
+### Python Version Errors
+
+If MCP fails to connect, check your Python version. The Langfuse SDK requires Python 3.13 or earlier (due to Pydantic v1 dependency).
+
+Fix by pinning Python in the uvx command:
+```bash
+uvx --python 3.11 langfuse-mcp
+```
+
+Or verify manually:
+```bash
+uvx --python 3.11 langfuse-mcp --help
+```
+
 ### Timeout Errors
 
 Increase the timeout:
@@ -52,10 +66,10 @@ claude mcp add langfuse -s project \
   -e LANGFUSE_PUBLIC_KEY=pk-... \
   -e LANGFUSE_SECRET_KEY=sk-... \
   -e LANGFUSE_HOST=https://cloud.langfuse.com \
-  -- uvx langfuse-mcp --timeout 60
+  -- uvx --python 3.11 langfuse-mcp --timeout 60
 
 # Or in .mcp.json
-"args": ["langfuse-mcp", "--timeout", "60"]
+"args": ["--python", "3.11", "langfuse-mcp", "--timeout", "60"]
 ```
 
 ### Empty Results

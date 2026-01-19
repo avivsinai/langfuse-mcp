@@ -26,14 +26,14 @@ claude mcp add langfuse -s project \
   -e LANGFUSE_PUBLIC_KEY=pk-... \
   -e LANGFUSE_SECRET_KEY=sk-... \
   -e LANGFUSE_HOST=https://cloud.langfuse.com \
-  -- uvx langfuse-mcp
+  -- uvx --python 3.11 langfuse-mcp
 
 # Codex CLI
 codex mcp add langfuse \
   --env LANGFUSE_PUBLIC_KEY=pk-... \
   --env LANGFUSE_SECRET_KEY=sk-... \
   --env LANGFUSE_HOST=https://cloud.langfuse.com \
-  -- uvx langfuse-mcp
+  -- uvx --python 3.11 langfuse-mcp
 ```
 
 **Step 3:** Restart CLI, verify with `/mcp` (Claude) or `codex mcp list` (Codex)
