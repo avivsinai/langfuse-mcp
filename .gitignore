@@ -187,3 +187,6 @@ dump/
 
 # AMQ co-op mode
 .agent-mail/
+
+# Agent Message Queue
+.amqrc

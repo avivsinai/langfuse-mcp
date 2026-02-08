@@ -119,6 +119,24 @@ def test_get_session_details(state):
     assert state.langfuse_client.api.trace.last_list_kwargs is not None
     trace_kwargs = state.langfuse_client.api.trace.last_list_kwargs
     assert trace_kwargs["session_id"] == "session_1"
+    # Regression: Langfuse ClickHouse rejects epoch-zero DateTime64 filters.
+    assert "from_timestamp" not in trace_kwargs
+
+
+def test_get_exception_details_omits_time_filters(state):
+    """get_exception_details should not include epoch-zero time filters in observation lookups."""
+    from langfuse_mcp.__main__ import get_exception_details
+
+    ctx = FakeContext(state)
+    result = asyncio.run(get_exception_details(ctx, trace_id="trace_1", span_id=None, output_mode="compact"))
+    assert isinstance(result["data"], list)
+    assert result["metadata"]["item_count"] == len(result["data"])
+
+    assert state.langfuse_client.api.observations.last_get_many_kwargs is not None
+    obs_kwargs = state.langfuse_client.api.observations.last_get_many_kwargs
+    assert obs_kwargs["trace_id"] == "trace_1"
+    assert "from_start_time" not in obs_kwargs
+    assert "to_start_time" not in obs_kwargs
 
 
 def test_fetch_traces_full_json_string(state):

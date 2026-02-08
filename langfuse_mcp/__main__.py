@@ -88,6 +88,7 @@ logger = logging.getLogger("langfuse_mcp")
 # Constants
 HOUR = 60  # minutes
 DAY = 24 * HOUR
+MAX_AGE_MINUTES = 7 * DAY
 MAX_FIELD_LENGTH = 500  # Maximum string length for field values
 MAX_RESPONSE_SIZE = 20000  # Maximum size of response object in characters
 TRUNCATE_SUFFIX = "..."  # Suffix to add to truncated fields
@@ -356,6 +357,42 @@ def _sdk_object_to_python(obj: Any) -> Any:
     return obj
 
 
+_MIN_SORT_DATETIME = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _parse_datetime_for_sort(value: Any) -> datetime | None:
+    """Parse ISO8601 timestamps (or datetimes) into an aware datetime.
+
+    Used for stable sorting when timestamps can be strings, datetimes, or None.
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    else:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _datetime_sort_key(value: Any) -> datetime:
+    """Return a datetime suitable for `key=` sorting with None-safe fallback."""
+    return _parse_datetime_for_sort(value) or _MIN_SORT_DATETIME
+
+
 def _normalize_field_default(value: Any) -> Any:
     """Treat pydantic FieldInfo defaults as unset values for direct function calls."""
     if FieldInfo is not None and isinstance(value, FieldInfo):
@@ -428,7 +465,7 @@ def _list_traces(
     page: int,
     include_observations: bool,
     tags: list[str] | None,
-    from_timestamp: datetime,
+    from_timestamp: datetime | None,
     name: str | None,
     user_id: str | None,
     session_id: str | None,
@@ -463,7 +500,7 @@ def _list_traces(
 
     if metadata:
         items = [item for item in items if _metadata_matches(item, metadata)]
-        pagination = {**pagination, "total": len(items)}
+        pagination = {**pagination, "filtered_count": len(items)}
 
     return items, pagination
 
@@ -473,7 +510,7 @@ def _list_observations(
     *,
     limit: int,
     page: int,
-    from_start_time: datetime,
+    from_start_time: datetime | None,
     to_start_time: datetime | None,
     obs_type: str | None,
     name: str | None,
@@ -504,7 +541,7 @@ def _list_observations(
 
     if metadata:
         items = [item for item in items if _metadata_matches(item, metadata)]
-        pagination = {**pagination, "total": len(items)}
+        pagination = {**pagination, "filtered_count": len(items)}
 
     return items, pagination
 
@@ -926,8 +963,8 @@ def validate_age(age: int) -> int:
     """
     if age <= 0:
         raise ValueError("Age must be positive")
-    if age > 7 * DAY:
-        raise ValueError("Age cannot be more than 7 days (10080 minutes)")
+    if age > MAX_AGE_MINUTES:
+        raise ValueError(f"Age cannot be more than {MAX_AGE_MINUTES} minutes")
     logger.debug(f"Age validated: {age} minutes")
     return age
 
@@ -961,7 +998,7 @@ def _get_cached_observation(langfuse_client: Langfuse, observation_id: str) -> A
 
 
 async def _efficient_fetch_observations(
-    state: MCPState, from_timestamp: datetime, to_timestamp: datetime, filepath: str = None
+    state: MCPState, from_timestamp: datetime, to_timestamp: datetime, filepath: str | None = None
 ) -> dict[str, Any]:
     """Efficiently fetch observations with exception filtering.
 
@@ -1019,7 +1056,7 @@ async def _efficient_fetch_observations(
                 continue
 
             # Store observation
-            obs_id = getattr(obs, "id", None) or obs.get("id") if isinstance(obs, dict) else None
+            obs_id = obs.get("id") if isinstance(obs, dict) else getattr(obs, "id", None)
             if not obs_id:
                 continue
             observations[obs_id] = _sdk_object_to_python(obs)
@@ -1096,7 +1133,7 @@ async def _embed_observations_in_traces(state: MCPState, traces: list[Any]) -> N
 
 async def fetch_traces(
     ctx: Context,
-    age: ValidatedAge = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)"),
+    age: ValidatedAge = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)", gt=0, le=MAX_AGE_MINUTES),
     name: str | None = Field(None, description="Name of the trace to filter by"),
     user_id: str | None = Field(None, description="User ID to filter traces by"),
     session_id: str | None = Field(None, description="Session ID to filter traces by"),
@@ -1184,9 +1221,8 @@ async def fetch_traces(
             metadata_block.update(file_meta)
 
         return {"data": processed_data, "metadata": metadata_block}
-    except Exception as e:
-        logger.error(f"Error in fetch_traces: {str(e)}")
-        logger.exception(e)
+    except Exception:
+        logger.exception("Error in fetch_traces")
         raise
 
 
@@ -1278,9 +1314,8 @@ async def fetch_trace(
             metadata_block.update(file_meta)
 
         return {"data": processed_data, "metadata": metadata_block}
-    except Exception as e:
-        logger.error(f"Error fetching trace {trace_id}: {str(e)}")
-        logger.exception(e)
+    except Exception:
+        logger.exception(f"Error fetching trace {trace_id}")
         raise
 
 
@@ -1289,7 +1324,7 @@ async def fetch_observations(
     type: Literal["SPAN", "GENERATION", "EVENT"] | None = Field(
         None, description="The observation type to filter by ('SPAN', 'GENERATION', or 'EVENT')"
     ),
-    age: ValidatedAge = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)"),
+    age: ValidatedAge = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)", gt=0, le=MAX_AGE_MINUTES),
     name: str | None = Field(None, description="Optional name filter (string pattern to match)"),
     user_id: str | None = Field(None, description="Optional user ID filter (exact match)"),
     trace_id: str | None = Field(None, description="Optional trace ID filter (exact match)"),
@@ -1376,9 +1411,8 @@ async def fetch_observations(
             metadata_block.update(file_meta)
 
         return {"data": processed_data, "metadata": metadata_block}
-    except Exception as e:
-        logger.error(f"Error fetching observations: {str(e)}")
-        logger.exception(e)
+    except Exception:
+        logger.exception("Error fetching observations")
         raise
 
 
@@ -1432,15 +1466,14 @@ async def fetch_observation(
             metadata_block.update(file_meta)
 
         return {"data": processed_data, "metadata": metadata_block}
-    except Exception as e:
-        logger.error(f"Error fetching observation {observation_id}: {str(e)}")
-        logger.exception(e)
+    except Exception:
+        logger.exception(f"Error fetching observation {observation_id}")
         raise
 
 
 async def fetch_sessions(
     ctx: Context,
-    age: ValidatedAge = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)"),
+    age: ValidatedAge = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)", gt=0, le=MAX_AGE_MINUTES),
     page: int = Field(1, description="Page number for pagination (starts at 1)"),
     limit: int = Field(50, description="Maximum number of sessions to return per page"),
     output_mode: OUTPUT_MODE_LITERAL = Field(
@@ -1505,9 +1538,8 @@ async def fetch_sessions(
             metadata_block.update(file_meta)
 
         return {"data": sessions_payload, "metadata": metadata_block}
-    except Exception as e:
-        logger.error(f"Error fetching sessions: {str(e)}")
-        logger.exception(e)
+    except Exception:
+        logger.exception("Error fetching sessions")
         raise
 
 
@@ -1564,7 +1596,7 @@ async def get_session_details(
             page=1,
             include_observations=include_observations,
             tags=None,
-            from_timestamp=datetime.fromtimestamp(0, tz=timezone.utc),
+            from_timestamp=None,
             name=None,
             user_id=None,
             session_id=session_id,
@@ -1622,16 +1654,15 @@ async def get_session_details(
             metadata_block.update(file_meta)
 
         return {"data": result, "metadata": metadata_block}
-    except Exception as e:
-        logger.error(f"Error getting session {session_id}: {str(e)}")
-        logger.exception(e)
+    except Exception:
+        logger.exception(f"Error getting session {session_id}")
         raise
 
 
 async def get_user_sessions(
     ctx: Context,
     user_id: str = Field(..., description="The ID of the user to retrieve sessions for"),
-    age: ValidatedAge = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)"),
+    age: ValidatedAge = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)", gt=0, le=MAX_AGE_MINUTES),
     include_observations: bool = Field(
         False,
         description=(
@@ -1740,7 +1771,7 @@ async def get_user_sessions(
             session["trace_count"] = len(session["traces"])
 
         # Sort sessions by most recent last_timestamp
-        sessions.sort(key=lambda x: x["last_timestamp"] if x["last_timestamp"] else "", reverse=True)
+        sessions.sort(key=lambda x: _datetime_sort_key(x.get("last_timestamp")), reverse=True)
 
         processed_sessions, file_meta = process_data_with_mode(sessions, mode, f"user_{user_id}_sessions", state)
 
@@ -1765,16 +1796,15 @@ async def get_user_sessions(
             metadata_block.update(file_meta)
 
         return {"data": processed_sessions, "metadata": metadata_block}
-    except Exception as e:
-        logger.error(f"Error getting sessions for user {user_id}: {str(e)}")
-        logger.exception(e)
+    except Exception:
+        logger.exception(f"Error getting sessions for user {user_id}")
         raise
 
 
 async def find_exceptions(
     ctx: Context,
     age: ValidatedAge = Field(
-        ..., description="Number of minutes to look back (positive integer, max 7 days/10080 minutes)", gt=0, le=7 * DAY
+        ..., description="Number of minutes to look back (positive integer, max 7 days/10080 minutes)", gt=0, le=MAX_AGE_MINUTES
     ),
     group_by: Literal["file", "function", "type"] = Field(
         "file",
@@ -1856,9 +1886,8 @@ async def find_exceptions(
 
         logger.info(f"Found {len(data)} exception groups")
         return {"data": data, "metadata": metadata_block}
-    except Exception as e:
-        logger.error(f"Error finding exceptions: {str(e)}")
-        logger.exception(e)
+    except Exception:
+        logger.exception("Error finding exceptions")
         raise
 
 
@@ -1866,7 +1895,7 @@ async def find_exceptions_in_file(
     ctx: Context,
     filepath: str = Field(..., description="Path to the file to search for exceptions (full path including extension)"),
     age: ValidatedAge = Field(
-        ..., description="Number of minutes to look back (positive integer, max 7 days/10080 minutes)", gt=0, le=7 * DAY
+        ..., description="Number of minutes to look back (positive integer, max 7 days/10080 minutes)", gt=0, le=MAX_AGE_MINUTES
     ),
     output_mode: OUTPUT_MODE_LITERAL = Field(
         OutputMode.COMPACT,
@@ -1949,7 +1978,7 @@ async def find_exceptions_in_file(
                 exceptions.append(exception_info)
 
         # Sort exceptions by timestamp (newest first)
-        exceptions.sort(key=lambda x: x["timestamp"] if isinstance(x["timestamp"], str) else "", reverse=True)
+        exceptions.sort(key=lambda x: _datetime_sort_key(x.get("timestamp")), reverse=True)
 
         # Only take the top 10 exceptions
         top_exceptions = exceptions[:10]
@@ -1972,9 +2001,8 @@ async def find_exceptions_in_file(
             metadata_block.update(file_meta)
 
         return {"data": processed_exceptions, "metadata": metadata_block}
-    except Exception as e:
-        logger.error(f"Error finding exceptions in file {filepath}: {str(e)}")
-        logger.exception(e)
+    except Exception:
+        logger.exception(f"Error finding exceptions in file {filepath}")
         raise
 
 
@@ -2028,7 +2056,7 @@ async def get_exception_details(
             state.langfuse_client,
             limit=100,
             page=1,
-            from_start_time=datetime.fromtimestamp(0, tz=timezone.utc),
+            from_start_time=None,
             to_start_time=None,
             obs_type=None,
             name=None,
@@ -2091,7 +2119,7 @@ async def get_exception_details(
                 exceptions.append(exception_info)
 
         # Sort exceptions by timestamp (newest first)
-        exceptions.sort(key=lambda x: x["timestamp"] if isinstance(x["timestamp"], str) else "", reverse=True)
+        exceptions.sort(key=lambda x: _datetime_sort_key(x.get("timestamp")), reverse=True)
 
         base_filename_prefix = f"exceptions_trace_{trace_id}"
         if span_id:
@@ -2112,16 +2140,15 @@ async def get_exception_details(
             metadata_block.update(file_meta)
 
         return {"data": processed_exceptions, "metadata": metadata_block}
-    except Exception as e:
-        logger.error(f"Error getting exception details for trace {trace_id}: {str(e)}")
-        logger.exception(e)
+    except Exception:
+        logger.exception(f"Error getting exception details for trace {trace_id}")
         raise
 
 
 async def get_error_count(
     ctx: Context,
     age: ValidatedAge = Field(
-        ..., description="Number of minutes to look back (positive integer, max 7 days/10080 minutes)", gt=0, le=7 * DAY
+        ..., description="Number of minutes to look back (positive integer, max 7 days/10080 minutes)", gt=0, le=MAX_AGE_MINUTES
     ),
 ) -> ResponseDict:
     """Get number of traces with exceptions in last N minutes.
@@ -2192,9 +2219,8 @@ async def get_error_count(
             f"{len(trace_ids_with_exceptions)} traces"
         )
         return {"data": result, "metadata": {"file_path": None, "file_info": None}}
-    except Exception as e:
-        logger.error(f"Error getting error count for the last {age} minutes: {str(e)}")
-        logger.exception(e)
+    except Exception:
+        logger.exception(f"Error getting error count for the last {age} minutes")
         raise
 
 
