@@ -1,0 +1,45 @@
+name: Feature Request
+description: Suggest an idea for langfuse-mcp
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / Use Case
+      description: What problem are you trying to solve?
+      placeholder: I'm always frustrated when...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: How would you like this to work?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any alternative solutions or workarounds you've considered?
+    validations:
+      required: false
+
+  - type: dropdown
+    id: tool-area
+    attributes:
+      label: Tool Area
+      description: Which part of langfuse-mcp does this relate to?
+      options:
+        - Traces & Observations
+        - Prompts
+        - Scores & Evaluation
+        - Datasets
+        - Sessions
+        - Metrics & Analytics
+        - Configuration / Setup
+        - Other
+    validations:
+      required: true

@@ -32,6 +32,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
 ]
+keywords = ["mcp", "langfuse", "observability", "tracing", "agents", "llm", "debugging"]
 dependencies = [
     "langfuse>=3.11.2,<4.0.0",
     "mcp[cli]>=1.6.0",
@@ -44,6 +45,7 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "pytest-mock",
+    "pyright",
     "ruff",
 ]
 

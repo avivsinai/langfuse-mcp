@@ -39,3 +39,23 @@ jobs:
         source .venv/bin/activate
         ruff check .
         ruff format --check .
+
+  typecheck:
+    name: Type Check
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v3
+
+    - name: Install dependencies
+      run: |
+        uv venv --python 3.12
+        source .venv/bin/activate
+        uv pip install -e ".[dev]"
+
+    - name: Run pyright
+      run: |
+        source .venv/bin/activate
+        pyright langfuse_mcp/
