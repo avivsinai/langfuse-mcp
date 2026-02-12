@@ -1,0 +1,5 @@
+{
+  "typeCheckingMode": "basic",
+  "include": ["langfuse_mcp"],
+  "pythonVersion": "3.10"
+}

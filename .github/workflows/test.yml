@@ -58,4 +58,4 @@ jobs:
     - name: Run pyright
       run: |
         source .venv/bin/activate
-        pyright --level basic langfuse_mcp/
+        pyright
