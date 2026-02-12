@@ -933,7 +933,7 @@ class MCPState:
     exceptions_by_filepath: LRUCache = field(
         default_factory=lambda: LRUCache(maxsize=100), metadata={"description": "Mapping of file paths to exception details"}
     )
-    dump_dir: str = field(
+    dump_dir: str | None = field(
         default=None, metadata={"description": "Directory to save full JSON dumps when 'output_mode' is 'full_json_file'"}
     )
 
@@ -1150,7 +1150,7 @@ async def fetch_traces(
         ),
     ),
     output_mode: OUTPUT_MODE_LITERAL = Field(
-        OutputMode.COMPACT,
+        "compact",
         description=(
             "Controls the output format: 'compact' (default) returns summarized JSON, "
             "'full_json_string' returns complete raw JSON as string, "
@@ -1239,7 +1239,7 @@ async def fetch_trace(
         ),
     ),
     output_mode: OUTPUT_MODE_LITERAL = Field(
-        OutputMode.COMPACT,
+        "compact",
         description=(
             "Controls the output format and action. "
             "'compact' (default): Returns a summarized JSON object optimized for direct agent consumption. "
@@ -1332,7 +1332,7 @@ async def fetch_observations(
     page: int = Field(1, description="Page number for pagination (starts at 1)"),
     limit: int = Field(50, description="Maximum number of observations to return per page"),
     output_mode: OUTPUT_MODE_LITERAL = Field(
-        OutputMode.COMPACT,
+        "compact",
         description=(
             "Controls the output format and action. "
             "'compact' (default): Returns a summarized JSON object optimized for direct agent consumption. "
@@ -1420,7 +1420,7 @@ async def fetch_observation(
     ctx: Context,
     observation_id: str = Field(..., description="The ID of the observation to fetch (unique identifier string)"),
     output_mode: OUTPUT_MODE_LITERAL = Field(
-        OutputMode.COMPACT,
+        "compact",
         description=(
             "Controls the output format and action. "
             "'compact' (default): Returns a summarized JSON object optimized for direct agent consumption. "
@@ -1477,7 +1477,7 @@ async def fetch_sessions(
     page: int = Field(1, description="Page number for pagination (starts at 1)"),
     limit: int = Field(50, description="Maximum number of sessions to return per page"),
     output_mode: OUTPUT_MODE_LITERAL = Field(
-        OutputMode.COMPACT,
+        "compact",
         description=(
             "Controls the output format and action. "
             "'compact' (default): Returns a summarized JSON object optimized for direct agent consumption. "
@@ -1556,7 +1556,7 @@ async def get_session_details(
         ),
     ),
     output_mode: OUTPUT_MODE_LITERAL = Field(
-        OutputMode.COMPACT,
+        "compact",
         description=(
             "Controls the output format and action. "
             "'compact' (default): Returns a summarized JSON object optimized for direct agent consumption. "
@@ -1673,7 +1673,7 @@ async def get_user_sessions(
         ),
     ),
     output_mode: OUTPUT_MODE_LITERAL = Field(
-        OutputMode.COMPACT,
+        "compact",
         description=(
             "Controls the output format and action. "
             "'compact' (default): Returns a summarized JSON object optimized for direct agent consumption. "
@@ -1898,7 +1898,7 @@ async def find_exceptions_in_file(
         ..., description="Number of minutes to look back (positive integer, max 7 days/10080 minutes)", gt=0, le=MAX_AGE_MINUTES
     ),
     output_mode: OUTPUT_MODE_LITERAL = Field(
-        OutputMode.COMPACT,
+        "compact",
         description=(
             "Controls the output format and action. "
             "'compact' (default): Returns a summarized JSON object optimized for direct agent consumption. "
@@ -2011,7 +2011,7 @@ async def get_exception_details(
     trace_id: str = Field(..., description="The ID of the trace to analyze for exceptions (unique identifier string)"),
     span_id: str | None = Field(None, description="Optional span ID to filter by specific span (unique identifier string)"),
     output_mode: OUTPUT_MODE_LITERAL = Field(
-        OutputMode.COMPACT,
+        "compact",
         description=(
             "Controls the output format and action. "
             "'compact' (default): Returns a summarized JSON object optimized for direct agent consumption. "
@@ -3301,7 +3301,7 @@ def app_factory(
     secret_key: str,
     host: str,
     cache_size: int = 100,
-    dump_dir: str = None,
+    dump_dir: str | None = None,
     enabled_tools: set[str] | None = None,
     timeout: int = 30,
     read_only: bool = False,
