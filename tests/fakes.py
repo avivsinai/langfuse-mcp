@@ -75,6 +75,43 @@ class FakeDatasetItem:
 
 
 @dataclass
+class FakeAnnotationQueue:
+    """Annotation queue record returned by the fake SDK."""
+
+    id: str
+    name: str
+    description: str | None = None
+    score_config_ids: list[str] = field(default_factory=list)
+    created_at: datetime | None = None
+
+
+@dataclass
+class FakeAnnotationQueueItem:
+    """Annotation queue item record returned by the fake SDK."""
+
+    id: str
+    queue_id: str
+    object_id: str
+    object_type: str
+    status: str = "PENDING"
+    created_at: datetime | None = None
+
+
+@dataclass
+class FakeScore:
+    """Score record returned by the fake SDK."""
+
+    id: str
+    name: str
+    value: Any
+    trace_id: str
+    data_type: str = "NUMERIC"
+    user_id: str | None = None
+    queue_id: str | None = None
+    created_at: datetime | None = None
+
+
+@dataclass
 class FakePromptBase:
     """Base prompt record used by fake prompt APIs."""
 
@@ -395,6 +432,117 @@ class _DatasetItemsAPI:
         return {"success": True}
 
 
+class _AnnotationQueuesAPI:
+    """Fake implementation of annotation_queues resource client."""
+
+    def __init__(self, store: FakeDataStore) -> None:
+        self._store = store
+        self.last_list_queues_kwargs: dict[str, Any] | None = None
+        self.last_create_queue_kwargs: dict[str, Any] | None = None
+        self.last_get_queue_kwargs: dict[str, Any] | None = None
+        self.last_list_items_kwargs: dict[str, Any] | None = None
+        self.last_get_item_kwargs: dict[str, Any] | None = None
+
+    def list_queues(self, **kwargs: Any) -> FakePaginatedResponse:
+        self.last_list_queues_kwargs = kwargs
+        queues = [q.__dict__ for q in self._store.annotation_queues.values()]
+        return FakePaginatedResponse(data=queues, meta={"next_page": None, "total": len(queues)})
+
+    def create_queue(self, *, request: Any, **kwargs: Any) -> FakeAnnotationQueue:
+        self.last_create_queue_kwargs = {"request": request, **kwargs}
+        now = datetime.now(timezone.utc)
+        name = getattr(request, "name", None) or request.get("name")
+        description = getattr(request, "description", None) or request.get("description")
+        score_config_ids = getattr(request, "score_config_ids", None) or request.get("score_config_ids", []) or []
+        queue = FakeAnnotationQueue(
+            id=f"queue_{len(self._store.annotation_queues) + 1}",
+            name=name,
+            description=description,
+            score_config_ids=list(score_config_ids),
+            created_at=now,
+        )
+        self._store.annotation_queues[queue.id] = queue
+        return queue
+
+    def get_queue(self, queue_id: str, **kwargs: Any) -> Any:
+        self.last_get_queue_kwargs = {"queue_id": queue_id, **kwargs}
+        return self._store.annotation_queues.get(queue_id)
+
+    def list_queue_items(self, queue_id: str, **kwargs: Any) -> FakePaginatedResponse:
+        self.last_list_items_kwargs = {"queue_id": queue_id, **kwargs}
+        items = [item.__dict__ for item in self._store.annotation_queue_items.values() if item.queue_id == queue_id]
+        return FakePaginatedResponse(data=items, meta={"next_page": None, "total": len(items)})
+
+    def get_queue_item(self, queue_id: str, item_id: str, **kwargs: Any) -> Any:
+        self.last_get_item_kwargs = {"queue_id": queue_id, "item_id": item_id, **kwargs}
+        item = self._store.annotation_queue_items.get(item_id)
+        return item if item and item.queue_id == queue_id else None
+
+    def create_queue_item(self, queue_id: str, *, request: Any, **kwargs: Any) -> FakeAnnotationQueueItem:
+        now = datetime.now(timezone.utc)
+        object_id = getattr(request, "object_id", None) or request.get("object_id")
+        object_type = getattr(request, "object_type", None) or request.get("object_type")
+        status = getattr(request, "status", None) or request.get("status") or "PENDING"
+        item = FakeAnnotationQueueItem(
+            id=f"queue_item_{len(self._store.annotation_queue_items) + 1}",
+            queue_id=queue_id,
+            object_id=object_id,
+            object_type=object_type,
+            status=status.value if hasattr(status, "value") else status,
+            created_at=now,
+        )
+        self._store.annotation_queue_items[item.id] = item
+        return item
+
+    def update_queue_item(self, queue_id: str, item_id: str, *, request: Any, **kwargs: Any) -> Any:
+        item = self._store.annotation_queue_items.get(item_id)
+        if item and item.queue_id == queue_id:
+            status = getattr(request, "status", None) or request.get("status")
+            item.status = status.value if hasattr(status, "value") else status
+            return item
+        return None
+
+    def delete_queue_item(self, queue_id: str, item_id: str, **kwargs: Any) -> dict[str, Any]:
+        item = self._store.annotation_queue_items.get(item_id)
+        if item and item.queue_id == queue_id:
+            del self._store.annotation_queue_items[item_id]
+        return {"success": True}
+
+    def create_queue_assignment(self, queue_id: str, *, request: Any, **kwargs: Any) -> dict[str, Any]:
+        user_id = getattr(request, "user_id", None) or request.get("user_id")
+        self._store.queue_assignments.setdefault(queue_id, set()).add(user_id)
+        return {"success": True, "queue_id": queue_id, "user_id": user_id}
+
+    def delete_queue_assignment(self, queue_id: str, *, request: Any, **kwargs: Any) -> dict[str, Any]:
+        user_id = getattr(request, "user_id", None) or request.get("user_id")
+        self._store.queue_assignments.setdefault(queue_id, set()).discard(user_id)
+        return {"success": True, "queue_id": queue_id, "user_id": user_id}
+
+
+class _ScoreV2API:
+    """Fake implementation of score_v_2 resource client."""
+
+    def __init__(self, store: FakeDataStore) -> None:
+        self._store = store
+        self.last_get_kwargs: dict[str, Any] | None = None
+        self.last_get_by_id_kwargs: dict[str, Any] | None = None
+
+    def get(self, **kwargs: Any) -> FakePaginatedResponse:
+        self.last_get_kwargs = kwargs
+        scores = [s.__dict__ for s in self._store.scores.values()]
+        user_id = kwargs.get("user_id")
+        if user_id:
+            scores = [s for s in scores if s.get("user_id") == user_id]
+        queue_id = kwargs.get("queue_id")
+        if queue_id:
+            scores = [s for s in scores if s.get("queue_id") == queue_id]
+        return FakePaginatedResponse(data=scores, meta={"next_page": None, "total": len(scores)})
+
+    def get_by_id(self, score_id: str, **kwargs: Any) -> Any:
+        self.last_get_by_id_kwargs = {"score_id": score_id, **kwargs}
+        return self._store.scores.get(score_id)
+
+
 class FakeAPI:
     """Aggregate object exposed via FakeLangfuse.api."""
 
@@ -406,6 +554,8 @@ class FakeAPI:
         self.prompts = _PromptsAPI(store)
         self.datasets = _DatasetsAPI(store)
         self.dataset_items = _DatasetItemsAPI(store)
+        self.annotation_queues = _AnnotationQueuesAPI(store)
+        self.score_v_2 = _ScoreV2API(store)
 
 
 class FakeDataStore:
@@ -449,6 +599,29 @@ class FakeDataStore:
         self.prompts: dict[str, list[FakePromptBase]] = {}
         self.datasets: dict[str, FakeDataset] = {}
         self.dataset_items: dict[str, FakeDatasetItem] = {}
+        self.annotation_queues: dict[str, FakeAnnotationQueue] = {
+            "queue_1": FakeAnnotationQueue(
+                id="queue_1",
+                name="default-annotation-queue",
+                description="seed queue",
+                score_config_ids=[],
+                created_at=now,
+            )
+        }
+        self.annotation_queue_items: dict[str, FakeAnnotationQueueItem] = {}
+        self.queue_assignments: dict[str, set[str]] = {}
+        self.scores: dict[str, FakeScore] = {
+            "score_1": FakeScore(
+                id="score_1",
+                name="quality",
+                value=0.91,
+                trace_id="trace_1",
+                data_type="NUMERIC",
+                user_id="user_1",
+                queue_id="queue_1",
+                created_at=now,
+            )
+        }
 
 
 class FakeLangfuse:

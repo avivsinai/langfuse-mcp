@@ -1,0 +1,98 @@
+"""Unit tests for annotation queue and score v2 tools."""
+
+from __future__ import annotations
+
+import asyncio
+
+from tests.fakes import FakeContext, FakeLangfuse
+
+
+def _state(tmp_path):
+    from langfuse_mcp.__main__ import MCPState
+
+    return MCPState(langfuse_client=FakeLangfuse(), dump_dir=str(tmp_path))
+
+
+def test_annotation_queue_tools_registered_in_groups():
+    from langfuse_mcp.__main__ import TOOL_GROUPS, WRITE_TOOLS
+
+    assert "annotation_queues" in TOOL_GROUPS
+    assert "scores" in TOOL_GROUPS
+    assert "list_annotation_queues" in TOOL_GROUPS["annotation_queues"]
+    assert "get_score_v2" in TOOL_GROUPS["scores"]
+    assert "create_annotation_queue" in WRITE_TOOLS
+    assert "delete_annotation_queue_assignment" in WRITE_TOOLS
+
+
+def test_annotation_queue_crud_and_assignment(tmp_path):
+    from langfuse_mcp.__main__ import (
+        create_annotation_queue,
+        create_annotation_queue_assignment,
+        create_annotation_queue_item,
+        delete_annotation_queue_assignment,
+        get_annotation_queue,
+        get_annotation_queue_item,
+        list_annotation_queue_items,
+        list_annotation_queues,
+        update_annotation_queue_item,
+    )
+
+    state = _state(tmp_path)
+    ctx = FakeContext(state)
+
+    created = asyncio.run(
+        create_annotation_queue(
+            ctx,
+            name="review-queue",
+            description="Queue for manual review",
+            score_config_ids=["cfg_1"],
+        )
+    )
+    queue_id = created["data"]["id"]
+    assert created["metadata"]["created"] is True
+
+    queues = asyncio.run(list_annotation_queues(ctx, page=1, limit=10))
+    assert any(q["id"] == queue_id for q in queues["data"])
+
+    queue = asyncio.run(get_annotation_queue(ctx, queue_id=queue_id))
+    assert queue["data"]["name"] == "review-queue"
+
+    item = asyncio.run(
+        create_annotation_queue_item(
+            ctx,
+            queue_id=queue_id,
+            object_id="trace_1",
+            object_type="TRACE",
+            status="PENDING",
+        )
+    )
+    item_id = item["data"]["id"]
+    assert item["metadata"]["created"] is True
+
+    items = asyncio.run(list_annotation_queue_items(ctx, queue_id=queue_id, page=1, limit=10))
+    assert any(it["id"] == item_id for it in items["data"])
+
+    updated = asyncio.run(update_annotation_queue_item(ctx, queue_id=queue_id, item_id=item_id, status="COMPLETED"))
+    assert updated["metadata"]["updated"] is True
+
+    fetched_item = asyncio.run(get_annotation_queue_item(ctx, queue_id=queue_id, item_id=item_id))
+    assert fetched_item["data"]["status"] == "COMPLETED"
+
+    assigned = asyncio.run(create_annotation_queue_assignment(ctx, queue_id=queue_id, user_id="user_123"))
+    assert assigned["metadata"]["created"] is True
+    unassigned = asyncio.run(delete_annotation_queue_assignment(ctx, queue_id=queue_id, user_id="user_123"))
+    assert unassigned["metadata"]["deleted"] is True
+
+
+def test_score_v2_tools(tmp_path):
+    from langfuse_mcp.__main__ import get_score_v2, list_scores_v2
+
+    state = _state(tmp_path)
+    ctx = FakeContext(state)
+
+    listed = asyncio.run(list_scores_v2(ctx, page=1, limit=10, user_id="user_1"))
+    assert listed["metadata"]["item_count"] >= 1
+    score_id = listed["data"][0]["id"]
+
+    score = asyncio.run(get_score_v2(ctx, score_id=score_id))
+    assert score["data"]["id"] == score_id

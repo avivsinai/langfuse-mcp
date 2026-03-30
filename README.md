@@ -46,7 +46,7 @@ codex mcp add langfuse \
 
 Restart your CLI, then verify with `/mcp` (Claude Code) or `codex mcp list` (Codex).
 
-## Tools (25 total)
+## Tools (37 total)
 
 | Category | Tools |
 |----------|-------|
@@ -56,6 +56,8 @@ Restart your CLI, then verify with `/mcp` (Claude Code) or `codex mcp list` (Cod
 | Exceptions | `find_exceptions`, `find_exceptions_in_file`, `get_exception_details`, `get_error_count` |
 | Prompts | `list_prompts`, `get_prompt`, `get_prompt_unresolved`, `create_text_prompt`, `create_chat_prompt`, `update_prompt_labels` |
 | Datasets | `list_datasets`, `get_dataset`, `list_dataset_items`, `get_dataset_item`, `create_dataset`, `create_dataset_item`, `delete_dataset_item` |
+| Annotation Queues | `list_annotation_queues`, `create_annotation_queue`, `get_annotation_queue`, `list_annotation_queue_items`, `get_annotation_queue_item`, `create_annotation_queue_item`, `update_annotation_queue_item`, `delete_annotation_queue_item`, `create_annotation_queue_assignment`, `delete_annotation_queue_assignment` |
+| Scores | `list_scores_v2`, `get_score_v2` |
 | Schema | `get_data_schema` |
 
 ## Dataset Item Updates (Upsert)
@@ -103,7 +105,7 @@ Load only the tool groups you need to reduce token overhead:
 langfuse-mcp --tools traces,prompts
 ```
 
-Available groups: `traces`, `observations`, `sessions`, `exceptions`, `prompts`, `datasets`, `schema`
+Available groups: `traces`, `observations`, `sessions`, `exceptions`, `prompts`, `datasets`, `annotation_queues`, `scores`, `schema`
 
 ## Read-Only Mode
 
@@ -115,7 +117,7 @@ langfuse-mcp --read-only
 LANGFUSE_MCP_READ_ONLY=true langfuse-mcp
 ```
 
-This disables: `create_text_prompt`, `create_chat_prompt`, `update_prompt_labels`, `create_dataset`, `create_dataset_item`, `delete_dataset_item`
+This disables: `create_text_prompt`, `create_chat_prompt`, `update_prompt_labels`, `create_dataset`, `create_dataset_item`, `delete_dataset_item`, `create_annotation_queue`, `create_annotation_queue_item`, `update_annotation_queue_item`, `delete_annotation_queue_item`, `create_annotation_queue_assignment`, `delete_annotation_queue_assignment`
 
 ## Other Clients
 
