@@ -21,6 +21,10 @@ Comparison with [official Langfuse MCP](https://github.com/langfuse/mcp-server-l
 
 This project provides a **full observability toolkit** — traces, observations, sessions, exceptions, and prompts — while the official MCP focuses on prompt management.
 
+## Hosted deployment
+
+A hosted deployment is available on [Fronteir AI](https://fronteir.ai/mcp/avivsinai-langfuse-mcp).
+
 ## Quick Start
 
 Requires [uv](https://docs.astral.sh/uv/getting-started/installation/) (for `uvx`).
