@@ -419,6 +419,24 @@ def _normalize_field_default(value: Any) -> Any:
     return value
 
 
+def _coerce_optional_datetime(value: Any, field_name: str) -> datetime | None:
+    """Convert optional datetime input into an aware datetime instance.
+
+    Accepts datetime objects and ISO8601 strings. Raises ValueError for invalid strings.
+    """
+    value = _normalize_field_default(value)
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        parsed = _parse_datetime_for_sort(value)
+        if parsed is None:
+            raise ValueError(f"Invalid ISO8601 datetime for '{field_name}': {value}")
+        return parsed
+    raise TypeError(f"Invalid type for '{field_name}': expected datetime or ISO8601 string")
+
+
 def _prompts_get(prompts_client: Any, *, name: str, **kwargs: Any) -> Any:
     """Call prompts.get with the correct parameter name across SDK versions."""
     try:
@@ -3517,12 +3535,12 @@ async def list_scores_v2(
     limit: int = Field(50, ge=1, le=100, description="Items per page (max 100)"),
     user_id: str | None = Field(None, description="Optional user ID filter"),
     name: str | None = Field(None, description="Optional score name filter"),
-    from_timestamp: str | None = Field(None, description="Optional ISO timestamp lower bound"),
-    to_timestamp: str | None = Field(None, description="Optional ISO timestamp upper bound"),
+    from_timestamp: str | None = Field(None, description="Optional ISO8601 timestamp lower bound"),
+    to_timestamp: str | None = Field(None, description="Optional ISO8601 timestamp upper bound"),
     environment: str | None = Field(None, description="Optional environment filter"),
     source: str | None = Field(None, description="Optional score source filter"),
     operator: str | None = Field(None, description="Optional operator filter"),
-    value: str | None = Field(None, description="Optional score value filter"),
+    value: float | None = Field(None, description="Optional numeric score value filter"),
     score_ids: str | None = Field(None, description="Optional comma-separated score IDs"),
     config_id: str | None = Field(None, description="Optional score config ID"),
     session_id: str | None = Field(None, description="Optional session ID"),
@@ -3537,12 +3555,14 @@ async def list_scores_v2(
     limit = _normalize_field_default(limit) or 50
     user_id = _normalize_field_default(user_id)
     name = _normalize_field_default(name)
-    from_timestamp = _normalize_field_default(from_timestamp)
-    to_timestamp = _normalize_field_default(to_timestamp)
+    from_timestamp = _coerce_optional_datetime(from_timestamp, "from_timestamp")
+    to_timestamp = _coerce_optional_datetime(to_timestamp, "to_timestamp")
     environment = _normalize_field_default(environment)
     source = _normalize_field_default(source)
     operator = _normalize_field_default(operator)
     value = _normalize_field_default(value)
+    if value is not None:
+        value = float(value)
     score_ids = _normalize_field_default(score_ids)
     config_id = _normalize_field_default(config_id)
     session_id = _normalize_field_default(session_id)

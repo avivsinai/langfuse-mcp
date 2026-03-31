@@ -529,6 +529,16 @@ class _ScoreV2API:
 
     def get(self, **kwargs: Any) -> FakePaginatedResponse:
         self.last_get_kwargs = kwargs
+        from_timestamp = kwargs.get("from_timestamp")
+        if from_timestamp is not None and not isinstance(from_timestamp, datetime):
+            raise TypeError("from_timestamp must be datetime")
+        to_timestamp = kwargs.get("to_timestamp")
+        if to_timestamp is not None and not isinstance(to_timestamp, datetime):
+            raise TypeError("to_timestamp must be datetime")
+        value = kwargs.get("value")
+        if value is not None and not isinstance(value, float):
+            raise TypeError("value must be float")
+
         scores = [s.__dict__ for s in self._store.scores.values()]
         user_id = kwargs.get("user_id")
         if user_id:

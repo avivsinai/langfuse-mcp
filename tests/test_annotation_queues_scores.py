@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
+
+import pytest
 
 from tests.fakes import FakeContext, FakeLangfuse
 
@@ -96,3 +99,56 @@ def test_score_v2_tools(tmp_path):
 
     score = asyncio.run(get_score_v2(ctx, score_id=score_id))
     assert score["data"]["id"] == score_id
+
+
+def test_list_scores_v2_coerces_iso_timestamps_and_float_value(tmp_path):
+    from langfuse_mcp.__main__ import list_scores_v2
+
+    state = _state(tmp_path)
+    ctx = FakeContext(state)
+
+    result = asyncio.run(
+        list_scores_v2(
+            ctx,
+            page=1,
+            limit=10,
+            from_timestamp="2026-03-30T10:11:12Z",
+            to_timestamp="2026-03-30T11:11:12+00:00",
+            value=0.91,
+        )
+    )
+    assert result["metadata"]["item_count"] >= 1
+
+    passed_kwargs = state.langfuse_client.api.score_v_2.last_get_kwargs
+    assert passed_kwargs is not None
+    assert isinstance(passed_kwargs.get("from_timestamp"), datetime)
+    assert isinstance(passed_kwargs.get("to_timestamp"), datetime)
+    assert passed_kwargs["from_timestamp"].tzinfo is not None
+    assert passed_kwargs["to_timestamp"].tzinfo is not None
+    assert isinstance(passed_kwargs.get("value"), float)
+
+
+def test_list_scores_v2_rejects_invalid_timestamp(tmp_path):
+    from langfuse_mcp.__main__ import list_scores_v2
+
+    state = _state(tmp_path)
+    ctx = FakeContext(state)
+
+    with pytest.raises(ValueError, match="from_timestamp"):
+        asyncio.run(list_scores_v2(ctx, from_timestamp="not-a-timestamp"))
+
+
+def test_list_scores_v2_accepts_datetime_objects(tmp_path):
+    from langfuse_mcp.__main__ import list_scores_v2
+
+    state = _state(tmp_path)
+    ctx = FakeContext(state)
+
+    start = datetime(2026, 3, 30, 10, 11, 12, tzinfo=timezone.utc)
+    end = datetime(2026, 3, 30, 11, 11, 12, tzinfo=timezone.utc)
+    asyncio.run(list_scores_v2(ctx, from_timestamp=start, to_timestamp=end, value=1.0))
+
+    passed_kwargs = state.langfuse_client.api.score_v_2.last_get_kwargs
+    assert passed_kwargs is not None
+    assert passed_kwargs["from_timestamp"] == start
+    assert passed_kwargs["to_timestamp"] == end
