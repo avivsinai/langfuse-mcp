@@ -546,6 +546,9 @@ class _ScoreV2API:
         queue_id = kwargs.get("queue_id")
         if queue_id:
             scores = [s for s in scores if s.get("queue_id") == queue_id]
+        trace_id = kwargs.get("trace_id")
+        if trace_id:
+            scores = [s for s in scores if s.get("trace_id") == trace_id]
         return FakePaginatedResponse(data=scores, meta={"next_page": None, "total": len(scores)})
 
     def get_by_id(self, score_id: str, **kwargs: Any) -> Any:

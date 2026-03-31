@@ -11,12 +11,14 @@ from tests.fakes import FakeContext, FakeLangfuse
 
 
 def _state(tmp_path):
+    """Create MCP state backed by fake Langfuse client."""
     from langfuse_mcp.__main__ import MCPState
 
     return MCPState(langfuse_client=FakeLangfuse(), dump_dir=str(tmp_path))
 
 
 def test_annotation_queue_tools_registered_in_groups():
+    """Annotation queue and score tools should be registered in group metadata."""
     from langfuse_mcp.__main__ import TOOL_GROUPS, WRITE_TOOLS
 
     assert "annotation_queues" in TOOL_GROUPS
@@ -28,6 +30,7 @@ def test_annotation_queue_tools_registered_in_groups():
 
 
 def test_annotation_queue_crud_and_assignment(tmp_path):
+    """Annotation queue create/read/update and assignment flow should work."""
     from langfuse_mcp.__main__ import (
         create_annotation_queue,
         create_annotation_queue_assignment,
@@ -87,7 +90,34 @@ def test_annotation_queue_crud_and_assignment(tmp_path):
     assert unassigned["metadata"]["deleted"] is True
 
 
+def test_delete_annotation_queue_item(tmp_path):
+    """delete_annotation_queue_item should remove the item from queue lookups."""
+    from langfuse_mcp.__main__ import (
+        create_annotation_queue,
+        create_annotation_queue_item,
+        delete_annotation_queue_item,
+        get_annotation_queue_item,
+    )
+
+    state = _state(tmp_path)
+    ctx = FakeContext(state)
+
+    queue = asyncio.run(create_annotation_queue(ctx, name="delete-queue"))
+    queue_id = queue["data"]["id"]
+    created_item = asyncio.run(
+        create_annotation_queue_item(ctx, queue_id=queue_id, object_id="trace_1", object_type="TRACE", status="PENDING")
+    )
+    item_id = created_item["data"]["id"]
+
+    deleted = asyncio.run(delete_annotation_queue_item(ctx, queue_id=queue_id, item_id=item_id))
+    assert deleted["metadata"]["deleted"] is True
+
+    with pytest.raises(LookupError):
+        asyncio.run(get_annotation_queue_item(ctx, queue_id=queue_id, item_id=item_id))
+
+
 def test_score_v2_tools(tmp_path):
+    """Score v2 list and get-by-id tools should return seeded score data."""
     from langfuse_mcp.__main__ import get_score_v2, list_scores_v2
 
     state = _state(tmp_path)
@@ -102,6 +132,7 @@ def test_score_v2_tools(tmp_path):
 
 
 def test_list_scores_v2_coerces_iso_timestamps_and_float_value(tmp_path):
+    """ISO timestamps should be coerced to datetime and value should be float."""
     from langfuse_mcp.__main__ import list_scores_v2
 
     state = _state(tmp_path)
@@ -129,6 +160,7 @@ def test_list_scores_v2_coerces_iso_timestamps_and_float_value(tmp_path):
 
 
 def test_list_scores_v2_rejects_invalid_timestamp(tmp_path):
+    """Invalid timestamp strings should raise ValueError before API call."""
     from langfuse_mcp.__main__ import list_scores_v2
 
     state = _state(tmp_path)
@@ -139,6 +171,7 @@ def test_list_scores_v2_rejects_invalid_timestamp(tmp_path):
 
 
 def test_list_scores_v2_accepts_datetime_objects(tmp_path):
+    """Datetime inputs should pass through to score_v_2.get unchanged."""
     from langfuse_mcp.__main__ import list_scores_v2
 
     state = _state(tmp_path)
@@ -152,3 +185,31 @@ def test_list_scores_v2_accepts_datetime_objects(tmp_path):
     assert passed_kwargs is not None
     assert passed_kwargs["from_timestamp"] == start
     assert passed_kwargs["to_timestamp"] == end
+
+
+def test_list_scores_v2_keeps_zero_float_filter(tmp_path):
+    """A valid value=0.0 filter should not be dropped from API kwargs."""
+    from langfuse_mcp.__main__ import list_scores_v2
+
+    state = _state(tmp_path)
+    ctx = FakeContext(state)
+
+    asyncio.run(list_scores_v2(ctx, value=0.0))
+    passed_kwargs = state.langfuse_client.api.score_v_2.last_get_kwargs
+    assert passed_kwargs is not None
+    assert "value" in passed_kwargs
+    assert passed_kwargs["value"] == 0.0
+
+
+def test_list_scores_v2_supports_trace_id_filter(tmp_path):
+    """trace_id filter should be forwarded to the score v2 client."""
+    from langfuse_mcp.__main__ import list_scores_v2
+
+    state = _state(tmp_path)
+    ctx = FakeContext(state)
+
+    result = asyncio.run(list_scores_v2(ctx, trace_id="trace_1"))
+    assert result["metadata"]["item_count"] >= 1
+    passed_kwargs = state.langfuse_client.api.score_v_2.last_get_kwargs
+    assert passed_kwargs is not None
+    assert passed_kwargs["trace_id"] == "trace_1"
