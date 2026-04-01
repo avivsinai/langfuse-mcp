@@ -64,6 +64,8 @@ if not changed:
     print("  (no files needed bumping)")
 PY
 
+./scripts/check-release-version.sh "$version"
+
 git add skills/*/SKILL.md .claude-plugin/plugin.json
 [ -f .codex-plugin/plugin.json ] && git add .codex-plugin/plugin.json
 

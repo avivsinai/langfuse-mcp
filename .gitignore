@@ -199,3 +199,6 @@ dump/
 
 # Agent Message Queue
 .amqrc
+
+# Local MCP client config
+.mcp.json

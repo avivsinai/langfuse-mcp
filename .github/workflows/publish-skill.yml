@@ -42,20 +42,14 @@ jobs:
             exit 1
           }
 
+          ./scripts/check-release-version.sh "$TAG_VERSION"
+
           FAILED=0
 
           for dir in skills/*/; do
             [ -f "$dir/SKILL.md" ] || continue
             SKILL=$(basename "$dir")
             VERSION="${TAG_VERSION}"
-
-            SKILL_VERSION=$(grep -oP 'version:\s*\K[0-9A-Za-z.+-]+' "$dir/SKILL.md" || true)
-            if [ -n "$SKILL_VERSION" ] && [ "$SKILL_VERSION" != "$VERSION" ]; then
-              echo "ERROR: $SKILL SKILL.md version ($SKILL_VERSION) != tag version ($VERSION)"
-              echo "  Run scripts/release-skills.sh $VERSION first"
-              FAILED=1
-              continue
-            fi
 
             echo "Publishing $SKILL version $VERSION"
 
