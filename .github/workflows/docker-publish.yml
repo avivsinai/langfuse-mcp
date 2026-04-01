@@ -1,8 +1,9 @@
 name: Docker Image Publishing
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:  # Allow manual trigger for testing
 
 env:
