@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Cleared `dist/` before release builds and restricted GitHub release uploads to the wheel and source tarball, so automation no longer attaches a stray `.gitignore` asset to Langfuse MCP releases.
+- Added the same release metadata guard to the PyPI and Docker publish workflows that the GitHub release and skill publish flows already use, so a mistagged tag cannot publish inconsistent artifacts.
 - Verified release metadata in the PyPI and Docker publish workflows before building artifacts from a version tag.
 
 ## [0.6.3] - 2026-04-01
