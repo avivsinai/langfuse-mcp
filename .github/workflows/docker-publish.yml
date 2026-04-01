@@ -26,6 +26,9 @@ jobs:
         with:
           fetch-depth: 0  # Required for versioning
 
+      - name: Verify release metadata
+        run: ./scripts/check-release-version.sh "${GITHUB_REF_NAME}"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 

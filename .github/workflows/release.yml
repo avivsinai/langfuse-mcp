@@ -34,11 +34,15 @@ jobs:
         run: ./scripts/check-release-version.sh "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}"
 
       - name: Build distributions
-        run: uv build
+        run: |
+          rm -rf dist
+          uv build
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
-          files: dist/*
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
           generate_release_notes: true
