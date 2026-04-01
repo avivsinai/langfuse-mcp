@@ -6,6 +6,90 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.6.2] - 2026-04-01
+
+### Added
+- A GitHub release workflow that turns version tags into published GitHub releases with built Python distributions attached, keeping GitHub, PyPI, Docker, and skill publishing on the same release event.
+
+### Fixed
+- Verified skill and plugin metadata before skill publishing so a mismatched tag cannot partially publish registry artifacts.
+- Treated `Version already exists` as success when a skill publish reruns after retrying without an alias, preventing false-negative publish failures on release reruns.
+
+## [0.6.1] - 2026-04-01
+
+### Fixed
+- Resolved pyright errors and Ruff line-length violations in the new annotation queue and scores tooling.
+- Verified skill and plugin metadata before skill publishing so mismatched release tags fail fast.
+
+## [0.6.0] - 2026-03-31
+
+### Added
+- Annotation queue tools for listing, creating, assigning, updating, and deleting queue items.
+- Scores v2 tools for inspecting modern Langfuse scoring data.
+
+### Changed
+- Notified the skills marketplace from default-branch pushes after merges.
+
+### Fixed
+- Staged the optional Codex plugin manifest during skill releases.
+- Skipped invalid skill aliases during skill publication instead of failing the whole release.
+
+## [0.5.4] - 2026-03-30
+
+### Changed
+- Switched skill publishing to a tag-based release flow so versioned skill publishes align with Git tags.
+
+## [0.5.3] - 2026-03-29
+
+### Added
+- Codex plugin manifests with richer interface metadata for marketplace consumers.
+
+### Changed
+- Polished the OSS release surface with better templates, security metadata, troubleshooting docs, and synchronized skill trees.
+
+### Fixed
+- Aligned plugin manifest versions with release tags.
+
+## [0.5.2] - 2026-02-08
+
+### Fixed
+- Resolved `DateTime` parse errors in `get_session_details` and audited related session handling paths.
+
+## [0.5.1] - 2026-01-27
+
+### Changed
+- Improved the datasets playbook, skill installation docs, and `check-skills` CI coverage.
+
+### Fixed
+- Corrected Claude MCP installation syntax for environment variables and clarified dataset item upsert behavior.
+
+## [0.5.0] - 2026-01-23
+
+### Added
+- Dataset management tools plus a `--read-only` mode for safer production access.
+
+### Changed
+- Added versioned skill publishing metadata and automated skild-based skill publishing.
+
+## [0.4.2] - 2026-01-19
+
+### Changed
+- Expanded installation guidance and the "Other Clients" documentation.
+
+## [0.4.1] - 2026-01-19
+
+### Changed
+- Simplified the README and refreshed CLI usage examples to match the current command surface.
+
+## [0.4.0] - 2026-01-19
+
+### Added
+- A Claude Code skill for Langfuse MCP.
+
+### Changed
+- Added gitleaks secret scanning and pre-commit hooks.
+
 ## [0.3.4] - 2026-01-13
 
 ### Changed
