@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-04-02
 ### Changed
 - Switched releases to the shared PR-based `scripts/release.sh` flow, with `CHANGELOG.md` supplying the GitHub release notes and CI creating the version tag only after the merged release commit verifies.
 
@@ -14,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pinned release verification and build to Python 3.12 so release automation no longer drifts onto unsupported Python 3.14 toolchains.
 - Ignored `dist/.gitignore` during local release artifact verification so release prep now checks the same wheel and source tarball set that CI publishes.
 - Removed deprecated release shims so there is exactly one supported release entrypoint.
+
 
 ## [0.6.4] - 2026-04-01
 
