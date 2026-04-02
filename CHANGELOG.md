@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Pinned release verification and build to Python 3.12 so release automation no longer drifts onto unsupported Python 3.14 toolchains.
+- Ignored `dist/.gitignore` during local release artifact verification so release prep now checks the same wheel and source tarball set that CI publishes.
 - Removed deprecated release shims so there is exactly one supported release entrypoint.
 
 ## [0.6.4] - 2026-04-01

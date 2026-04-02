@@ -225,7 +225,10 @@ import pathlib
 import sys
 
 version = sys.argv[1]
-artifacts = sorted(p.name for p in pathlib.Path("dist").glob("*"))
+dist = pathlib.Path("dist")
+artifacts = sorted(
+    {p.name for pattern in ("*.whl", "*.tar.gz") for p in dist.glob(pattern)}
+)
 if not artifacts:
     raise SystemExit("error: uv build did not produce any artifacts")
 for artifact in artifacts:
