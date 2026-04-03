@@ -14,10 +14,10 @@ on:
         description: "Which artifacts to publish (push always publishes all)"
         required: false
         type: choice
-        default: all
+        default: github-release-only
         options:
-          - all
           - github-release-only
+          - all
           - docker-only
           - pypi-only
           - skills-only
