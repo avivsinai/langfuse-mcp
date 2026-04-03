@@ -10,6 +10,17 @@ on:
         description: "Existing tag to (re)release (e.g. v0.6.2)"
         required: true
         type: string
+      publish:
+        description: "Which artifacts to publish (push always publishes all)"
+        required: false
+        type: choice
+        default: all
+        options:
+          - all
+          - github-release-only
+          - docker-only
+          - pypi-only
+          - skills-only
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.sha }}
@@ -243,7 +254,9 @@ jobs:
   pypi-publish:
     name: Publish to PyPI
     needs: [prepare, release]
-    if: needs.release.result == 'success'
+    if: >-
+      needs.release.result == 'success' &&
+      (github.event_name == 'push' || inputs.publish == 'all' || inputs.publish == 'pypi-only')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -263,7 +276,9 @@ jobs:
   docker-publish:
     name: Publish Docker image
     needs: [prepare, release]
-    if: needs.release.result == 'success'
+    if: >-
+      needs.release.result == 'success' &&
+      (github.event_name == 'push' || inputs.publish == 'all' || inputs.publish == 'docker-only')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -336,7 +351,9 @@ jobs:
   skill-publish:
     name: Publish skills
     needs: [prepare, release]
-    if: needs.release.result == 'success'
+    if: >-
+      needs.release.result == 'success' &&
+      (github.event_name == 'push' || inputs.publish == 'all' || inputs.publish == 'skills-only')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
