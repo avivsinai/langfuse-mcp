@@ -12,6 +12,10 @@ permissions:
   security-events: write
   actions: read
 
+concurrency:
+  group: gitleaks-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   gitleaks:
     name: Scan for secrets
@@ -19,13 +23,13 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
       - name: Run Gitleaks
         id: gitleaks
-        uses: DariuszPorowski/github-action-gitleaks@v2
+        uses: DariuszPorowski/github-action-gitleaks@a027585cb1f2780aa441f20f4d0aabf8b1a0d90e # v2
         with:
           config: .gitleaks.toml
           report_format: sarif
@@ -34,7 +38,7 @@ jobs:
 
       - name: Upload SARIF to GitHub Code Scanning
         if: steps.gitleaks.outputs.exitcode == 1
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@5c8a8a642e79153f5d047b10ec1cba1d1cc65699 # v3
         with:
           sarif_file: ${{ steps.gitleaks.outputs.report }}
 

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Consolidated PyPI, Docker, and skill publishing into the release workflow so they no longer depend on tag-push events that `GITHUB_TOKEN` cannot trigger.
+- Pinned all GitHub Actions to commit SHAs across every workflow for supply-chain safety.
+- Added missing `permissions`, `timeout-minutes`, and `concurrency` blocks to all workflows.
+- Standalone publish workflows now accept `workflow_dispatch` with an explicit `tag` input and check out the tag ref, making manual reruns safe regardless of branch context.
+
 ## [0.6.5] - 2026-04-02
 ### Changed
 - Switched releases to the shared PR-based `scripts/release.sh` flow, with `CHANGELOG.md` supplying the GitHub release notes and CI creating the version tag only after the merged release commit verifies.

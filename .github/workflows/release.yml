@@ -10,9 +10,17 @@ on:
         description: "Existing tag to (re)release (e.g. v0.6.2)"
         required: true
         type: string
-
-permissions:
-  contents: write
+      publish:
+        description: "Which artifacts to publish (push always publishes all)"
+        required: false
+        type: choice
+        default: github-release-only
+        options:
+          - github-release-only
+          - all
+          - docker-only
+          - pypi-only
+          - skills-only
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.sha }}
@@ -23,6 +31,8 @@ jobs:
     if: "${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'chore(release): v') }}"
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     outputs:
       tag: ${{ steps.prepare.outputs.tag }}
       version: ${{ steps.prepare.outputs.version }}
@@ -30,7 +40,7 @@ jobs:
       release_sha: ${{ steps.prepare.outputs.release_sha }}
       prerelease: ${{ steps.prepare.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
@@ -114,17 +124,19 @@ jobs:
     if: needs.prepare.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
           ref: ${{ needs.prepare.outputs.release_ref }}
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
-      - uses: astral-sh/setup-uv@v3
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
 
       - name: Create local release tag for dynamic versioning
         shell: bash
@@ -157,17 +169,19 @@ jobs:
     if: needs.prepare.result == 'success' && needs.verify.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
           ref: ${{ needs.prepare.outputs.release_ref }}
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
-      - uses: astral-sh/setup-uv@v3
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
 
       - name: Create release tag after verification
         shell: bash
@@ -219,7 +233,7 @@ jobs:
           PY
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           target_commitish: ${{ needs.prepare.outputs.release_sha }}
@@ -229,3 +243,191 @@ jobs:
           files: |
             dist/*.whl
             dist/*.tar.gz
+
+      - name: Upload build artifacts for downstream jobs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-dists
+          path: dist/
+          retention-days: 1
+
+  pypi-publish:
+    name: Publish to PyPI
+    needs: [prepare, release]
+    if: >-
+      needs.release.result == 'success' &&
+      (github.event_name == 'push' || inputs.publish == 'all' || inputs.publish == 'pypi-only')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Download release distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-dists
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
+  docker-publish:
+    name: Publish Docker image
+    needs: [prepare, release]
+    if: >-
+      needs.release.result == 'success' &&
+      (github.event_name == 'push' || inputs.publish == 'all' || inputs.publish == 'docker-only')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_NAME: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.release_ref }}
+
+      - name: Create local tag for versioning
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
+            git tag "${TAG}" "${RELEASE_SHA}"
+          fi
+
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.prepare.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.prepare.outputs.tag }}
+            type=semver,pattern={{major}},value=${{ needs.prepare.outputs.tag }}
+            type=raw,value=latest,enable=${{ needs.prepare.outputs.prerelease == 'false' && github.event_name == 'push' }}
+
+      - name: Build and push Docker image
+        id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  skill-publish:
+    name: Publish skills
+    needs: [prepare, release]
+    if: >-
+      needs.release.result == 'success' &&
+      (github.event_name == 'push' || inputs.publish == 'all' || inputs.publish == 'skills-only')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.prepare.outputs.release_ref }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+
+      - name: Install skild
+        run: npm install -g skild
+
+      - name: Configure skild auth
+        run: |
+          mkdir -p ~/.skild
+          echo '${{ secrets.SKILD_AUTH_JSON }}' > ~/.skild/registry-auth.json
+
+      - name: Verify release metadata
+        run: ./scripts/check-release-version.sh "${{ needs.prepare.outputs.version }}"
+
+      - name: Publish skills
+        run: |
+          TAG_VERSION="${{ needs.prepare.outputs.version }}"
+
+          FAILED=0
+
+          for dir in skills/*/; do
+            [ -f "$dir/SKILL.md" ] || continue
+            SKILL=$(basename "$dir")
+            VERSION="${TAG_VERSION}"
+
+            echo "Publishing $SKILL version $VERSION"
+
+            ALIAS_ARGS=()
+            if [ ${#SKILL} -ge 3 ] && [ ${#SKILL} -le 64 ]; then
+              ALIAS_ARGS=(--alias "$SKILL")
+            else
+              echo "Warning: Skipping alias for $SKILL: length ${#SKILL} outside 3..64"
+            fi
+
+            if OUTPUT=$(npx skild publish \
+              --dir "$dir" \
+              "${ALIAS_ARGS[@]}" \
+              --skill-version "$VERSION" 2>&1); then
+              echo "$OUTPUT"
+              echo "Published $SKILL version $VERSION"
+            elif echo "$OUTPUT" | grep -q "Version already exists"; then
+              echo "$OUTPUT"
+              echo "Warning: $SKILL version $VERSION already published — skipping"
+            elif echo "$OUTPUT" | grep -q "Alias already in use"; then
+              echo "$OUTPUT"
+              echo "Warning: Alias '$SKILL' taken — retrying without alias..."
+              if OUTPUT2=$(npx skild publish \
+                --dir "$dir" \
+                --skill-version "$VERSION" 2>&1); then
+                echo "$OUTPUT2"
+                echo "Published $SKILL version $VERSION (without alias)"
+              elif echo "$OUTPUT2" | grep -q "Version already exists"; then
+                echo "$OUTPUT2"
+                echo "Warning: $SKILL version $VERSION already published on retry — skipping"
+              else
+                echo "ERROR: Publish failed for $SKILL (even without alias)"
+                echo "$OUTPUT2"
+                FAILED=1
+              fi
+            else
+              echo "ERROR: Publish failed for $SKILL"
+              echo "$OUTPUT"
+              FAILED=1
+            fi
+          done
+
+          exit $FAILED
