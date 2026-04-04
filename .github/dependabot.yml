@@ -8,9 +8,12 @@ updates:
   - package-ecosystem: "pip" # See documentation for possible values
     directory: "/" # Location of package manifests
     schedule:
-      interval: "daily"
+      interval: "weekly"
     rebase-strategy: "disabled" # use dependabot-rebase-stale
     commit-message:
       prefix: chore
       prefix-development: chore
-      include: scope 
+      include: scope
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
