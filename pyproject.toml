@@ -117,6 +117,9 @@ combine-as-imports = true
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
+[tool.uv]
+exclude-newer = "7 days"
+
 [[tool.uv.index]]
 name = "pypi"
 url = "https://pypi.org/simple/"
