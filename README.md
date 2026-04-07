@@ -17,9 +17,11 @@ Comparison with [official Langfuse MCP](https://github.com/langfuse/mcp-server-l
 | **Exception Tracking** | Yes | No |
 | **Prompt Management** | Yes | Yes |
 | **Dataset Management** | Yes | No |
+| **Annotation Queues** | Yes | No |
+| **Scores (v2)** | Yes | No |
 | **Selective Tool Loading** | Yes | No |
 
-This project provides a **full observability toolkit** — traces, observations, sessions, exceptions, and prompts — while the official MCP focuses on prompt management.
+This project provides a **full observability toolkit** — traces, observations, sessions, exceptions, prompts, datasets, annotation queues, and scores — while the official MCP focuses on prompt management.
 
 ## Quick Start
 
