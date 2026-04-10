@@ -1,6 +1,7 @@
 # Langfuse MCP Server
 
 [![PyPI](https://badge.fury.io/py/langfuse-mcp.svg)](https://badge.fury.io/py/langfuse-mcp)
+[![Downloads](https://static.pepy.tech/badge/langfuse-mcp)](https://pepy.tech/projects/langfuse-mcp)
 [![Python 3.10–3.13](https://img.shields.io/badge/python-3.10–3.13-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
