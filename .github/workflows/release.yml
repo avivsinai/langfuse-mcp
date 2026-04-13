@@ -22,6 +22,9 @@ on:
           - pypi-only
           - skills-only
 
+permissions:
+  contents: read
+
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.sha }}
   cancel-in-progress: false
@@ -171,6 +174,8 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+      attestations: write
+      id-token: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -211,6 +216,27 @@ jobs:
         run: |
           rm -rf dist
           uv build --python 3.12
+
+      - name: Collect attestation subjects
+        id: attestation_subjects
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t subjects < <(find dist -maxdepth 1 -type f | sort)
+          if ((${#subjects[@]} == 0)); then
+            echo "::error::No release artifacts found to attest."
+            exit 1
+          fi
+          {
+            echo "subjects<<EOF"
+            printf '%s\n' "${subjects[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Generate artifact attestation
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
+        with:
+          subject-path: ${{ steps.attestation_subjects.outputs.subjects }}
 
       - name: Extract release notes for this tag
         shell: bash
