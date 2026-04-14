@@ -14,6 +14,10 @@ updates:
       prefix: chore
       prefix-development: chore
       include: scope
+    ignore:
+      - dependency-name: "langfuse"
+        update-types:
+          - "version-update:semver-major"
     cooldown:
       default-days: 7
       semver-major-days: 14
