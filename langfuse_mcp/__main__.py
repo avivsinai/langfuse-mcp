@@ -5,6 +5,7 @@ agents to query trace data, observations, and exceptions from Langfuse.
 """
 
 import argparse
+import copy
 import inspect
 import json
 import logging
@@ -231,6 +232,11 @@ def _ensure_output_mode(mode: OUTPUT_MODE_LITERAL | OutputMode | str | OutputMod
         return OutputMode.COMPACT
 
 
+def _read_default_output_mode() -> OutputMode:
+    """Read the configured default output mode from the environment."""
+    return _ensure_output_mode(os.getenv("LANGFUSE_MCP_DEFAULT_OUTPUT_MODE", OutputMode.COMPACT.value))
+
+
 def _load_env_file(env_path: Path | None = None) -> None:
     """Load environment variables from a `.env` file if present."""
     if env_path is None:
@@ -271,6 +277,7 @@ def _read_env_defaults() -> dict[str, Any]:
         "timeout": timeout,
         "log_level": os.getenv("LANGFUSE_LOG_LEVEL", "INFO"),
         "log_to_console": os.getenv("LANGFUSE_LOG_TO_CONSOLE", "").lower() in {"1", "true", "yes"},
+        "default_output_mode": _read_default_output_mode().value,
     }
 
 
@@ -306,6 +313,13 @@ def _build_arg_parser(env_defaults: dict[str, Any]) -> argparse.ArgumentParser:
         help=(
             "Directory to save full JSON dumps when 'output_mode' is 'full_json_file'. The directory will be created if it doesn't exist."
         ),
+    )
+    parser.add_argument(
+        "--default-output-mode",
+        type=str,
+        default=env_defaults["default_output_mode"],
+        choices=[mode.value for mode in OutputMode],
+        help=("Default output_mode exposed in MCP tool schemas when clients omit the parameter. Set via LANGFUSE_MCP_DEFAULT_OUTPUT_MODE."),
     )
     parser.add_argument(
         "--log-level",
@@ -974,6 +988,52 @@ class MCPState:
     dump_dir: str | None = field(
         default=None, metadata={"description": "Directory to save full JSON dumps when 'output_mode' is 'full_json_file'"}
     )
+    default_output_mode: OutputMode = field(
+        default=OutputMode.COMPACT,
+        metadata={"description": "Default output_mode applied to MCP tool schemas and runtime fallbacks"},
+    )
+
+
+def _bind_default_output_mode(fn: Any, default_output_mode: OutputMode) -> Any:
+    """Return a callable whose `output_mode` default matches server configuration.
+
+    FastMCP derives each tool's input schema from the callable signature at registration time.
+    Wrapping here keeps the MCP-exposed default aligned with the configured server default.
+    """
+    signature = inspect.signature(fn)
+    output_mode_param = signature.parameters.get("output_mode")
+    if output_mode_param is None:
+        return fn
+
+    updated_params = []
+    for param in signature.parameters.values():
+        if param.name == "output_mode":
+            updated_params.append(param.replace(default=default_output_mode.value))
+        else:
+            updated_params.append(param)
+    updated_signature = signature.replace(parameters=updated_params)
+
+    wrapped: Any
+    if inspect.iscoroutinefunction(fn):
+
+        async def async_wrapped(*args: Any, **kwargs: Any) -> Any:
+            return await fn(*args, **kwargs)
+
+        wrapped = async_wrapped
+    else:
+
+        def sync_wrapped(*args: Any, **kwargs: Any) -> Any:
+            return fn(*args, **kwargs)
+
+        wrapped = sync_wrapped
+
+    wrapped.__name__ = fn.__name__
+    wrapped.__qualname__ = fn.__qualname__
+    wrapped.__doc__ = fn.__doc__
+    wrapped.__module__ = fn.__module__
+    wrapped.__signature__ = updated_signature
+    wrapped.__annotations__ = copy.copy(getattr(fn, "__annotations__", {}))
+    return wrapped
 
 
 class ExceptionCount(BaseModel):
@@ -3697,6 +3757,7 @@ def app_factory(
     enabled_tools: set[str] | None = None,
     timeout: int = 30,
     read_only: bool = False,
+    default_output_mode: OutputMode = OutputMode.COMPACT,
 ) -> FastMCP:
     """Create a FastMCP server with Langfuse tools.
 
@@ -3710,6 +3771,7 @@ def app_factory(
             sessions, exceptions, prompts, datasets, annotation_queues, scores, schema
         timeout: API request timeout in seconds (default: 30). The Langfuse SDK defaults to 5s which is too aggressive.
         read_only: If True, disable all write operations (create/update/delete tools).
+        default_output_mode: Default output_mode exposed in MCP tool schemas.
     """
     if enabled_tools is None:
         enabled_tools = ALL_TOOL_GROUPS
@@ -3741,6 +3803,7 @@ def app_factory(
             exception_type_map=LRUCache(maxsize=cache_size),
             exceptions_by_filepath=LRUCache(maxsize=cache_size),
             dump_dir=dump_dir,
+            default_output_mode=default_output_mode,
         )
         try:
             yield state
@@ -3805,7 +3868,8 @@ def app_factory(
                     if read_only and tool_name in WRITE_TOOLS:
                         skipped_write.append(tool_name)
                         continue
-                    mcp.tool()(tool_funcs[tool_name])
+                    registered_tool = _bind_default_output_mode(tool_funcs[tool_name], default_output_mode)
+                    mcp.tool()(registered_tool)
                     registered.append(tool_name)
 
     if read_only and skipped_write:
@@ -3856,7 +3920,7 @@ def main():
 
     logger.info(
         f"Starting MCP - host:{args.host} timeout:{args.timeout}s cache:{args.cache_size} "
-        f"tools:{sorted(enabled_tools)} read_only:{args.read_only}"
+        f"tools:{sorted(enabled_tools)} read_only:{args.read_only} default_output_mode:{args.default_output_mode}"
     )
     app = app_factory(
         public_key=args.public_key,
@@ -3867,6 +3931,7 @@ def main():
         enabled_tools=enabled_tools,
         timeout=args.timeout,
         read_only=args.read_only,
+        default_output_mode=_ensure_output_mode(args.default_output_mode),
     )
 
     app.run(transport="stdio")

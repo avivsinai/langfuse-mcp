@@ -218,3 +218,19 @@ def test_truncate_large_strings_case_insensitive():
     assert isinstance(value, str)
     assert value.endswith("...")
     assert len(value) <= MAX_FIELD_LENGTH + len("...")
+
+
+def test_app_factory_exposes_default_output_mode_in_tool_schema():
+    """app_factory should expose the configured output mode in MCP tool schemas."""
+    from langfuse_mcp.__main__ import OutputMode, app_factory
+
+    app = app_factory(
+        public_key="pk",
+        secret_key="sk",
+        host="https://cloud.langfuse.com",
+        default_output_mode=OutputMode.FULL_JSON_FILE,
+    )
+
+    fetch_trace_tool = app._tool_manager.get_tool("fetch_trace")
+    assert fetch_trace_tool is not None
+    assert fetch_trace_tool.parameters["properties"]["output_mode"]["default"] == "full_json_file"
