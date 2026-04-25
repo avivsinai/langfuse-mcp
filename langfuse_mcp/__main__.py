@@ -5,11 +5,13 @@ agents to query trace data, observations, and exceptions from Langfuse.
 """
 
 import argparse
+import functools
 import inspect
 import json
 import logging
 import os
 import sys
+import types
 from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -219,27 +221,56 @@ OUTPUT_MODE_LITERAL = Literal["compact", "full_json_string", "full_json_file"]
 ResponseDict = dict[str, Any]
 
 
-def _ensure_output_mode(
-    mode: OUTPUT_MODE_LITERAL | OutputMode | str | OutputMode, configured_default: OutputMode | None = None
-) -> OutputMode:
-    """Normalize user-provided output mode values.
-
-    When *configured_default* is given and the resolved mode equals the
-    schema-hardcoded default (COMPACT), substitute the configured default.
-    This lets the server override the default without modifying tool signatures.
-    """
+def _ensure_output_mode(mode: OUTPUT_MODE_LITERAL | OutputMode | str | OutputMode) -> OutputMode:
+    """Normalize user-provided output mode values."""
     if isinstance(mode, OutputMode):
-        resolved = mode
-    else:
-        try:
-            resolved = OutputMode(str(mode))
-        except (ValueError, TypeError):
-            logger.warning(f"Unknown output mode '{mode}', defaulting to compact")
-            resolved = OutputMode.COMPACT
+        return mode
 
-    if configured_default is not None and resolved == OutputMode.COMPACT:
-        return configured_default
-    return resolved
+    try:
+        return OutputMode(str(mode))
+    except (ValueError, TypeError):
+        logger.warning(f"Unknown output mode '{mode}', defaulting to compact")
+        return OutputMode.COMPACT
+
+
+def _bind_default_output_mode(fn: Any, default_output_mode: "OutputMode") -> Any:
+    """Return a copy of *fn* whose ``output_mode`` parameter defaults to *default_output_mode*.
+
+    The copy preserves the original ``FieldInfo`` metadata (description, title, etc.)
+    so that the MCP tool schema exposed to clients remains complete.
+
+    If *default_output_mode* is ``COMPACT`` (the schema-hardcoded default) or the
+    function has no ``output_mode`` parameter, the original function is returned
+    unchanged.
+    """
+    if default_output_mode == OutputMode.COMPACT:
+        return fn
+
+    sig = inspect.signature(fn)
+    params = sig.parameters
+    if "output_mode" not in params:
+        return fn
+
+    old_param = params["output_mode"]
+    old_default = old_param.default
+
+    # Build a new FieldInfo preserving description from the original
+    if FieldInfo is not None and isinstance(old_default, FieldInfo):
+        new_field = Field(
+            default=default_output_mode.value,
+            description=old_default.description,
+        )
+    else:
+        new_field = Field(default=default_output_mode.value)
+
+    new_param = old_param.replace(default=new_field)
+    new_params = [new_param if p.name == "output_mode" else p for p in params.values()]
+
+    # Copy the function object so the module-level original is not mutated
+    wrapped = types.FunctionType(fn.__code__, fn.__globals__, fn.__name__, fn.__defaults__, fn.__closure__)
+    functools.update_wrapper(wrapped, fn)
+    wrapped.__signature__ = sig.replace(parameters=new_params)
+    return wrapped
 
 
 def _read_default_output_mode() -> OutputMode:
@@ -944,7 +975,7 @@ def process_data_with_mode(
     Returns:
         Tuple of (processed data, optional metadata additions)
     """
-    mode = _ensure_output_mode(output_mode, configured_default=state.default_output_mode)
+    mode = _ensure_output_mode(output_mode)
 
     if mode == OutputMode.COMPACT:
         return process_compact_data(data), None
@@ -1264,7 +1295,7 @@ async def fetch_traces(
             await _embed_observations_in_traces(state, raw_traces)
 
         # Process based on output mode
-        mode = _ensure_output_mode(output_mode, configured_default=state.default_output_mode)
+        mode = _ensure_output_mode(output_mode)
         base_filename_prefix = "traces"
         processed_data, file_meta = process_data_with_mode(raw_traces, mode, base_filename_prefix, state)
 
@@ -1362,7 +1393,7 @@ async def fetch_trace(
                 await _embed_observations_in_traces(state, [raw_trace])
 
         # Process based on output mode
-        mode = _ensure_output_mode(output_mode, configured_default=state.default_output_mode)
+        mode = _ensure_output_mode(output_mode)
         base_filename_prefix = f"trace_{trace_id}"
         processed_data, file_meta = process_data_with_mode(raw_trace, mode, base_filename_prefix, state)
 
@@ -1454,7 +1485,7 @@ async def fetch_observations(
         raw_observations = [_sdk_object_to_python(obs) for obs in observation_items]
 
         # Process based on output mode
-        mode = _ensure_output_mode(output_mode, configured_default=state.default_output_mode)
+        mode = _ensure_output_mode(output_mode)
         base_filename_prefix = f"observations_{type or 'all'}"
         processed_data, file_meta = process_data_with_mode(raw_observations, mode, base_filename_prefix, state)
 
@@ -1519,7 +1550,7 @@ async def fetch_observation(
 
         # Process based on output mode
         base_filename_prefix = f"observation_{observation_id}"
-        mode = _ensure_output_mode(output_mode, configured_default=state.default_output_mode)
+        mode = _ensure_output_mode(output_mode)
         processed_data, file_meta = process_data_with_mode(raw_observation, mode, base_filename_prefix, state)
 
         logger.info(f"Retrieved observation {observation_id}, returning with output_mode={mode}")
@@ -1587,7 +1618,7 @@ async def fetch_sessions(
 
         # Process based on output mode
         base_filename_prefix = "sessions"
-        mode = _ensure_output_mode(output_mode, configured_default=state.default_output_mode)
+        mode = _ensure_output_mode(output_mode)
         sessions_payload, file_meta = process_data_with_mode(raw_sessions, mode, base_filename_prefix, state)
 
         logger.info(f"Found {len(raw_sessions)} sessions, returning with output_mode={mode}")
@@ -1670,7 +1701,7 @@ async def get_session_details(
         )
 
         # If no traces were found, return an empty dict
-        mode = _ensure_output_mode(output_mode, configured_default=state.default_output_mode)
+        mode = _ensure_output_mode(output_mode)
 
         if not trace_items:
             logger.info(f"No session found with ID: {session_id}")
@@ -1778,7 +1809,7 @@ async def get_user_sessions(
     from_timestamp = datetime.now(timezone.utc) - timedelta(minutes=age)
 
     try:
-        mode = _ensure_output_mode(output_mode, configured_default=state.default_output_mode)
+        mode = _ensure_output_mode(output_mode)
 
         # Fetch traces for this user
         trace_items, pagination = _list_traces(
@@ -2049,7 +2080,7 @@ async def find_exceptions_in_file(
         # Only take the top 10 exceptions
         top_exceptions = exceptions[:10]
 
-        mode = _ensure_output_mode(output_mode, configured_default=state.default_output_mode)
+        mode = _ensure_output_mode(output_mode)
         base_filename_prefix = f"exceptions_{os.path.basename(filepath)}"
         processed_exceptions, file_meta = process_data_with_mode(top_exceptions, mode, base_filename_prefix, state)
 
@@ -2106,7 +2137,7 @@ async def get_exception_details(
         # First get the trace details
         trace = _get_trace(state.langfuse_client, trace_id, include_observations=False)
         trace_data = _sdk_object_to_python(trace)
-        mode = _ensure_output_mode(output_mode, configured_default=state.default_output_mode)
+        mode = _ensure_output_mode(output_mode)
         if not trace_data:
             logger.warning(f"Trace not found: {trace_id}")
             empty_payload, file_meta = process_data_with_mode([], mode, f"exceptions_trace_{trace_id}", state)
@@ -3078,7 +3109,7 @@ async def list_dataset_items(
         items, pagination = _extract_items_from_response(response)
         raw_items = [_sdk_object_to_python(item) for item in items]
 
-        mode = _ensure_output_mode(output_mode, configured_default=state.default_output_mode)
+        mode = _ensure_output_mode(output_mode)
         processed_items, file_meta = process_data_with_mode(raw_items, mode, f"dataset_items_{dataset_name}", state)
 
         logger.info(f"Listed {len(raw_items)} items from dataset '{dataset_name}' (page={page}, limit={limit})")
@@ -3145,7 +3176,7 @@ async def get_dataset_item(
 
         result = _sdk_object_to_python(item)
 
-        mode = _ensure_output_mode(output_mode, configured_default=state.default_output_mode)
+        mode = _ensure_output_mode(output_mode)
         processed_result, file_meta = process_data_with_mode(result, mode, f"dataset_item_{item_id}", state)
 
         logger.info(f"Fetched dataset item '{item_id}'")
@@ -3836,7 +3867,7 @@ def app_factory(
                     if read_only and tool_name in WRITE_TOOLS:
                         skipped_write.append(tool_name)
                         continue
-                    mcp.tool()(tool_funcs[tool_name])
+                    mcp.tool()(_bind_default_output_mode(tool_funcs[tool_name], default_output_mode))
                     registered.append(tool_name)
 
     if read_only and skipped_write:
