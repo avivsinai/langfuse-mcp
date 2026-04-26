@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-04-26
 ### Added
 - Added `--default-output-mode` and `LANGFUSE_MCP_DEFAULT_OUTPUT_MODE` so MCP tool schemas can default to `compact`, `full_json_string`, or `full_json_file` when clients omit `output_mode`.
 
@@ -15,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pinned all GitHub Actions to commit SHAs across every workflow for supply-chain safety.
 - Added missing `permissions`, `timeout-minutes`, and `concurrency` blocks to all workflows.
 - Standalone publish workflows now accept `workflow_dispatch` with an explicit `tag` input and check out the tag ref, making manual reruns safe regardless of branch context.
+
 
 ## [0.6.5] - 2026-04-02
 ### Changed
