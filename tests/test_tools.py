@@ -218,3 +218,137 @@ def test_truncate_large_strings_case_insensitive():
     assert isinstance(value, str)
     assert value.endswith("...")
     assert len(value) <= MAX_FIELD_LENGTH + len("...")
+
+
+def test_app_factory_accepts_default_output_mode():
+    """app_factory should accept and store the configured default_output_mode."""
+    from langfuse_mcp.__main__ import OutputMode, app_factory
+
+    app = app_factory(
+        public_key="pk",
+        secret_key="sk",
+        host="https://cloud.langfuse.com",
+        default_output_mode=OutputMode.FULL_JSON_FILE,
+    )
+
+    assert app is not None
+
+
+def test_bind_default_output_mode_noop_for_compact():
+    """_bind_default_output_mode returns the original function when default is COMPACT."""
+    from langfuse_mcp.__main__ import OutputMode, _bind_default_output_mode, fetch_trace
+
+    result = _bind_default_output_mode(fetch_trace, OutputMode.COMPACT)
+    assert result is fetch_trace
+
+
+def test_bind_default_output_mode_preserves_schema_description():
+    """_bind_default_output_mode must preserve the FieldInfo description in the new signature."""
+    import inspect
+
+    from langfuse_mcp.__main__ import FieldInfo, OutputMode, _bind_default_output_mode, fetch_trace
+
+    bound = _bind_default_output_mode(fetch_trace, OutputMode.FULL_JSON_FILE)
+    sig = inspect.signature(bound)
+    new_default = sig.parameters["output_mode"].default
+
+    if FieldInfo is not None and isinstance(new_default, FieldInfo):
+        assert new_default.default == "full_json_file"
+        assert new_default.description is not None and len(new_default.description) > 0
+        orig_sig = inspect.signature(fetch_trace)
+        orig_desc = orig_sig.parameters["output_mode"].default.description
+        assert new_default.description == orig_desc
+    else:
+        assert new_default == "full_json_file"
+
+
+def test_bind_default_output_mode_does_not_mutate_original():
+    """_bind_default_output_mode must not mutate the original module-level function."""
+    import inspect
+
+    from langfuse_mcp.__main__ import OutputMode, _bind_default_output_mode, fetch_trace
+
+    orig_sig = inspect.signature(fetch_trace)
+    orig_default = orig_sig.parameters["output_mode"].default
+
+    _bind_default_output_mode(fetch_trace, OutputMode.FULL_JSON_FILE)
+
+    after_sig = inspect.signature(fetch_trace)
+    assert after_sig.parameters["output_mode"].default is orig_default
+
+
+def test_explicit_compact_stays_compact(state):
+    """Explicit output_mode='compact' must remain compact even when default is FULL_JSON_FILE."""
+    from langfuse_mcp.__main__ import OutputMode, _bind_default_output_mode, fetch_traces
+
+    bound = _bind_default_output_mode(fetch_traces, OutputMode.FULL_JSON_FILE)
+    ctx = FakeContext(state)
+    result = asyncio.run(
+        bound(
+            ctx,
+            age=10,
+            name=None,
+            user_id=None,
+            session_id=None,
+            metadata=None,
+            page=1,
+            limit=50,
+            tags=None,
+            include_observations=False,
+            output_mode="compact",
+        )
+    )
+    assert isinstance(result, dict)
+    assert "data" in result
+
+
+def test_omitted_output_mode_uses_configured_default(state):
+    """When output_mode is omitted, the bound function should use the configured default."""
+    import inspect
+
+    from langfuse_mcp.__main__ import FieldInfo, OutputMode, _bind_default_output_mode, fetch_traces
+
+    bound = _bind_default_output_mode(fetch_traces, OutputMode.FULL_JSON_FILE)
+    sig = inspect.signature(bound)
+    schema_default = sig.parameters["output_mode"].default
+
+    if FieldInfo is not None and isinstance(schema_default, FieldInfo):
+        assert schema_default.default == "full_json_file"
+    else:
+        assert schema_default == "full_json_file"
+
+    ctx = FakeContext(state)
+    result = asyncio.run(
+        bound(
+            ctx,
+            age=10,
+            name=None,
+            user_id=None,
+            session_id=None,
+            metadata=None,
+            page=1,
+            limit=50,
+            tags=None,
+            include_observations=False,
+            output_mode="full_json_file",
+        )
+    )
+    assert isinstance(result, dict)
+    assert result["metadata"].get("file_path") is not None
+
+
+def test_invalid_output_mode_falls_back_to_compact(state):
+    """Invalid output_mode values must fall back to compact, not to the configured default."""
+    from langfuse_mcp.__main__ import OutputMode, _ensure_output_mode
+
+    assert _ensure_output_mode("bogus_value") == OutputMode.COMPACT
+
+
+def test_ensure_output_mode_normalizes_valid_values():
+    """_ensure_output_mode should normalize all valid string values."""
+    from langfuse_mcp.__main__ import OutputMode, _ensure_output_mode
+
+    assert _ensure_output_mode("compact") == OutputMode.COMPACT
+    assert _ensure_output_mode("full_json_string") == OutputMode.FULL_JSON_STRING
+    assert _ensure_output_mode("full_json_file") == OutputMode.FULL_JSON_FILE
+    assert _ensure_output_mode(OutputMode.COMPACT) == OutputMode.COMPACT

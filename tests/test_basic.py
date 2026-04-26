@@ -23,6 +23,7 @@ def test_cli_env_defaults(monkeypatch):
     monkeypatch.setenv("LANGFUSE_HOST", "https://env-host")
     monkeypatch.setenv("LANGFUSE_LOG_LEVEL", "DEBUG")
     monkeypatch.setenv("LANGFUSE_LOG_TO_CONSOLE", "true")
+    monkeypatch.setenv("LANGFUSE_MCP_DEFAULT_OUTPUT_MODE", "full_json_file")
 
     from langfuse_mcp.__main__ import _build_arg_parser, _read_env_defaults
 
@@ -34,6 +35,7 @@ def test_cli_env_defaults(monkeypatch):
     assert args.host == "https://env-host"
     assert args.log_level == "DEBUG"
     assert args.log_to_console is True
+    assert args.default_output_mode == "full_json_file"
 
 
 def test_cli_requires_keys_without_env(monkeypatch):

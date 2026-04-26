@@ -40,6 +40,7 @@ uv run -m ruff check --fix .
 - `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`
 - `LANGFUSE_MCP_LOG_FILE` defaults to `/tmp/langfuse_mcp.log`
 - `LANGFUSE_MCP_TOOLS` selects comma-separated tool groups
+- `LANGFUSE_MCP_DEFAULT_OUTPUT_MODE` sets the default MCP tool `output_mode`
 
 ## Code style
 

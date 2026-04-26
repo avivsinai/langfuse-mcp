@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added `--default-output-mode` and `LANGFUSE_MCP_DEFAULT_OUTPUT_MODE` so MCP tool schemas can default to `compact`, `full_json_string`, or `full_json_file` when clients omit `output_mode`.
+
 ### Fixed
 - Consolidated PyPI, Docker, and skill publishing into the release workflow so they no longer depend on tag-push events that `GITHUB_TOKEN` cannot trigger.
 - Pinned all GitHub Actions to commit SHAs across every workflow for supply-chain safety.
