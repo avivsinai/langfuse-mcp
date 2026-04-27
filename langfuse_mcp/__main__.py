@@ -88,7 +88,10 @@ logger = logging.getLogger("langfuse_mcp")
 # Constants
 HOUR = 60  # minutes
 DAY = 24 * HOUR
-MAX_AGE_MINUTES = 7 * DAY
+# MAX_AGE_MINUTES caps the lookback window for time-based tools (fetch_traces,
+# fetch_observations, etc.) — set to match your Langfuse instance's data
+# retention. Override via LANGFUSE_MAX_AGE_DAYS env var; defaults to 7 days.
+MAX_AGE_MINUTES = int(os.environ.get("LANGFUSE_MAX_AGE_DAYS", "7")) * DAY
 MAX_FIELD_LENGTH = 500  # Maximum string length for field values
 MAX_RESPONSE_SIZE = 20000  # Maximum size of response object in characters
 TRUNCATE_SUFFIX = "..."  # Suffix to add to truncated fields
@@ -959,7 +962,7 @@ def validate_age(age: int) -> int:
         The validated age if it passes validation
 
     Raises:
-        ValueError: If age is not positive or exceeds 7 days (10080 minutes)
+        ValueError: If age is not positive or exceeds MAX_AGE_MINUTES
     """
     if age <= 0:
         raise ValueError("Age must be positive")
@@ -970,7 +973,7 @@ def validate_age(age: int) -> int:
 
 
 ValidatedAge = Annotated[int, AfterValidator(validate_age)]
-"""Type for validated age values (positive integer up to 7 days/10080 minutes)"""
+"""Type for validated age values (positive integer up to MAX_AGE_MINUTES)"""
 
 
 def clear_caches(state: MCPState) -> None:
@@ -1804,7 +1807,7 @@ async def get_user_sessions(
 async def find_exceptions(
     ctx: Context,
     age: ValidatedAge = Field(
-        ..., description="Number of minutes to look back (positive integer, max 7 days/10080 minutes)", gt=0, le=MAX_AGE_MINUTES
+        ..., description=f"Number of minutes to look back (positive integer, max {MAX_AGE_MINUTES // DAY} days)", gt=0, le=MAX_AGE_MINUTES
     ),
     group_by: Literal["file", "function", "type"] = Field(
         "file",
@@ -1817,7 +1820,7 @@ async def find_exceptions(
 
     Args:
         ctx: Context object containing lifespan context with Langfuse client
-        age: Number of minutes to look back (positive integer, max 7 days/10080 minutes)
+        age: Number of minutes to look back (positive integer, max 30 days)
         group_by: How to group exceptions - "file" groups by filename, "function" groups by function name,
                   or "type" groups by exception type
 
@@ -1895,7 +1898,7 @@ async def find_exceptions_in_file(
     ctx: Context,
     filepath: str = Field(..., description="Path to the file to search for exceptions (full path including extension)"),
     age: ValidatedAge = Field(
-        ..., description="Number of minutes to look back (positive integer, max 7 days/10080 minutes)", gt=0, le=MAX_AGE_MINUTES
+        ..., description=f"Number of minutes to look back (positive integer, max {MAX_AGE_MINUTES // DAY} days)", gt=0, le=MAX_AGE_MINUTES
     ),
     output_mode: OUTPUT_MODE_LITERAL = Field(
         "compact",
@@ -1912,7 +1915,7 @@ async def find_exceptions_in_file(
     Args:
         ctx: Context object containing lifespan context with Langfuse client
         filepath: Path to the file to search for exceptions (full path including extension)
-        age: Number of minutes to look back (positive integer, max 7 days/10080 minutes)
+        age: Number of minutes to look back (positive integer, max 30 days)
         output_mode: Controls the output format and detail level
 
     Returns:
@@ -2148,14 +2151,14 @@ async def get_exception_details(
 async def get_error_count(
     ctx: Context,
     age: ValidatedAge = Field(
-        ..., description="Number of minutes to look back (positive integer, max 7 days/10080 minutes)", gt=0, le=MAX_AGE_MINUTES
+        ..., description=f"Number of minutes to look back (positive integer, max {MAX_AGE_MINUTES // DAY} days)", gt=0, le=MAX_AGE_MINUTES
     ),
 ) -> ResponseDict:
     """Get number of traces with exceptions in last N minutes.
 
     Args:
         ctx: Context object containing lifespan context with Langfuse client
-        age: Number of minutes to look back (positive integer, max 7 days/10080 minutes)
+        age: Number of minutes to look back (positive integer, max 30 days)
 
     Returns:
         Dictionary with error statistics including trace count, observation count, and exception count
