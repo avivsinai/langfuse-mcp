@@ -1,6 +1,8 @@
 """Basic tests for langfuse-mcp package."""
 
+import importlib
 import logging
+import os
 import sys
 
 import pytest
@@ -36,6 +38,27 @@ def test_cli_env_defaults(monkeypatch):
     assert args.log_level == "DEBUG"
     assert args.log_to_console is True
     assert args.default_output_mode == "full_json_file"
+
+
+def test_max_age_days_env_override(monkeypatch):
+    """LANGFUSE_MAX_AGE_DAYS should configure the lookback cap at import time."""
+    import langfuse_mcp.__main__ as main_module
+
+    original_env_value = os.environ.get("LANGFUSE_MAX_AGE_DAYS")
+    try:
+        monkeypatch.setenv("LANGFUSE_MAX_AGE_DAYS", "30")
+        reloaded = importlib.reload(main_module)
+
+        assert reloaded.MAX_AGE_DAYS == 30
+        assert reloaded.MAX_AGE_MINUTES == 30 * reloaded.DAY
+        assert "max 30 days/43200 minutes" in reloaded.AGE_LOOKBACK_DESCRIPTION
+        assert reloaded.validate_age(30 * reloaded.DAY) == 30 * reloaded.DAY
+    finally:
+        if original_env_value is None:
+            monkeypatch.delenv("LANGFUSE_MAX_AGE_DAYS", raising=False)
+        else:
+            monkeypatch.setenv("LANGFUSE_MAX_AGE_DAYS", original_env_value)
+        importlib.reload(main_module)
 
 
 def test_cli_requires_keys_without_env(monkeypatch):
