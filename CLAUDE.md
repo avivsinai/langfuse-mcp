@@ -29,6 +29,12 @@ uv run -m ruff format .
 uv run -m ruff check --fix .
 ```
 
+## Supply chain / dependencies
+
+- `pyproject.toml` sets `[tool.uv] exclude-newer = "7 days"` as a deliberate **supply-chain quarantine**: `uv lock` / `uv sync` will not resolve any package version published in the last 7 days, blocking freshly-published malicious versions from landing in dependency resolution. Dependabot's `cooldown` only delays generated PRs and does **not** cover ad-hoc lock/sync — the two are complementary.
+- The relative-duration syntax (`"7 days"`, `"1 week"`, `"24 hours"`) requires uv ≥ 0.9 (added via astral-sh/uv#16814, Dec 2025). Older uv versions emit a parse warning or hard-fail; that is a local-toolchain problem, **not** a config bug. Bump local uv before assuming the line is broken.
+- **Do not remove `exclude-newer` or any other security/supply-chain config** as "dead" or "noisy" without confirming what it gates. Investigate root cause (uv version, syntax change) before deleting protections. Past incident: a "follow-up cleanup" PR almost shipped removal of this line.
+
 ## Release Contract
 
 - Release from `main` only through `./scripts/release.sh X.Y.Z` and the resulting release PR; do not create manual tags, GitHub releases, or ad hoc release uploads.
