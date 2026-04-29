@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- Allow `langfuse>=4.0.0,<5.0.0` alongside the existing `>=3.11.2,<4.0.0` range so projects can pin langfuse-mcp without blocking the v4.x SDK upgrade (closes #40).
+- Added a small capability-based shim (`langfuse_mcp/_compat.py`) so MCP tool calls auto-select the right SDK surface across SDK versions:
+  - Score list/get routing now follows the `api.scores` (v4) ↔ `api.score_v_2` (v3) rename, and the v4 method rename `get` → `get_many`. Score creation tools are unchanged.
+  - Annotation queue write tools now branch between v3's `request=<PydanticModel>` style and v4's direct-kwargs style. Path identifiers (`queue_id`, `item_id`) are passed as keyword args in both branches.
+  - Single observation fetch precedence is `api.observations.get` (v3) → `api.legacy.observations_v1.get` (v4 self-host safe) → top-level `client.fetch_observation` shim.
+- `fetch_observations` keeps its existing `page` + `limit` MCP schema. On v4 deployments where only the cursor-based `observations_v2` route is exposed, requests for `page > 1` raise an explicit `ERR_LANGFUSE_OBSERVATIONS_CURSOR_PAGE_UNSUPPORTED` error pointing at `legacy.observations_v1` rather than silently returning page 1.
+- `_extract_items_from_response` now preserves `meta` pagination on responses with `data + meta` (previously dropped on the `.data` branch).
+
+### Notes
+- v4 adds `opentelemetry-api`, `opentelemetry-sdk`, and `opentelemetry-exporter-otlp-proto-http` as transitive dependencies. langfuse-mcp instantiates the client with `tracing_enabled=False`, so no traces are emitted by default.
+- Real-SDK smoke verification: live `Langfuse` import + `_compat` dispatcher selection probed against `langfuse==3.14.5` and `langfuse==4.5.1` for the observation list/fetch paths. The annotation queue, dataset, dataset-item, and score paths are verified by source-level signature inspection of `langfuse-python` v4.0.6 and the corresponding v3 SDK; runtime exercise lives in v3-shape and strict-v4-shape fakes that mirror the real SDK signatures (no `**kwargs` permissiveness on v4 write methods).
 
 ## [0.8.0] - 2026-04-28
 ### Added
