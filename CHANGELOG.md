@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.9.0] - 2026-04-29
 ### Changed
 - Allow `langfuse>=4.0.0,<5.0.0` alongside the existing `>=3.11.2,<4.0.0` range so projects can pin langfuse-mcp without blocking the v4.x SDK upgrade (closes #40).
 - Added a small capability-based shim (`langfuse_mcp/_compat.py`) so MCP tool calls auto-select the right SDK surface across SDK versions:
@@ -18,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Notes
 - v4 adds `opentelemetry-api`, `opentelemetry-sdk`, and `opentelemetry-exporter-otlp-proto-http` as transitive dependencies. langfuse-mcp instantiates the client with `tracing_enabled=False`, so no traces are emitted by default.
 - Real-SDK smoke verification: live `Langfuse` import + `_compat` dispatcher selection probed against `langfuse==3.14.5` and `langfuse==4.5.1` for the observation list/fetch paths. The annotation queue, dataset, dataset-item, and score paths are verified by source-level signature inspection of `langfuse-python` v4.0.6 and the corresponding v3 SDK; runtime exercise lives in v3-shape and strict-v4-shape fakes that mirror the real SDK signatures (no `**kwargs` permissiveness on v4 write methods).
+
 
 ## [0.8.0] - 2026-04-28
 ### Added
