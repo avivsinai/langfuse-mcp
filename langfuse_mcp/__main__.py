@@ -35,6 +35,8 @@ from langfuse import Langfuse
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import AfterValidator, BaseModel, Field
 
+from langfuse_mcp import _compat
+
 try:
     from pydantic.fields import FieldInfo
 except ImportError:  # pragma: no cover - pydantic stubbed in tests
@@ -514,14 +516,14 @@ def _coerce_optional_datetime(value: Any, field_name: str) -> datetime | None:
 
 
 def _prompts_get(prompts_client: Any, *, name: str, **kwargs: Any) -> Any:
-    """Call prompts.get with the correct parameter name across SDK versions."""
-    try:
-        params = inspect.signature(prompts_client.get).parameters
-    except (TypeError, ValueError):
-        params = {}
+    """Call prompts.get with the correct parameter name across SDK versions.
 
+    When signature inspection fails (``method_has_param`` returns ``None``),
+    fall back to the older ``name=`` shape — matching the prior behavior
+    before the helper was tri-state.
+    """
     call_kwargs = dict(kwargs)
-    if "prompt_name" in params:
+    if _compat.method_has_param(prompts_client.get, "prompt_name") is True:
         call_kwargs["prompt_name"] = name
     else:
         call_kwargs["name"] = name
@@ -530,11 +532,8 @@ def _prompts_get(prompts_client: Any, *, name: str, **kwargs: Any) -> Any:
 
 
 def _prompts_get_supports_resolve(prompts_client: Any) -> bool:
-    try:
-        params = inspect.signature(prompts_client.get).parameters
-    except (TypeError, ValueError):
-        return False
-    return "resolve" in params
+    """Return True when the SDK's prompts.get accepts the ``resolve`` kwarg."""
+    return _compat.method_has_param(prompts_client.get, "resolve") is True
 
 
 def _extract_items_from_response(response: Any) -> tuple[list[Any], dict[str, Any]]:
@@ -556,7 +555,9 @@ def _extract_items_from_response(response: Any) -> tuple[list[Any], dict[str, An
         return list(items), pagination
 
     if hasattr(response, "data"):
-        return list(response.data), {}
+        meta = getattr(response, "meta", None)
+        pagination = _sdk_object_to_python(meta) if meta is not None else {}
+        return list(response.data), pagination if isinstance(pagination, dict) else {}
 
     if isinstance(response, list):
         return response, {}
@@ -632,13 +633,14 @@ def _list_observations(
     parent_observation_id: str | None,
     metadata: dict[str, Any] | None,
 ) -> tuple[list[Any], dict[str, Any]]:
-    """Fetch observations via the Langfuse SDK handling v2/v3 differences."""
-    if not hasattr(langfuse_client, "api") or not hasattr(langfuse_client.api, "observations"):
+    """Fetch observations via the Langfuse SDK handling v3 page-based and v4 cursor-based listings."""
+    list_method = _compat.get_observations_list_method(langfuse_client)
+    if list_method is None:
         raise RuntimeError("Unsupported Langfuse client: no observation listing method available")
+    method, mode = list_method
 
     list_kwargs: dict[str, Any] = {
         "limit": limit or None,
-        "page": page or None,
         "name": name,
         "user_id": user_id,
         "type": obs_type,
@@ -647,9 +649,23 @@ def _list_observations(
         "from_start_time": from_start_time,
         "to_start_time": to_start_time,
     }
+
+    if mode == "page":
+        list_kwargs["page"] = page or None
+    else:
+        # v4 ObservationsV2 endpoint uses cursor-based pagination only. Page=1 maps to
+        # an empty cursor (first page); higher page numbers cannot be honored without
+        # walking, so surface a clear error rather than silently returning page=1.
+        if page > 1:
+            raise RuntimeError(
+                "ERR_LANGFUSE_OBSERVATIONS_CURSOR_PAGE_UNSUPPORTED: "
+                "Retry with page=1; this MCP schema cannot request page>1 unless the "
+                "active Langfuse client exposes api.legacy.observations_v1 (page-based)."
+            )
+
     list_kwargs = {k: v for k, v in list_kwargs.items() if v is not None}
 
-    response = langfuse_client.api.observations.get_many(**list_kwargs)
+    response = method(**list_kwargs)
     items, pagination = _extract_items_from_response(response)
 
     if metadata:
@@ -660,15 +676,11 @@ def _list_observations(
 
 
 def _get_observation(langfuse_client: Any, observation_id: str) -> Any:
-    """Fetch a single observation using either the v3 or v2 SDK surface."""
-    if hasattr(langfuse_client, "api") and hasattr(langfuse_client.api, "observations"):
-        return langfuse_client.api.observations.get(observation_id=observation_id)
-
-    if hasattr(langfuse_client, "fetch_observation"):
-        response = langfuse_client.fetch_observation(observation_id)
-        return getattr(response, "data", response)
-
-    raise RuntimeError("Unsupported Langfuse client: no observation getter available")
+    """Fetch a single observation; precedence is v3 -> v4 legacy_v1 -> top-level shim."""
+    fetcher = _compat.get_observations_single_fetcher(langfuse_client)
+    if fetcher is None:
+        raise RuntimeError("Unsupported Langfuse client: no observation getter available")
+    return fetcher(observation_id)
 
 
 def _get_trace(langfuse_client: Any, trace_id: str, include_observations: bool) -> Any:
@@ -3243,23 +3255,18 @@ async def create_dataset(
         description = _normalize_field_default(description)
         metadata = _normalize_field_default(metadata)
 
-        # Use the high-level SDK method if available, otherwise use API directly
-        if hasattr(state.langfuse_client, "create_dataset"):
-            kwargs: dict[str, Any] = {"name": name}
-            if description:
-                kwargs["description"] = description
-            if metadata:
-                kwargs["metadata"] = metadata
-            dataset = state.langfuse_client.create_dataset(**kwargs)
-        else:
-            from langfuse.api.resources.datasets.types.create_dataset_request import CreateDatasetRequest
+        kwargs: dict[str, Any] = {"name": name}
+        if description is not None:
+            kwargs["description"] = description
+        if metadata is not None:
+            kwargs["metadata"] = metadata
 
-            request = CreateDatasetRequest(
-                name=name,
-                description=description,
-                metadata=metadata,
-            )
-            dataset = state.langfuse_client.api.datasets.create(request=request)
+        # Both supported SDKs (v3 ≥3.11.2, v4 ≥4.0.0) expose the top-level
+        # ``Langfuse.create_dataset`` shortcut, so we don't ship a v3/v4 fallback
+        # for ``api.datasets.create`` that would never run in practice.
+        if not hasattr(state.langfuse_client, "create_dataset"):
+            raise RuntimeError("Unsupported Langfuse client: missing top-level create_dataset() shortcut")
+        dataset = state.langfuse_client.create_dataset(**kwargs)
 
         result = _sdk_object_to_python(dataset)
 
@@ -3317,47 +3324,28 @@ async def create_dataset_item(
         item_id = _normalize_field_default(item_id)
         status = _normalize_field_default(status)
 
-        # Use the high-level SDK method if available
-        if hasattr(state.langfuse_client, "create_dataset_item"):
-            kwargs: dict[str, Any] = {"dataset_name": dataset_name}
-            if input is not None:
-                kwargs["input"] = input
-            if expected_output is not None:
-                kwargs["expected_output"] = expected_output
-            if metadata:
-                kwargs["metadata"] = metadata
-            if source_trace_id:
-                kwargs["source_trace_id"] = source_trace_id
-            if source_observation_id:
-                kwargs["source_observation_id"] = source_observation_id
-            if item_id:
-                kwargs["id"] = item_id
-            if status:
-                kwargs["status"] = status
-            item = state.langfuse_client.create_dataset_item(**kwargs)
-        else:
-            from langfuse.api.resources.dataset_items.types.create_dataset_item_request import CreateDatasetItemRequest
+        kwargs: dict[str, Any] = {"dataset_name": dataset_name}
+        if input is not None:
+            kwargs["input"] = input
+        if expected_output is not None:
+            kwargs["expected_output"] = expected_output
+        if metadata is not None:
+            kwargs["metadata"] = metadata
+        if source_trace_id is not None:
+            kwargs["source_trace_id"] = source_trace_id
+        if source_observation_id is not None:
+            kwargs["source_observation_id"] = source_observation_id
+        if item_id is not None:
+            kwargs["id"] = item_id
+        if status is not None:
+            kwargs["status"] = status
 
-            request_kwargs: dict[str, Any] = {"dataset_name": dataset_name}
-            if input is not None:
-                request_kwargs["input"] = input
-            if expected_output is not None:
-                request_kwargs["expected_output"] = expected_output
-            if metadata:
-                request_kwargs["metadata"] = metadata
-            if source_trace_id:
-                request_kwargs["source_trace_id"] = source_trace_id
-            if source_observation_id:
-                request_kwargs["source_observation_id"] = source_observation_id
-            if item_id:
-                request_kwargs["id"] = item_id
-            if status:
-                from langfuse.api.resources.commons.types.dataset_status import DatasetStatus
-
-                request_kwargs["status"] = DatasetStatus(status)
-
-            request = CreateDatasetItemRequest(**request_kwargs)
-            item = state.langfuse_client.api.dataset_items.create(request=request)
+        # As with create_dataset above, both supported SDKs expose the top-level
+        # ``Langfuse.create_dataset_item`` shortcut, so the api-level fallback
+        # would never run for any supported client.
+        if not hasattr(state.langfuse_client, "create_dataset_item"):
+            raise RuntimeError("Unsupported Langfuse client: missing top-level create_dataset_item() shortcut")
+        item = state.langfuse_client.create_dataset_item(**kwargs)
 
         result = _sdk_object_to_python(item)
 
@@ -3446,16 +3434,20 @@ async def create_annotation_queue(
     state = cast(MCPState, ctx.request_context.lifespan_context)
     try:
         description = _normalize_field_default(description)
-        score_config_ids = _normalize_field_default(score_config_ids)
+        # Both v3 (CreateAnnotationQueueRequest) and v4 (api.annotation_queues.create_queue)
+        # treat score_config_ids as a required list — passing None triggers a Pydantic
+        # validation error. Coerce omissions to [] so the MCP-level "optional" semantics
+        # don't leak through to the SDK call.
+        score_config_ids = _normalize_field_default(score_config_ids) or []
 
-        try:
-            from langfuse.api.resources.annotation_queues.types.create_annotation_queue_request import CreateAnnotationQueueRequest
-
-            request: Any = CreateAnnotationQueueRequest(name=name, description=description, score_config_ids=score_config_ids)  # type: ignore[call-arg]  # SDK uses camelCase aliases
-        except (ImportError, ModuleNotFoundError):
-            request = {"name": name, "description": description, "score_config_ids": score_config_ids}
-
-        queue = state.langfuse_client.api.annotation_queues.create_queue(request=request)
+        method = state.langfuse_client.api.annotation_queues.create_queue
+        queue = _compat.call_with_request_or_kwargs(
+            method,
+            lambda: _build_create_annotation_queue_request(name=name, description=description, score_config_ids=score_config_ids),
+            name=name,
+            description=description,
+            score_config_ids=score_config_ids,
+        )
         result = _sdk_object_to_python(queue)
         logger.info(f"Created annotation queue '{name}' (id={result.get('id')})")
         return {"data": result, "metadata": {"created": True, "queue_id": result.get("id"), "name": name}}
@@ -3543,20 +3535,17 @@ async def create_annotation_queue_item(
     state = cast(MCPState, ctx.request_context.lifespan_context)
     try:
         status = _normalize_field_default(status)
-        request_kwargs: dict[str, Any] = {"object_id": object_id, "object_type": object_type}
+        body_kwargs: dict[str, Any] = {"object_id": object_id, "object_type": object_type}
         if status is not None:
-            request_kwargs["status"] = status
+            body_kwargs["status"] = status
 
-        try:
-            from langfuse.api.resources.annotation_queues.types.create_annotation_queue_item_request import (
-                CreateAnnotationQueueItemRequest,
-            )
-
-            request: Any = CreateAnnotationQueueItemRequest(**request_kwargs)
-        except (ImportError, ModuleNotFoundError):
-            request = request_kwargs
-
-        item = state.langfuse_client.api.annotation_queues.create_queue_item(queue_id=queue_id, request=request)
+        method = state.langfuse_client.api.annotation_queues.create_queue_item
+        item = _compat.call_with_request_or_kwargs(
+            method,
+            lambda: _build_create_annotation_queue_item_request(**body_kwargs),
+            path_kwargs={"queue_id": queue_id},
+            **body_kwargs,
+        )
         result = _sdk_object_to_python(item)
         logger.info(f"Created annotation queue item '{result.get('id')}' in queue '{queue_id}'")
         return {"data": result, "metadata": {"created": True, "queue_id": queue_id, "item_id": result.get("id")}}
@@ -3574,16 +3563,13 @@ async def update_annotation_queue_item(
     """Update the status of an annotation queue item."""
     state = cast(MCPState, ctx.request_context.lifespan_context)
     try:
-        try:
-            from langfuse.api.resources.annotation_queues.types.update_annotation_queue_item_request import (
-                UpdateAnnotationQueueItemRequest,
-            )
-
-            request: Any = UpdateAnnotationQueueItemRequest(status=status)  # type: ignore[arg-type]  # SDK accepts str via validator
-        except (ImportError, ModuleNotFoundError):
-            request = {"status": status}
-
-        item = state.langfuse_client.api.annotation_queues.update_queue_item(queue_id=queue_id, item_id=item_id, request=request)
+        method = state.langfuse_client.api.annotation_queues.update_queue_item
+        item = _compat.call_with_request_or_kwargs(
+            method,
+            lambda: _build_update_annotation_queue_item_request(status=status),
+            path_kwargs={"queue_id": queue_id, "item_id": item_id},
+            status=status,
+        )
         result = _sdk_object_to_python(item)
         logger.info(f"Updated annotation queue item '{item_id}' in queue '{queue_id}'")
         return {"data": result, "metadata": {"updated": True, "queue_id": queue_id, "item_id": item_id}}
@@ -3609,6 +3595,42 @@ async def delete_annotation_queue_item(
         raise
 
 
+def _build_create_annotation_queue_request(*, name: str, description: str | None, score_config_ids: list[str] | None) -> Any:
+    """Construct the v3 ``CreateAnnotationQueueRequest`` body for queue create writes."""
+    return _compat.resolve_request_model(
+        "annotation_queues",
+        "create_annotation_queue_request",
+        "CreateAnnotationQueueRequest",
+    )(name=name, description=description, score_config_ids=score_config_ids)
+
+
+def _build_create_annotation_queue_item_request(**kwargs: Any) -> Any:
+    """Construct the v3 ``CreateAnnotationQueueItemRequest`` body for queue-item create writes."""
+    return _compat.resolve_request_model(
+        "annotation_queues",
+        "create_annotation_queue_item_request",
+        "CreateAnnotationQueueItemRequest",
+    )(**kwargs)
+
+
+def _build_update_annotation_queue_item_request(*, status: str) -> Any:
+    """Construct the v3 ``UpdateAnnotationQueueItemRequest`` body for queue-item update writes."""
+    return _compat.resolve_request_model(
+        "annotation_queues",
+        "update_annotation_queue_item_request",
+        "UpdateAnnotationQueueItemRequest",
+    )(status=status)
+
+
+def _build_annotation_queue_assignment_request(user_id: str) -> Any:
+    """Construct the v3 ``AnnotationQueueAssignmentRequest`` body for assignment writes."""
+    return _compat.resolve_request_model(
+        "annotation_queues",
+        "annotation_queue_assignment_request",
+        "AnnotationQueueAssignmentRequest",
+    )(user_id=user_id)
+
+
 async def create_annotation_queue_assignment(
     ctx: Context,
     queue_id: str = Field(..., description="Annotation queue ID"),
@@ -3617,16 +3639,13 @@ async def create_annotation_queue_assignment(
     """Assign a user to an annotation queue."""
     state = cast(MCPState, ctx.request_context.lifespan_context)
     try:
-        try:
-            from langfuse.api.resources.annotation_queues.types.annotation_queue_assignment_request import (
-                AnnotationQueueAssignmentRequest,
-            )
-
-            request: Any = AnnotationQueueAssignmentRequest(user_id=user_id)  # type: ignore[call-arg]  # SDK uses camelCase aliases
-        except (ImportError, ModuleNotFoundError):
-            request = {"user_id": user_id}
-
-        response = state.langfuse_client.api.annotation_queues.create_queue_assignment(queue_id=queue_id, request=request)
+        method = state.langfuse_client.api.annotation_queues.create_queue_assignment
+        response = _compat.call_with_request_or_kwargs(
+            method,
+            lambda: _build_annotation_queue_assignment_request(user_id),
+            path_kwargs={"queue_id": queue_id},
+            user_id=user_id,
+        )
         result = _sdk_object_to_python(response) if response else {}
         logger.info(f"Assigned user '{user_id}' to annotation queue '{queue_id}'")
         return {"data": result, "metadata": {"created": True, "queue_id": queue_id, "user_id": user_id}}
@@ -3643,16 +3662,13 @@ async def delete_annotation_queue_assignment(
     """Unassign a user from an annotation queue."""
     state = cast(MCPState, ctx.request_context.lifespan_context)
     try:
-        try:
-            from langfuse.api.resources.annotation_queues.types.annotation_queue_assignment_request import (
-                AnnotationQueueAssignmentRequest,
-            )
-
-            request: Any = AnnotationQueueAssignmentRequest(user_id=user_id)  # type: ignore[call-arg]  # SDK uses camelCase aliases
-        except (ImportError, ModuleNotFoundError):
-            request = {"user_id": user_id}
-
-        response = state.langfuse_client.api.annotation_queues.delete_queue_assignment(queue_id=queue_id, request=request)
+        method = state.langfuse_client.api.annotation_queues.delete_queue_assignment
+        response = _compat.call_with_request_or_kwargs(
+            method,
+            lambda: _build_annotation_queue_assignment_request(user_id),
+            path_kwargs={"queue_id": queue_id},
+            user_id=user_id,
+        )
         result = _sdk_object_to_python(response) if response else {}
         logger.info(f"Removed user '{user_id}' assignment from annotation queue '{queue_id}'")
         return {"data": result, "metadata": {"deleted": True, "queue_id": queue_id, "user_id": user_id}}
@@ -3730,13 +3746,25 @@ async def list_scores_v2(
         }
         api_kwargs = {k: v for k, v in api_kwargs.items() if v is not None}
 
-        response = state.langfuse_client.api.score_v_2.get(**api_kwargs)
+        scores_namespace = _compat.get_score_namespace(state.langfuse_client)
+        if scores_namespace is None:
+            raise RuntimeError("Unsupported Langfuse client: no scores namespace exposed")
+        list_method = _compat.get_score_list_method(scores_namespace)
+        if list_method is None:
+            raise RuntimeError("Unsupported Langfuse client: scores namespace exposes no list method")
+
+        response = list_method(**api_kwargs)
         items, pagination = _extract_items_from_response(response)
         scores = [_sdk_object_to_python(item) for item in items]
         logger.info(f"Listed {len(scores)} scores (page={page}, limit={limit})")
         return {
             "data": scores,
-            "metadata": {"page": page, "limit": limit, "item_count": len(scores), "total": pagination.get("total")},
+            "metadata": {
+                "page": page,
+                "limit": limit,
+                "item_count": len(scores),
+                "total": pagination.get("total", pagination.get("total_items")),
+            },
         }
     except Exception as e:
         logger.error(f"Error listing scores v2: {e}")
@@ -3747,10 +3775,13 @@ async def get_score_v2(
     ctx: Context,
     score_id: str = Field(..., description="Score ID"),
 ) -> ResponseDict:
-    """Get a score by ID from the score v2 API."""
+    """Get a score by ID from the scores API (v3 ``score_v_2`` or v4 ``scores``)."""
     state = cast(MCPState, ctx.request_context.lifespan_context)
     try:
-        score = state.langfuse_client.api.score_v_2.get_by_id(score_id=score_id)
+        scores_namespace = _compat.get_score_namespace(state.langfuse_client)
+        if scores_namespace is None or not hasattr(scores_namespace, "get_by_id"):
+            raise RuntimeError("Unsupported Langfuse client: no get_by_id method on scores namespace")
+        score = scores_namespace.get_by_id(score_id=score_id)
         result = _sdk_object_to_python(score)
         if not result:
             raise LookupError(f"Score '{score_id}' not found")

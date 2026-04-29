@@ -7,15 +7,46 @@ import json
 
 import pytest
 
-from tests.fakes import FakeContext, FakeLangfuse
+from tests.fakes import FakeContext, FakeLangfuse, FakeLangfuseV4
 
 
 @pytest.fixture()
 def state(tmp_path):
-    """Return an MCPState instance using the fake client."""
+    """Return an MCPState instance using the v3-shaped fake client."""
     from langfuse_mcp.__main__ import MCPState
 
     return MCPState(langfuse_client=FakeLangfuse(), dump_dir=str(tmp_path))
+
+
+@pytest.fixture(params=["v3", "v4"], ids=["v3", "v4"])
+def observation_state(request, tmp_path):
+    """Return an MCPState parametrized across the v3 and v4 fake client shapes.
+
+    Tests using this fixture run twice — once against ``FakeLangfuse`` (v3 surface
+    with ``api.observations.{get,get_many}``) and once against ``FakeLangfuseV4``
+    (v4 surface with cursor-only ``api.observations.get_many`` and
+    ``api.legacy.observations_v1`` page-based fallbacks).
+    """
+    from langfuse_mcp.__main__ import MCPState
+
+    client = FakeLangfuse() if request.param == "v3" else FakeLangfuseV4()
+    return MCPState(langfuse_client=client, dump_dir=str(tmp_path))
+
+
+def _observation_list_fake(client):
+    """Return whichever fake namespace recorded the last list call (v3 vs v4 legacy)."""
+    legacy = getattr(getattr(client.api, "legacy", None), "observations_v1", None)
+    if legacy is not None and legacy.last_get_many_kwargs is not None:
+        return legacy
+    return client.api.observations
+
+
+def _observation_get_fake(client):
+    """Return whichever fake namespace recorded the last single-fetch call (v3 vs v4 legacy)."""
+    legacy = getattr(getattr(client.api, "legacy", None), "observations_v1", None)
+    if legacy is not None and legacy.last_get_kwargs is not None:
+        return legacy
+    return client.api.observations
 
 
 def test_fetch_traces_with_observations(state):
@@ -59,11 +90,11 @@ def test_fetch_trace(state):
     assert state.langfuse_client.api.trace.last_get_kwargs == {"trace_id": "trace_1"}
 
 
-def test_fetch_observations(state):
-    """fetch_observations should call the v3 observations resource."""
+def test_fetch_observations(observation_state):
+    """fetch_observations should drive the active page-based observations endpoint."""
     from langfuse_mcp.__main__ import fetch_observations
 
-    ctx = FakeContext(state)
+    ctx = FakeContext(observation_state)
     result = asyncio.run(
         fetch_observations(
             ctx,
@@ -80,19 +111,51 @@ def test_fetch_observations(state):
     )
     assert result["metadata"]["item_count"] == 1
     assert result["data"][0]["id"] == "obs_1"
-    assert state.langfuse_client.api.observations.last_get_many_kwargs is not None
-    obs_kwargs = state.langfuse_client.api.observations.last_get_many_kwargs
-    assert obs_kwargs["limit"] == 50
+
+    namespace = _observation_list_fake(observation_state.langfuse_client)
+    assert namespace.last_get_many_kwargs is not None
+    assert namespace.last_get_many_kwargs["limit"] == 50
 
 
-def test_fetch_observation(state):
-    """fetch_observation should hit the observations resource."""
+def test_fetch_observation(observation_state):
+    """fetch_observation should resolve via the v3 namespace or the v4 legacy_v1 fallback."""
     from langfuse_mcp.__main__ import fetch_observation
 
-    ctx = FakeContext(state)
+    ctx = FakeContext(observation_state)
     result = asyncio.run(fetch_observation(ctx, observation_id="obs_1", output_mode="compact"))
     assert result["data"]["id"] == "obs_1"
-    assert state.langfuse_client.api.observations.last_get_kwargs == {"observation_id": "obs_1"}
+
+    namespace = _observation_get_fake(observation_state.langfuse_client)
+    last = namespace.last_get_kwargs
+    assert last is not None
+    assert last["observation_id"] == "obs_1"
+
+
+def test_list_observations_cursor_only_rejects_page_gt_one(tmp_path):
+    """A v4 client without the page-based legacy fallback must raise on page>1."""
+    from types import SimpleNamespace
+
+    from langfuse_mcp.__main__ import _list_observations
+
+    def cursor_only_get_many(*, cursor=None, limit=None, **_: object):
+        return SimpleNamespace(data=[], meta=SimpleNamespace(cursor=None))
+
+    cursor_client = SimpleNamespace(api=SimpleNamespace(observations=SimpleNamespace(get_many=cursor_only_get_many)))
+
+    with pytest.raises(RuntimeError, match="legacy.observations_v1"):
+        _list_observations(
+            cursor_client,
+            limit=10,
+            page=2,
+            from_start_time=None,
+            to_start_time=None,
+            obs_type=None,
+            name=None,
+            user_id=None,
+            trace_id=None,
+            parent_observation_id=None,
+            metadata=None,
+        )
 
 
 def test_fetch_sessions(state):

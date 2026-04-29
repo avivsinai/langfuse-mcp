@@ -143,20 +143,17 @@ class FakeChatPrompt(FakePromptBase):
 
 @dataclass
 class FakePaginatedResponse:
-    """Minimal paginated response with data/meta attributes."""
+    """Minimal paginated response mirroring the real SDK shape (``data`` + ``meta``).
+
+    Real Langfuse SDK responses (``Traces``, ``PaginatedSessions``, ``ObservationsV2Response``,
+    etc.) carry only ``data`` and ``meta`` — no ``items`` or ``total`` attribute aliases. The
+    fake intentionally omits those aliases so the response-extraction logic in
+    ``_extract_items_from_response`` exercises the same ``.data + .meta`` code path as
+    against a real client.
+    """
 
     data: list[Any]
     meta: dict[str, Any]
-
-    @property
-    def items(self) -> list[Any]:
-        """Alias for data to match SDK response format."""
-        return self.data
-
-    @property
-    def total(self) -> int | None:
-        """Extract total from meta to match SDK response format."""
-        return self.meta.get("total")
 
 
 class _TraceAPI:
@@ -198,20 +195,28 @@ class _TraceAPI:
 
 
 class _ObservationsAPI:
-    """Fake implementation of observations resource client."""
+    """Fake implementation of the v3 observations resource client (page-based ``get_many``)."""
 
     def __init__(self, store: FakeDataStore) -> None:
         self._store = store
         self.last_get_many_kwargs: dict[str, Any] | None = None
         self.last_get_kwargs: dict[str, Any] | None = None
 
-    def get_many(self, **kwargs: Any) -> FakePaginatedResponse:
-        self.last_get_many_kwargs = kwargs
+    def get_many(
+        self,
+        *,
+        page: int | None = None,
+        limit: int | None = None,
+        **kwargs: Any,
+    ) -> FakePaginatedResponse:
+        """Return observations using v3 page-based pagination."""
+        self.last_get_many_kwargs = {"page": page, "limit": limit, **kwargs}
         observations = list(self._store.observations.values())
         data = [obs.__dict__ for obs in observations]
         return FakePaginatedResponse(data=data, meta={"next_page": None, "total": len(data)})
 
     def get(self, observation_id: str, **kwargs: Any) -> dict[str, Any]:
+        """Return a single observation by id (v3 positional-or-keyword signature)."""
         self.last_get_kwargs = {"observation_id": observation_id, **kwargs}
         obs = self._store.observations.get(observation_id)
         return obs.__dict__ if obs else {}
@@ -556,6 +561,169 @@ class _ScoreV2API:
         return self._store.scores.get(score_id)
 
 
+class _AnnotationQueuesV4API:
+    """Fake v4 annotation_queues namespace: write methods take direct kwargs (no ``request=``)."""
+
+    def __init__(self, store: FakeDataStore) -> None:
+        """Bind the v4 annotation_queues namespace to the shared store."""
+        self._store = store
+        self.last_list_queues_kwargs: dict[str, Any] | None = None
+        self.last_create_queue_kwargs: dict[str, Any] | None = None
+        self.last_get_queue_kwargs: dict[str, Any] | None = None
+        self.last_list_items_kwargs: dict[str, Any] | None = None
+        self.last_get_item_kwargs: dict[str, Any] | None = None
+        self.last_create_item_kwargs: dict[str, Any] | None = None
+        self.last_update_item_kwargs: dict[str, Any] | None = None
+        self.last_create_assignment_kwargs: dict[str, Any] | None = None
+        self.last_delete_assignment_kwargs: dict[str, Any] | None = None
+
+    def list_queues(self, **kwargs: Any) -> FakePaginatedResponse:
+        """List annotation queues (unchanged across v3 and v4)."""
+        self.last_list_queues_kwargs = kwargs
+        queues = [q.__dict__ for q in self._store.annotation_queues.values()]
+        return FakePaginatedResponse(data=queues, meta={"next_page": None, "total": len(queues)})
+
+    def create_queue(
+        self,
+        *,
+        name: str,
+        score_config_ids: list[str],
+        description: str | None = None,
+    ) -> FakeAnnotationQueue:
+        """Create a queue using v4 direct-kwargs signature (no ``**kwargs`` — strict v4 contract).
+
+        Real v4 ``api.annotation_queues.create_queue`` rejects unexpected fields. The
+        fake omits ``**kwargs`` so production code that drifts back to the v3
+        ``request=`` shape (or sneaks in extra fields) raises a TypeError instead
+        of silently passing.
+        """
+        self.last_create_queue_kwargs = {"name": name, "score_config_ids": score_config_ids, "description": description}
+        now = datetime.now(timezone.utc)
+        queue = FakeAnnotationQueue(
+            id=f"queue_{len(self._store.annotation_queues) + 1}",
+            name=name,
+            description=description,
+            score_config_ids=list(score_config_ids),
+            created_at=now,
+        )
+        self._store.annotation_queues[queue.id] = queue
+        return queue
+
+    def get_queue(self, queue_id: str) -> Any:
+        """Return a queue by id."""
+        self.last_get_queue_kwargs = {"queue_id": queue_id}
+        return self._store.annotation_queues.get(queue_id)
+
+    def list_queue_items(
+        self,
+        queue_id: str,
+        *,
+        page: int | None = None,
+        limit: int | None = None,
+    ) -> FakePaginatedResponse:
+        """List items belonging to a queue."""
+        self.last_list_items_kwargs = {"queue_id": queue_id, "page": page, "limit": limit}
+        items = [item.__dict__ for item in self._store.annotation_queue_items.values() if item.queue_id == queue_id]
+        return FakePaginatedResponse(data=items, meta={"next_page": None, "total": len(items)})
+
+    def get_queue_item(self, queue_id: str, item_id: str) -> Any:
+        """Return a single queue item by ids."""
+        self.last_get_item_kwargs = {"queue_id": queue_id, "item_id": item_id}
+        item = self._store.annotation_queue_items.get(item_id)
+        return item if item and item.queue_id == queue_id else None
+
+    def create_queue_item(
+        self,
+        queue_id: str,
+        *,
+        object_id: str,
+        object_type: Any,
+        status: Any | None = None,
+    ) -> FakeAnnotationQueueItem:
+        """Create a queue item using v4 direct-kwargs signature (strict, no ``**kwargs``)."""
+        self.last_create_item_kwargs = {
+            "queue_id": queue_id,
+            "object_id": object_id,
+            "object_type": object_type,
+            "status": status,
+        }
+        now = datetime.now(timezone.utc)
+        item = FakeAnnotationQueueItem(
+            id=f"queue_item_{len(self._store.annotation_queue_items) + 1}",
+            queue_id=queue_id,
+            object_id=object_id,
+            object_type=object_type,
+            status=(status.value if hasattr(status, "value") else status) or "PENDING",
+            created_at=now,
+        )
+        self._store.annotation_queue_items[item.id] = item
+        return item
+
+    def update_queue_item(
+        self,
+        queue_id: str,
+        item_id: str,
+        *,
+        status: Any | None = None,
+    ) -> Any:
+        """Update a queue item's status using v4 direct-kwargs signature (strict)."""
+        self.last_update_item_kwargs = {"queue_id": queue_id, "item_id": item_id, "status": status}
+        item = self._store.annotation_queue_items.get(item_id)
+        if item and item.queue_id == queue_id:
+            item.status = status.value if hasattr(status, "value") else status
+            return item
+        return None
+
+    def delete_queue_item(self, queue_id: str, item_id: str) -> dict[str, Any]:
+        """Delete a queue item by id."""
+        item = self._store.annotation_queue_items.get(item_id)
+        if item and item.queue_id == queue_id:
+            del self._store.annotation_queue_items[item_id]
+        return {"success": True}
+
+    def create_queue_assignment(self, queue_id: str, *, user_id: str) -> dict[str, Any]:
+        """Create a queue assignment using v4 direct-kwargs signature (strict)."""
+        self.last_create_assignment_kwargs = {"queue_id": queue_id, "user_id": user_id}
+        self._store.queue_assignments.setdefault(queue_id, set()).add(user_id)
+        return {"success": True, "queue_id": queue_id, "user_id": user_id}
+
+    def delete_queue_assignment(self, queue_id: str, *, user_id: str) -> dict[str, Any]:
+        """Delete a queue assignment using v4 direct-kwargs signature (strict)."""
+        self.last_delete_assignment_kwargs = {"queue_id": queue_id, "user_id": user_id}
+        self._store.queue_assignments.setdefault(queue_id, set()).discard(user_id)
+        return {"success": True, "queue_id": queue_id, "user_id": user_id}
+
+
+class _ScoresV4API:
+    """Fake v4 scores namespace: ``get_many`` replaces v3's ``get``."""
+
+    def __init__(self, store: FakeDataStore) -> None:
+        """Bind the v4 scores namespace to the shared store."""
+        self._store = store
+        self.last_get_many_kwargs: dict[str, Any] | None = None
+        self.last_get_by_id_kwargs: dict[str, Any] | None = None
+
+    def get_many(self, **kwargs: Any) -> FakePaginatedResponse:
+        """List scores using v4 ``scores.get_many`` semantics (page-based)."""
+        self.last_get_many_kwargs = kwargs
+        scores = [s.__dict__ for s in self._store.scores.values()]
+        user_id = kwargs.get("user_id")
+        if user_id:
+            scores = [s for s in scores if s.get("user_id") == user_id]
+        queue_id = kwargs.get("queue_id")
+        if queue_id:
+            scores = [s for s in scores if s.get("queue_id") == queue_id]
+        trace_id = kwargs.get("trace_id")
+        if trace_id:
+            scores = [s for s in scores if s.get("trace_id") == trace_id]
+        return FakePaginatedResponse(data=scores, meta={"next_page": None, "total": len(scores)})
+
+    def get_by_id(self, *, score_id: str, **kwargs: Any) -> Any:
+        """Return a score by id (v4 keyword-only signature)."""
+        self.last_get_by_id_kwargs = {"score_id": score_id, **kwargs}
+        return self._store.scores.get(score_id)
+
+
 class FakeAPI:
     """Aggregate object exposed via FakeLangfuse.api."""
 
@@ -569,6 +737,92 @@ class FakeAPI:
         self.dataset_items = _DatasetItemsAPI(store)
         self.annotation_queues = _AnnotationQueuesAPI(store)
         self.score_v_2 = _ScoreV2API(store)
+
+
+class _ObservationsV4API:
+    """Fake v4 observations namespace: ``get_many`` is cursor-only and ``get`` is absent."""
+
+    def __init__(self, store: FakeDataStore) -> None:
+        """Bind the fake v4 observations namespace to the shared store."""
+        self._store = store
+        self.last_get_many_kwargs: dict[str, Any] | None = None
+
+    def get_many(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int | None = None,
+        **kwargs: Any,
+    ) -> FakePaginatedResponse:
+        """Return observations using cursor-based pagination (v4 ObservationsV2)."""
+        self.last_get_many_kwargs = {"cursor": cursor, "limit": limit, **kwargs}
+        observations = list(self._store.observations.values())
+        data = [obs.__dict__ for obs in observations]
+        # v4 ObservationsV2Meta carries only ``cursor``; ``None`` means no further pages.
+        return FakePaginatedResponse(data=data, meta={"cursor": None})
+
+
+class _LegacyObservationsV1API:
+    """Fake v4 ``api.legacy.observations_v1`` namespace exposing the page-based v1 surface."""
+
+    def __init__(self, store: FakeDataStore) -> None:
+        """Bind the legacy v1 observations namespace to the shared store."""
+        self._store = store
+        self.last_get_kwargs: dict[str, Any] | None = None
+        self.last_get_many_kwargs: dict[str, Any] | None = None
+
+    def get(self, observation_id: str, **kwargs: Any) -> dict[str, Any]:
+        """Return a single observation by id (positional, matching v4 legacy signature)."""
+        self.last_get_kwargs = {"observation_id": observation_id, **kwargs}
+        obs = self._store.observations.get(observation_id)
+        return obs.__dict__ if obs else {}
+
+    def get_many(
+        self,
+        *,
+        page: int | None = None,
+        limit: int | None = None,
+        **kwargs: Any,
+    ) -> FakePaginatedResponse:
+        """Return observations using page-based pagination via the legacy v1 endpoint."""
+        self.last_get_many_kwargs = {"page": page, "limit": limit, **kwargs}
+        observations = list(self._store.observations.values())
+        data = [obs.__dict__ for obs in observations]
+        return FakePaginatedResponse(data=data, meta={"next_page": None, "total": len(data)})
+
+
+class _LegacyAPI:
+    """Fake v4 ``api.legacy`` namespace housing the v1 fallbacks."""
+
+    def __init__(self, store: FakeDataStore) -> None:
+        """Wire the legacy v1 namespaces to the shared store."""
+        self.observations_v1 = _LegacyObservationsV1API(store)
+
+
+class FakeAPIV4:
+    """Aggregate object exposed via FakeLangfuseV4.api — v4 surface only.
+
+    Differences vs. v3 (``FakeAPI``):
+    - No ``score_v_2``; scores resource is renamed to ``scores`` with ``get_many``.
+    - ``observations.get`` is absent; ``observations.get_many`` is cursor-only.
+    - ``api.legacy.observations_v1`` exposes the page-based v1 fallback.
+    - Annotation queue write methods take direct kwargs (no ``request=``).
+    - ``api.datasets`` / ``api.dataset_items`` are intentionally not wired —
+      production code only calls them through the top-level
+      ``Langfuse.create_dataset`` / ``create_dataset_item`` shortcuts that v3
+      and v4 both expose, so the api-level surface here would be unused.
+    """
+
+    def __init__(self, store: FakeDataStore) -> None:
+        """Wire the v4-shaped API resources to the shared store."""
+        self.trace = _TraceAPI(store)
+        self.observations = _ObservationsV4API(store)
+        self.sessions = _SessionsAPI(store)
+        self.prompts = _PromptsAPI(store)
+        self.scores = _ScoresV4API(store)
+        self.annotation_queues = _AnnotationQueuesV4API(store)
+        # datasets/dataset_items are filled in by S4.
+        self.legacy = _LegacyAPI(store)
 
 
 class FakeDataStore:
@@ -819,6 +1073,34 @@ class FakeLangfuse:
     def shutdown(self) -> None:  # pragma: no cover - compatibility shim
         """Provide the Langfuse SDK shutdown hook by delegating to close()."""
         self.close()
+
+
+class FakeLangfuseV4:
+    """Langfuse client double exposing the v4 API surface.
+
+    Compared to ``FakeLangfuse`` (v3 shape):
+    - ``api`` is a ``FakeAPIV4`` (no ``score_v_2``, cursor-only observations,
+      legacy fallbacks under ``api.legacy``, kwargs-style annotation queue writes).
+    - The top-level ``fetch_observation`` shim is intentionally absent (v4 removed it).
+    - The top-level ``create_dataset`` / ``create_dataset_item`` shortcuts are also
+      absent here so dataset tests stay scoped to ``FakeLangfuse``; both real v3 and
+      v4 expose them, but exercising the v4 dataset path through this fake would just
+      re-test the unchanged shortcut shim.
+    """
+
+    def __init__(self) -> None:
+        """Initialise the fake v4 client with in-memory storage and v4 API facade."""
+        self._store = FakeDataStore()
+        self.api = FakeAPIV4(self._store)
+        self.closed = False
+
+    def flush(self) -> None:  # pragma: no cover - compatibility shim
+        """Match the v4 ``Langfuse.flush`` no-op contract."""
+        return None
+
+    def shutdown(self) -> None:  # pragma: no cover - compatibility shim
+        """Match the v4 ``Langfuse.shutdown`` contract by marking the client closed."""
+        self.closed = True
 
 
 class FakeContext:
