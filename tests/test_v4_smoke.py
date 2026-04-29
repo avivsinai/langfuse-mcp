@@ -16,9 +16,12 @@ the suite already covers. With v3 installed (or v4 missing entirely) the
 Run against a v4 venv::
 
     uv venv --python 3.11 .venv-v4
-    .venv-v4/bin/uv pip install -e ".[dev]" "langfuse>=4.0.0,<5.0.0"
+    uv pip install --python .venv-v4/bin/python -e ".[dev]" "langfuse>=4.0.0,<5.0.0"
     LANGFUSE_PUBLIC_KEY=... LANGFUSE_SECRET_KEY=... \
         .venv-v4/bin/python -m pytest tests/test_v4_smoke.py -m integration -v -s
+
+(``uv venv`` doesn't install ``uv`` itself into the new venv, so we point
+the host ``uv`` at the venv's interpreter via ``--python``.)
 
 The ``-s`` flag is recommended so the introspection test prints which
 dispatcher path was selected — useful when verifying a new SDK release.
@@ -39,10 +42,11 @@ from typing import Any
 import pytest
 
 # Bypass the autouse ``patch_dependencies`` fixture in conftest.py — it stubs
-# out ``langfuse``, ``mcp.server.fastmcp``, and ``pydantic`` with hand-rolled
-# fakes that prevent the real SDK from being imported. The fixture runs at
-# module import time, so we have to clear the stubbed modules and import the
-# real ones before anything else can touch ``langfuse``.
+# out ``langfuse``, ``mcp.server.fastmcp``, ``pydantic``, and ``cachetools`` with
+# hand-rolled fakes that prevent the real SDK from being imported. The
+# ``_restore_real_langfuse`` fixture below clears those stubs from
+# ``sys.modules`` before each test body so real Langfuse imports against the
+# real installed wheels.
 _REAL_PUBLIC_KEY = os.environ.get("LANGFUSE_PUBLIC_KEY")
 _REAL_SECRET_KEY = os.environ.get("LANGFUSE_SECRET_KEY")
 _REAL_HOST = os.environ.get("LANGFUSE_HOST", "https://cloud.langfuse.com")
