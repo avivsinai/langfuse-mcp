@@ -24,12 +24,6 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
-if sys.version_info >= (3, 14):
-    raise SystemExit(
-        "langfuse-mcp currently requires Python 3.13 or earlier. "
-        "Please rerun with `uvx --python 3.11 langfuse-mcp` or pin a supported interpreter."
-    )
-
 from cachetools import LRUCache
 from langfuse import Langfuse
 from mcp.server.fastmcp import Context, FastMCP

@@ -44,9 +44,9 @@ Never commit credentials to version control.
 
 ### Python Version Errors
 
-If MCP fails to connect, check your Python version. The Langfuse SDK requires Python 3.13 or earlier (due to Pydantic v1 dependency).
+If MCP fails to connect, check your Python version. Langfuse MCP requires Python 3.10 or newer and CI currently verifies Python 3.10 through 3.14.
 
-Fix by pinning Python in the uvx command:
+If your default interpreter is older than Python 3.10, pin a supported Python in the uvx command:
 ```bash
 uvx --python 3.11 langfuse-mcp
 ```
