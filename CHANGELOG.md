@@ -7,8 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-05-06
 ### Changed
 - Re-enabled Python 3.14 support now that the supported Langfuse SDK range includes v4, which uses Pydantic v2; CI now covers Python 3.10 through 3.14.
+
 
 ## [0.9.0] - 2026-04-29
 ### Changed
