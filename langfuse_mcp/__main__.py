@@ -3874,6 +3874,8 @@ def app_factory(
         timeout: API request timeout in seconds (default: 30). The Langfuse SDK defaults to 5s which is too aggressive.
         read_only: If True, disable all write operations (create/update/delete tools).
         default_output_mode: Default output_mode exposed in MCP tool schemas.
+        bind_host: Bind address for HTTP transport (default: 0.0.0.0).
+        port: Port for HTTP transport (default: 8000).
     """
     if enabled_tools is None:
         enabled_tools = ALL_TOOL_GROUPS
