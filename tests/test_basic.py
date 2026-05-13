@@ -61,8 +61,8 @@ def test_max_age_days_env_override(monkeypatch):
         importlib.reload(main_module)
 
 
-def test_cli_requires_keys_without_env(monkeypatch):
-    """Missing env and args should keep credentials required."""
+def test_cli_accepts_no_keys_without_env(monkeypatch):
+    """Keys are optional — credentials can be supplied per-request via HTTP headers."""
     monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
     monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
     monkeypatch.delenv("LANGFUSE_LOG_LEVEL", raising=False)
@@ -72,8 +72,9 @@ def test_cli_requires_keys_without_env(monkeypatch):
     from langfuse_mcp.__main__ import _build_arg_parser, _read_env_defaults
 
     parser = _build_arg_parser(_read_env_defaults())
-    with pytest.raises(SystemExit):
-        parser.parse_args([])
+    args = parser.parse_args([])
+    assert args.public_key is None
+    assert args.secret_key is None
 
 
 def test_package_importable():
