@@ -104,12 +104,13 @@ why was this user's session slow?
 
 The MCP server provides the tools; the skill provides the agent-facing workflow. See [`skills/langfuse/SKILL.md`](skills/langfuse/SKILL.md), [`skills/langfuse/references/setup.md`](skills/langfuse/references/setup.md), and [`skills/langfuse/references/tool-reference.md`](skills/langfuse/references/tool-reference.md).
 
-## Tools (37 total)
+## Tools (41 total)
 
 | Category | Tools |
 |----------|-------|
 | Traces | `fetch_traces`, `fetch_trace` |
 | Observations | `fetch_observations`, `fetch_observation` |
+| Routing | `find_route_decisions`, `get_route_decision`, `summarize_route_decisions`, `find_low_confidence_route_decisions` |
 | Sessions | `fetch_sessions`, `get_session_details`, `get_user_sessions` |
 | Exceptions | `find_exceptions`, `find_exceptions_in_file`, `get_exception_details`, `get_error_count` |
 | Prompts | `list_prompts`, `get_prompt`, `get_prompt_unresolved`, `create_text_prompt`, `create_chat_prompt`, `update_prompt_labels` |
@@ -139,7 +140,12 @@ Load only the tool groups you need to reduce token overhead:
 langfuse-mcp --tools traces,prompts
 ```
 
-Available groups: `traces`, `observations`, `sessions`, `exceptions`, `prompts`, `datasets`, `annotation_queues`, `scores`, `schema`
+Available groups: `traces`, `observations`, `routing`, `sessions`, `exceptions`, `prompts`, `datasets`, `annotation_queues`, `scores`, `schema`
+
+The `routing` group is router-neutral. It reads Langfuse span observations with
+`metadata.schema_version: "mcp.route_decision.v1"` and filters on route-decision
+fields stored in observation metadata, such as `decision_id`, `router_name`,
+`provider`, and `capability_id`.
 
 ## Read-Only Mode
 

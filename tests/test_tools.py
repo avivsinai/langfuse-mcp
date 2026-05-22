@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 
 import pytest
 
-from tests.fakes import FakeContext, FakeLangfuse, FakeLangfuseV4
+from tests.fakes import FakeContext, FakeLangfuse, FakeLangfuseV4, FakeObservation
 
 
 @pytest.fixture()
@@ -47,6 +48,59 @@ def _observation_get_fake(client):
     if legacy is not None and legacy.last_get_kwargs is not None:
         return legacy
     return client.api.observations
+
+
+def _seed_route_decision_observations(client):
+    """Add router-neutral route-decision observations to a fake Langfuse client."""
+    now = datetime(2026, 5, 19, 11, 6, 34, tzinfo=timezone.utc)
+    client._store.observations["route_ok"] = FakeObservation(
+        id="route_ok",
+        trace_id="trace_route",
+        type="SPAN",
+        name="mcp.route_decision",
+        status="SUCCEEDED",
+        start_time=now,
+        end_time=now,
+        metadata={
+            "schema_version": "mcp.route_decision.v1",
+            "decision_id": "dec_ok",
+            "session_id": "session_route",
+            "router_name": "wisepick",
+            "provider": "canva",
+            "execution_type": "api",
+            "capability_id": "canva_capability",
+            "callable": True,
+            "confidence": 0.91,
+            "latency_ms": 120,
+            "candidate_count": 2,
+            "reason_codes": ["capability_match"],
+            "top_candidates": [{"rank": 1, "capability_id": "canva_capability", "score": 0.91}],
+        },
+    )
+    client._store.observations["route_low"] = FakeObservation(
+        id="route_low",
+        trace_id="trace_route",
+        type="SPAN",
+        name="mcp.route_decision",
+        status="SUCCEEDED",
+        start_time=now,
+        end_time=now,
+        metadata={
+            "schema_version": "mcp.route_decision.v1",
+            "decision_id": "dec_low",
+            "session_id": "session_route",
+            "router_name": "wisepick",
+            "provider": None,
+            "execution_type": None,
+            "capability_id": None,
+            "callable": False,
+            "confidence": 0.08,
+            "latency_ms": 7535,
+            "candidate_count": 5,
+            "reason_codes": ["below_threshold"],
+            "top_candidates": [{"rank": 1, "capability_id": "canva_capability", "score": 0.08, "pruned": True}],
+        },
+    )
 
 
 def test_fetch_traces_with_observations(state):
@@ -129,6 +183,166 @@ def test_fetch_observation(observation_state):
     last = namespace.last_get_kwargs
     assert last is not None
     assert last["observation_id"] == "obs_1"
+
+
+def test_find_route_decisions_filters_on_metadata_contract(observation_state):
+    """find_route_decisions should depend on route-decision metadata, not output payload shape."""
+    from langfuse_mcp.__main__ import find_route_decisions
+
+    _seed_route_decision_observations(observation_state.langfuse_client)
+    ctx = FakeContext(observation_state)
+    result = asyncio.run(
+        find_route_decisions(
+            ctx,
+            age=10,
+            trace_id=None,
+            session_id="session_route",
+            decision_id=None,
+            router_name="wisepick",
+            provider="canva",
+            capability_id=None,
+            page=1,
+            limit=50,
+            output_mode="compact",
+        )
+    )
+
+    assert result["metadata"]["item_count"] == 1
+    assert result["metadata"]["metadata_filter"] == {
+        "schema_version": "mcp.route_decision.v1",
+        "session_id": "session_route",
+        "router_name": "wisepick",
+        "provider": "canva",
+    }
+    assert result["data"][0]["decision_id"] == "dec_ok"
+    assert result["data"][0]["provider"] == "canva"
+
+    namespace = _observation_list_fake(observation_state.langfuse_client)
+    assert namespace.last_get_many_kwargs is not None
+    assert namespace.last_get_many_kwargs["type"] == "SPAN"
+
+
+def test_get_route_decision_returns_metadata_decision(observation_state):
+    """get_route_decision should return a single route decision by metadata decision_id."""
+    from langfuse_mcp.__main__ import get_route_decision
+
+    _seed_route_decision_observations(observation_state.langfuse_client)
+    ctx = FakeContext(observation_state)
+    result = asyncio.run(get_route_decision(ctx, decision_id="dec_ok", age=10, output_mode="compact"))
+
+    assert result["metadata"]["found"] is True
+    assert result["data"]["decision_id"] == "dec_ok"
+    assert result["data"]["capability_id"] == "canva_capability"
+
+
+def test_find_route_decisions_excludes_non_route_metadata(observation_state):
+    """Only observations declaring mcp.route_decision.v1 in metadata should be returned."""
+    from langfuse_mcp.__main__ import find_route_decisions
+
+    now = datetime(2026, 5, 19, 11, 6, 34, tzinfo=timezone.utc)
+    observation_state.langfuse_client._store.observations["wrong_schema"] = FakeObservation(
+        id="wrong_schema",
+        trace_id="trace_route",
+        type="SPAN",
+        name="mcp.route_decision",
+        status="SUCCEEDED",
+        start_time=now,
+        end_time=now,
+        metadata={
+            "schema_version": "agent.route_decision.v1",
+            "decision_id": "dec_wrong",
+            "session_id": "session_route",
+            "router_name": "wisepick",
+        },
+    )
+    observation_state.langfuse_client._store.observations["missing_metadata"] = FakeObservation(
+        id="missing_metadata",
+        trace_id="trace_route",
+        type="SPAN",
+        name="mcp.route_decision",
+        status="SUCCEEDED",
+        start_time=now,
+        end_time=now,
+    )
+
+    ctx = FakeContext(observation_state)
+    result = asyncio.run(
+        find_route_decisions(
+            ctx,
+            age=10,
+            trace_id=None,
+            session_id="session_route",
+            decision_id=None,
+            router_name="wisepick",
+            provider=None,
+            capability_id=None,
+            page=1,
+            limit=50,
+            output_mode="compact",
+        )
+    )
+
+    assert result["metadata"]["item_count"] == 0
+    assert result["data"] == []
+
+
+def test_summarize_route_decisions_counts_low_confidence(observation_state):
+    """summarize_route_decisions should aggregate over generic metadata fields."""
+    from langfuse_mcp.__main__ import summarize_route_decisions
+
+    _seed_route_decision_observations(observation_state.langfuse_client)
+    ctx = FakeContext(observation_state)
+    result = asyncio.run(
+        summarize_route_decisions(
+            ctx,
+            age=10,
+            trace_id=None,
+            session_id="session_route",
+            router_name="wisepick",
+            provider=None,
+            capability_id=None,
+            max_confidence=0.5,
+            page=1,
+            limit=50,
+        )
+    )
+
+    assert result["data"]["total_decisions"] == 2
+    assert result["data"]["provider_counts"]["canva"] == 1
+    assert result["data"]["provider_counts"]["unknown"] == 1
+    assert result["data"]["callable_counts"]["True"] == 1
+    assert result["data"]["callable_counts"]["False"] == 1
+    assert result["data"]["low_confidence_count"] == 1
+    assert result["data"]["uncallable_count"] == 1
+
+
+def test_find_low_confidence_route_decisions_includes_uncallable(observation_state):
+    """find_low_confidence_route_decisions should flag confidence threshold and callable=false cases."""
+    from langfuse_mcp.__main__ import find_low_confidence_route_decisions
+
+    _seed_route_decision_observations(observation_state.langfuse_client)
+    ctx = FakeContext(observation_state)
+    result = asyncio.run(
+        find_low_confidence_route_decisions(
+            ctx,
+            age=10,
+            trace_id=None,
+            session_id="session_route",
+            router_name="wisepick",
+            provider=None,
+            capability_id=None,
+            max_confidence=0.5,
+            include_uncallable=True,
+            page=1,
+            limit=50,
+            output_mode="compact",
+        )
+    )
+
+    assert result["metadata"]["item_count"] == 1
+    assert result["metadata"]["candidate_count"] == 2
+    assert result["data"][0]["decision_id"] == "dec_low"
+    assert result["data"][0]["callable"] is False
 
 
 def test_list_observations_cursor_only_rejects_page_gt_one(tmp_path):
