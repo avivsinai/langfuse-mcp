@@ -115,6 +115,12 @@ TRUNCATE_SUFFIX = "..."  # Suffix to add to truncated fields
 TOOL_GROUPS = {
     "traces": ["fetch_traces", "fetch_trace"],
     "observations": ["fetch_observations", "fetch_observation"],
+    "routing": [
+        "find_route_decisions",
+        "get_route_decision",
+        "summarize_route_decisions",
+        "find_low_confidence_route_decisions",
+    ],
     "sessions": ["fetch_sessions", "get_session_details", "get_user_sessions"],
     "exceptions": ["find_exceptions", "find_exceptions_in_file", "get_exception_details", "get_error_count"],
     "prompts": ["get_prompt", "get_prompt_unresolved", "list_prompts", "create_text_prompt", "create_chat_prompt", "update_prompt_labels"],
@@ -143,6 +149,7 @@ TOOL_GROUPS = {
     "scores": ["list_scores_v2", "get_score_v2"],
 }
 ALL_TOOL_GROUPS = set(TOOL_GROUPS.keys())
+ROUTE_DECISION_SCHEMA_VERSION = "mcp.route_decision.v1"
 
 # Tools that perform write operations (disabled in read-only mode)
 WRITE_TOOLS = {
@@ -403,7 +410,7 @@ def _build_arg_parser(env_defaults: dict[str, Any]) -> argparse.ArgumentParser:
         default=os.getenv("LANGFUSE_MCP_TOOLS", "all"),
         help=(
             "Comma-separated tool groups to enable: "
-            "traces,observations,sessions,exceptions,prompts,datasets,annotation_queues,scores,schema "
+            "traces,observations,routing,sessions,exceptions,prompts,datasets,annotation_queues,scores,schema "
             "or 'all' (default). Reduces token overhead when only specific capabilities needed."
         ),
     )
@@ -675,6 +682,83 @@ def _get_observation(langfuse_client: Any, observation_id: str) -> Any:
     if fetcher is None:
         raise RuntimeError("Unsupported Langfuse client: no observation getter available")
     return fetcher(observation_id)
+
+
+def _route_decision_metadata_filter(
+    *,
+    decision_id: str | None = None,
+    session_id: str | None = None,
+    router_name: str | None = None,
+    provider: str | None = None,
+    capability_id: str | None = None,
+    execution_type: str | None = None,
+    callable: bool | None = None,
+) -> dict[str, Any]:
+    """Build the stable metadata query for generic route-decision observations."""
+    filters: dict[str, Any] = {"schema_version": ROUTE_DECISION_SCHEMA_VERSION}
+    optional_filters = {
+        "decision_id": _normalize_field_default(decision_id),
+        "session_id": _normalize_field_default(session_id),
+        "router_name": _normalize_field_default(router_name),
+        "provider": _normalize_field_default(provider),
+        "capability_id": _normalize_field_default(capability_id),
+        "execution_type": _normalize_field_default(execution_type),
+        "callable": _normalize_field_default(callable),
+    }
+    filters.update({key: value for key, value in optional_filters.items() if value is not None})
+    return filters
+
+
+def _route_decision_from_observation(observation: Any) -> dict[str, Any]:
+    """Return a router-neutral route-decision record from a Langfuse observation."""
+    obs = _sdk_object_to_python(observation)
+    metadata = obs.get("metadata") or {}
+
+    return {
+        "observation_id": obs.get("id"),
+        "trace_id": obs.get("trace_id") or obs.get("traceId"),
+        "parent_observation_id": obs.get("parent_observation_id") or obs.get("parentObservationId"),
+        "name": obs.get("name"),
+        "type": obs.get("type"),
+        "start_time": obs.get("start_time") or obs.get("startTime"),
+        "end_time": obs.get("end_time") or obs.get("endTime"),
+        "schema_version": metadata.get("schema_version"),
+        "decision_id": metadata.get("decision_id"),
+        "session_id": metadata.get("session_id"),
+        "router_name": metadata.get("router_name"),
+        "router_version": metadata.get("router_version"),
+        "policy_version": metadata.get("policy_version"),
+        "decision_method": metadata.get("decision_method"),
+        "capability_id": metadata.get("capability_id"),
+        "provider": metadata.get("provider"),
+        "execution_type": metadata.get("execution_type"),
+        "callable": metadata.get("callable"),
+        "selected_tool": metadata.get("selected_tool"),
+        "confidence": metadata.get("confidence"),
+        "latency_ms": metadata.get("latency_ms"),
+        "candidate_count": metadata.get("candidate_count"),
+        "reason_codes": metadata.get("reason_codes"),
+        "top_candidates": metadata.get("top_candidates"),
+        "feedback_expected": metadata.get("feedback_expected"),
+        "metadata": metadata,
+    }
+
+
+def _confidence_value(decision: dict[str, Any]) -> float | None:
+    """Return confidence as a float when it is numeric."""
+    value = decision.get("confidence")
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _count_by_key(decisions: list[dict[str, Any]], key: str) -> dict[str, int]:
+    """Count route decisions by a scalar key, preserving an explicit unknown bucket."""
+    counts = Counter(str(decision.get(key) if decision.get(key) is not None else "unknown") for decision in decisions)
+    return dict(counts)
 
 
 def _get_trace(langfuse_client: Any, trace_id: str, include_observations: bool) -> Any:
@@ -1591,6 +1675,354 @@ async def fetch_observation(
         return {"data": processed_data, "metadata": metadata_block}
     except Exception:
         logger.exception(f"Error fetching observation {observation_id}")
+        raise
+
+
+def _list_route_decision_records(
+    state: "MCPState",
+    *,
+    age: int,
+    trace_id: str | None,
+    decision_id: str | None,
+    session_id: str | None,
+    router_name: str | None,
+    provider: str | None,
+    capability_id: str | None,
+    execution_type: str | None,
+    callable: bool | None,
+    page: int,
+    limit: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    """List generic route-decision observations using only the stable metadata contract."""
+    age = validate_age(age)
+    page = _normalize_field_default(page) or 1
+    limit = _normalize_field_default(limit) or 50
+    trace_id = _normalize_field_default(trace_id)
+
+    metadata_filter = _route_decision_metadata_filter(
+        decision_id=decision_id,
+        session_id=session_id,
+        router_name=router_name,
+        provider=provider,
+        capability_id=capability_id,
+        execution_type=execution_type,
+        callable=callable,
+    )
+    from_start_time = datetime.now(timezone.utc) - timedelta(minutes=age)
+    observation_items, pagination = _list_observations(
+        state.langfuse_client,
+        limit=limit,
+        page=page,
+        from_start_time=from_start_time,
+        to_start_time=None,
+        obs_type="SPAN",
+        name=None,
+        user_id=None,
+        trace_id=trace_id,
+        parent_observation_id=None,
+        metadata=metadata_filter,
+    )
+    return [_route_decision_from_observation(obs) for obs in observation_items], pagination, metadata_filter
+
+
+async def find_route_decisions(
+    ctx: Context,
+    age: ValidatedAge = Field(MAX_AGE_MINUTES, description=AGE_LOOKBACK_DESCRIPTION, gt=0, le=MAX_AGE_MINUTES),
+    trace_id: str | None = Field(None, description="Optional Langfuse trace ID filter"),
+    session_id: str | None = Field(None, description="Optional route-decision metadata session_id filter"),
+    decision_id: str | None = Field(None, description="Optional route-decision metadata decision_id filter"),
+    router_name: str | None = Field(None, description="Optional route-decision metadata router_name filter"),
+    provider: str | None = Field(None, description="Optional route-decision metadata provider filter"),
+    capability_id: str | None = Field(None, description="Optional route-decision metadata capability_id filter"),
+    page: int = Field(1, description="Page number for pagination (starts at 1)"),
+    limit: int = Field(50, description="Maximum number of route decisions to return per page"),
+    output_mode: OUTPUT_MODE_LITERAL = Field(
+        "compact",
+        description=(
+            "Controls the output format and action. "
+            "'compact' (default): Returns a summarized JSON object optimized for direct agent consumption. "
+            "'full_json_string': Returns the complete, raw JSON data serialized as a string. "
+            "'full_json_file': Returns a summarized JSON object AND saves the complete data to a file."
+        ),
+    ),
+) -> ResponseDict | str:
+    """Find generic agent route decisions emitted as Langfuse SPAN observations.
+
+    This tool is router-neutral. It only treats observations with
+    metadata.schema_version == "mcp.route_decision.v1" as route decisions, and
+    it filters on fields inside observation metadata rather than display output.
+    """
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+
+    try:
+        decisions, pagination, metadata_filter = _list_route_decision_records(
+            state,
+            age=age,
+            trace_id=trace_id,
+            decision_id=decision_id,
+            session_id=session_id,
+            router_name=router_name,
+            provider=provider,
+            capability_id=capability_id,
+            execution_type=None,
+            callable=None,
+            page=page,
+            limit=limit,
+        )
+
+        mode = _ensure_output_mode(output_mode)
+        processed_data, file_meta = process_data_with_mode(decisions, mode, "route_decisions", state)
+        logger.info(f"Found {len(decisions)} route decisions, returning with output_mode={mode}")
+
+        if mode == OutputMode.FULL_JSON_STRING:
+            return processed_data
+
+        metadata_block: dict[str, Any] = {
+            "item_count": len(decisions),
+            "schema_version": ROUTE_DECISION_SCHEMA_VERSION,
+            "metadata_filter": metadata_filter,
+            "file_path": None,
+            "file_info": None,
+        }
+        if pagination.get("next_page") is not None:
+            metadata_block["next_page"] = pagination["next_page"]
+        if pagination.get("total") is not None:
+            metadata_block["total"] = pagination["total"]
+        if pagination.get("filtered_count") is not None:
+            metadata_block["filtered_count"] = pagination["filtered_count"]
+        if file_meta:
+            metadata_block.update(file_meta)
+
+        return {"data": processed_data, "metadata": metadata_block}
+    except Exception:
+        logger.exception("Error finding route decisions")
+        raise
+
+
+async def get_route_decision(
+    ctx: Context,
+    decision_id: str = Field(..., description="Route-decision metadata decision_id to fetch"),
+    age: ValidatedAge = Field(MAX_AGE_MINUTES, description=AGE_LOOKBACK_DESCRIPTION, gt=0, le=MAX_AGE_MINUTES),
+    output_mode: OUTPUT_MODE_LITERAL = Field(
+        "compact",
+        description=(
+            "Controls the output format and action. "
+            "'compact' (default): Returns a summarized JSON object optimized for direct agent consumption. "
+            "'full_json_string': Returns the complete, raw JSON data serialized as a string. "
+            "'full_json_file': Returns a summarized JSON object AND saves the complete data to a file."
+        ),
+    ),
+) -> ResponseDict | str:
+    """Fetch one route decision by metadata decision_id."""
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+    normalized_decision_id = _normalize_field_default(decision_id)
+
+    try:
+        decisions, _, metadata_filter = _list_route_decision_records(
+            state,
+            age=age,
+            trace_id=None,
+            decision_id=normalized_decision_id,
+            session_id=None,
+            router_name=None,
+            provider=None,
+            capability_id=None,
+            execution_type=None,
+            callable=None,
+            page=1,
+            limit=1,
+        )
+        result = decisions[0] if decisions else None
+
+        mode = _ensure_output_mode(output_mode)
+        processed_data, file_meta = process_data_with_mode(result, mode, f"route_decision_{normalized_decision_id}", state)
+        if mode == OutputMode.FULL_JSON_STRING:
+            return processed_data
+
+        metadata_block: dict[str, Any] = {
+            "found": result is not None,
+            "decision_id": normalized_decision_id,
+            "schema_version": ROUTE_DECISION_SCHEMA_VERSION,
+            "metadata_filter": metadata_filter,
+            "file_path": None,
+            "file_info": None,
+        }
+        if file_meta:
+            metadata_block.update(file_meta)
+
+        return {"data": processed_data, "metadata": metadata_block}
+    except Exception:
+        logger.exception(f"Error fetching route decision {normalized_decision_id}")
+        raise
+
+
+async def summarize_route_decisions(
+    ctx: Context,
+    age: ValidatedAge = Field(MAX_AGE_MINUTES, description=AGE_LOOKBACK_DESCRIPTION, gt=0, le=MAX_AGE_MINUTES),
+    trace_id: str | None = Field(None, description="Optional Langfuse trace ID filter"),
+    session_id: str | None = Field(None, description="Optional route-decision metadata session_id filter"),
+    router_name: str | None = Field(None, description="Optional route-decision metadata router_name filter"),
+    provider: str | None = Field(None, description="Optional route-decision metadata provider filter"),
+    capability_id: str | None = Field(None, description="Optional route-decision metadata capability_id filter"),
+    max_confidence: float = Field(0.5, description="Confidence threshold used for low-confidence counts", ge=0.0, le=1.0),
+    page: int = Field(1, description="Page number for pagination (starts at 1)"),
+    limit: int = Field(200, description="Maximum number of route decisions to summarize from the current page"),
+) -> ResponseDict:
+    """Summarize generic route decisions for a trace, session, router, provider, or capability."""
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+    normalized_threshold = _normalize_field_default(max_confidence)
+    if normalized_threshold is None:
+        normalized_threshold = 0.5
+
+    try:
+        decisions, pagination, metadata_filter = _list_route_decision_records(
+            state,
+            age=age,
+            trace_id=trace_id,
+            decision_id=None,
+            session_id=session_id,
+            router_name=router_name,
+            provider=provider,
+            capability_id=capability_id,
+            execution_type=None,
+            callable=None,
+            page=page,
+            limit=limit,
+        )
+        confidences = [value for value in (_confidence_value(decision) for decision in decisions) if value is not None]
+        low_confidence_count = sum(1 for value in confidences if value <= normalized_threshold)
+        uncallable_count = sum(1 for decision in decisions if decision.get("callable") is False)
+        sample_decisions = [
+            {
+                "decision_id": decision.get("decision_id"),
+                "trace_id": decision.get("trace_id"),
+                "router_name": decision.get("router_name"),
+                "provider": decision.get("provider"),
+                "capability_id": decision.get("capability_id"),
+                "callable": decision.get("callable"),
+                "confidence": decision.get("confidence"),
+            }
+            for decision in decisions[:10]
+        ]
+
+        confidence_summary = {
+            "count": len(confidences),
+            "min": min(confidences) if confidences else None,
+            "max": max(confidences) if confidences else None,
+            "avg": (sum(confidences) / len(confidences)) if confidences else None,
+        }
+        result = {
+            "schema_version": ROUTE_DECISION_SCHEMA_VERSION,
+            "total_decisions": len(decisions),
+            "router_counts": _count_by_key(decisions, "router_name"),
+            "provider_counts": _count_by_key(decisions, "provider"),
+            "capability_counts": _count_by_key(decisions, "capability_id"),
+            "execution_type_counts": _count_by_key(decisions, "execution_type"),
+            "callable_counts": _count_by_key(decisions, "callable"),
+            "confidence": confidence_summary,
+            "low_confidence_count": low_confidence_count,
+            "uncallable_count": uncallable_count,
+            "sample_decisions": sample_decisions,
+        }
+
+        metadata_block: dict[str, Any] = {
+            "item_count": len(decisions),
+            "schema_version": ROUTE_DECISION_SCHEMA_VERSION,
+            "metadata_filter": metadata_filter,
+            "max_confidence": normalized_threshold,
+        }
+        if pagination.get("total") is not None:
+            metadata_block["total"] = pagination["total"]
+        if pagination.get("next_page") is not None:
+            metadata_block["next_page"] = pagination["next_page"]
+        if pagination.get("filtered_count") is not None:
+            metadata_block["filtered_count"] = pagination["filtered_count"]
+
+        return {"data": result, "metadata": metadata_block}
+    except Exception:
+        logger.exception("Error summarizing route decisions")
+        raise
+
+
+async def find_low_confidence_route_decisions(
+    ctx: Context,
+    age: ValidatedAge = Field(MAX_AGE_MINUTES, description=AGE_LOOKBACK_DESCRIPTION, gt=0, le=MAX_AGE_MINUTES),
+    trace_id: str | None = Field(None, description="Optional Langfuse trace ID filter"),
+    session_id: str | None = Field(None, description="Optional route-decision metadata session_id filter"),
+    router_name: str | None = Field(None, description="Optional route-decision metadata router_name filter"),
+    provider: str | None = Field(None, description="Optional route-decision metadata provider filter"),
+    capability_id: str | None = Field(None, description="Optional route-decision metadata capability_id filter"),
+    max_confidence: float = Field(0.5, description="Return route decisions with confidence at or below this value", ge=0.0, le=1.0),
+    include_uncallable: bool = Field(True, description="Also return decisions with metadata callable=false"),
+    page: int = Field(1, description="Page number for pagination (starts at 1)"),
+    limit: int = Field(50, description="Maximum number of matching route decisions to return"),
+    output_mode: OUTPUT_MODE_LITERAL = Field(
+        "compact",
+        description=(
+            "Controls the output format and action. "
+            "'compact' (default): Returns a summarized JSON object optimized for direct agent consumption. "
+            "'full_json_string': Returns the complete, raw JSON data serialized as a string. "
+            "'full_json_file': Returns a summarized JSON object AND saves the complete data to a file."
+        ),
+    ),
+) -> ResponseDict | str:
+    """Find route decisions that are low-confidence or explicitly uncallable."""
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+    normalized_threshold = _normalize_field_default(max_confidence)
+    if normalized_threshold is None:
+        normalized_threshold = 0.5
+    normalized_include_uncallable = bool(_normalize_field_default(include_uncallable))
+
+    try:
+        decisions, pagination, metadata_filter = _list_route_decision_records(
+            state,
+            age=age,
+            trace_id=trace_id,
+            decision_id=None,
+            session_id=session_id,
+            router_name=router_name,
+            provider=provider,
+            capability_id=capability_id,
+            execution_type=None,
+            callable=None,
+            page=page,
+            limit=limit,
+        )
+        filtered_decisions = []
+        for decision in decisions:
+            confidence = _confidence_value(decision)
+            is_low_confidence = confidence is not None and confidence <= normalized_threshold
+            is_uncallable = normalized_include_uncallable and decision.get("callable") is False
+            if is_low_confidence or is_uncallable:
+                filtered_decisions.append(decision)
+
+        mode = _ensure_output_mode(output_mode)
+        processed_data, file_meta = process_data_with_mode(filtered_decisions, mode, "low_confidence_route_decisions", state)
+        if mode == OutputMode.FULL_JSON_STRING:
+            return processed_data
+
+        metadata_block: dict[str, Any] = {
+            "item_count": len(filtered_decisions),
+            "candidate_count": len(decisions),
+            "schema_version": ROUTE_DECISION_SCHEMA_VERSION,
+            "metadata_filter": metadata_filter,
+            "max_confidence": normalized_threshold,
+            "include_uncallable": normalized_include_uncallable,
+            "file_path": None,
+            "file_info": None,
+        }
+        if pagination.get("total") is not None:
+            metadata_block["total"] = pagination["total"]
+        if pagination.get("next_page") is not None:
+            metadata_block["next_page"] = pagination["next_page"]
+        if pagination.get("filtered_count") is not None:
+            metadata_block["filtered_count"] = pagination["filtered_count"]
+        if file_meta:
+            metadata_block.update(file_meta)
+
+        return {"data": processed_data, "metadata": metadata_block}
+    except Exception:
+        logger.exception("Error finding low-confidence route decisions")
         raise
 
 
@@ -3805,7 +4237,7 @@ def app_factory(
         host: Langfuse API host URL
         cache_size: Size of LRU caches
         dump_dir: Directory for full_json_file output mode
-        enabled_tools: Tool groups to enable (default: all). Options: traces, observations,
+        enabled_tools: Tool groups to enable (default: all). Options: traces, observations, routing,
             sessions, exceptions, prompts, datasets, annotation_queues, scores, schema
         timeout: API request timeout in seconds (default: 30). The Langfuse SDK defaults to 5s which is too aggressive.
         read_only: If True, disable all write operations (create/update/delete tools).
@@ -3858,6 +4290,10 @@ def app_factory(
         "fetch_trace": fetch_trace,
         "fetch_observations": fetch_observations,
         "fetch_observation": fetch_observation,
+        "find_route_decisions": find_route_decisions,
+        "get_route_decision": get_route_decision,
+        "summarize_route_decisions": summarize_route_decisions,
+        "find_low_confidence_route_decisions": find_low_confidence_route_decisions,
         "fetch_sessions": fetch_sessions,
         "get_session_details": get_session_details,
         "get_user_sessions": get_user_sessions,

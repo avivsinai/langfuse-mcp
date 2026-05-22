@@ -31,6 +31,8 @@ class FakeObservation:
     status: str
     start_time: datetime
     end_time: datetime
+    trace_id: str | None = None
+    parent_observation_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     events: list[dict[str, Any]] = field(default_factory=list)
 
