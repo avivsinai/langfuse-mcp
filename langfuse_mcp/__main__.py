@@ -429,8 +429,13 @@ def _build_arg_parser(env_defaults: dict[str, Any]) -> argparse.ArgumentParser:
     parser.add_argument(
         "--bind-host",
         type=str,
-        default=os.getenv("LANGFUSE_MCP_BIND_HOST", "0.0.0.0"),
-        help="Bind address for HTTP transport (default: 0.0.0.0). Set via LANGFUSE_MCP_BIND_HOST.",
+        default=os.getenv("LANGFUSE_MCP_BIND_HOST", "127.0.0.1"),
+        help=(
+            "Bind address for HTTP transport (default: 127.0.0.1, localhost only). "
+            "Use 0.0.0.0 to expose on all interfaces — only do this behind an "
+            "authenticating reverse-proxy or within a trusted network. "
+            "Set via LANGFUSE_MCP_BIND_HOST."
+        ),
     )
 
     return parser
@@ -1049,6 +1054,29 @@ def process_data_with_mode(
     return process_compact_data(data), None
 
 
+_MAX_PROJECT_CLIENTS = 32  # Maximum number of per-request Langfuse clients to cache.
+
+
+class _BoundedClientCache(LRUCache):
+    """LRU cache for Langfuse clients that flushes and shuts down evicted entries.
+
+    When the cache is full and a new client must be inserted, ``cachetools``
+    calls :meth:`popitem` to evict the least-recently-used entry before
+    inserting the new one.  We override that hook to cleanly close the evicted
+    ``Langfuse`` client so file-handles and background threads are not leaked.
+    """
+
+    def popitem(self) -> tuple[tuple[str, str], "Langfuse"]:
+        """Remove the LRU client, flush and shut it down, then return the pair."""
+        key, client = super().popitem()
+        try:
+            client.flush()
+            client.shutdown()
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Error closing evicted Langfuse client for key=%s…: %s", key[0][:8], exc)
+        return key, client
+
+
 @dataclass
 class MCPState:
     """State object passed from lifespan context to tools.
@@ -1060,8 +1088,11 @@ class MCPState:
     langfuse_client: Langfuse | None
     host: str = "https://cloud.langfuse.com"
     timeout: int = 30
-    # Per-request project clients keyed by (public_key, secret_key)
-    project_clients: dict[tuple[str, str], Langfuse] = field(default_factory=dict)
+    # Per-request project clients keyed by (public_key, secret_key); bounded to prevent
+    # unbounded growth from arbitrary caller-supplied header pairs.
+    project_clients: _BoundedClientCache = field(
+        default_factory=lambda: _BoundedClientCache(maxsize=_MAX_PROJECT_CLIENTS)
+    )
     # LRU caches for efficient exception lookup
     observation_cache: LRUCache = field(
         default_factory=lambda: LRUCache(maxsize=100), metadata={"description": "Cache for observations to reduce API calls"}
@@ -3858,7 +3889,7 @@ def app_factory(
     timeout: int = 30,
     read_only: bool = False,
     default_output_mode: OutputMode = OutputMode.COMPACT,
-    bind_host: str = "0.0.0.0",
+    bind_host: str = "127.0.0.1",
     port: int = 8000,
 ) -> FastMCP:
     """Create a FastMCP server with Langfuse tools.
@@ -3874,7 +3905,8 @@ def app_factory(
         timeout: API request timeout in seconds (default: 30). The Langfuse SDK defaults to 5s which is too aggressive.
         read_only: If True, disable all write operations (create/update/delete tools).
         default_output_mode: Default output_mode exposed in MCP tool schemas.
-        bind_host: Bind address for HTTP transport (default: 0.0.0.0).
+        bind_host: Bind address for HTTP transport (default: 127.0.0.1, localhost only).
+            Use 0.0.0.0 only behind an authenticating reverse-proxy or trusted network.
         port: Port for HTTP transport (default: 8000).
     """
     if enabled_tools is None:
