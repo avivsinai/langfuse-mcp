@@ -5,6 +5,7 @@ agents to query trace data, observations, and exceptions from Langfuse.
 """
 
 import argparse
+import base64
 import functools
 import inspect
 import json
@@ -1115,18 +1116,51 @@ class MCPState:
     )
 
 
-def _resolve_client(state: "MCPState", ctx: Context) -> Langfuse:
-    """Resolve a Langfuse client from HTTP request headers or fall back to the default.
+def _parse_basic_auth(header: str) -> tuple[str, str]:
+    """Parse an ``Authorization: Basic`` header into ``(public_key, secret_key)``.
 
-    Reads x-langfuse-public-key and x-langfuse-secret-key from the incoming HTTP
-    request headers. If present, creates (or reuses a cached) project-specific client.
-    Falls back to the startup-configured default client if no headers are provided.
+    Raises ``ValueError`` on any malformed input so callers fail closed.
+    The secret_key never appears in error messages or logs.
+
+    Args:
+        header: Raw value of the Authorization HTTP header.
+
+    Returns:
+        Tuple of (public_key, secret_key).
+    """
+    scheme, _, credentials = header.partition(" ")
+    if scheme.lower() != "basic":
+        raise ValueError(f"Unsupported Authorization scheme '{scheme}'; expected 'Basic'.")
+    if not credentials.strip():
+        raise ValueError("Authorization header is missing credentials.")
+    try:
+        decoded = base64.b64decode(credentials.strip().encode()).decode("utf-8")
+    except Exception:
+        raise ValueError("Authorization credentials are not valid base64.")
+    if ":" not in decoded:
+        raise ValueError("Authorization credentials must be base64(public_key:secret_key).")
+    public_key, secret_key = decoded.split(":", 1)
+    if not public_key:
+        raise ValueError("public_key in Authorization credentials is empty.")
+    if not secret_key:
+        raise ValueError("secret_key in Authorization credentials is empty.")
+    return public_key, secret_key
+
+
+def _resolve_client(state: "MCPState", ctx: Context) -> Langfuse:
+    """Resolve a Langfuse client from an HTTP Authorization header or fall back to the default.
+
+    Reads ``Authorization: Basic <base64(public_key:secret_key)>`` from the incoming
+    HTTP request. If the header is present, it is parsed strictly — any malformed value
+    raises ``ValueError`` (fail closed). Only a *missing* header falls back to the
+    startup-configured default client.
     """
     request = getattr(ctx.request_context, "request", None)
     if request is not None:
-        public_key = request.headers.get("x-langfuse-public-key")
-        secret_key = request.headers.get("x-langfuse-secret-key")
-        if public_key and secret_key:
+        auth_header = request.headers.get("authorization")
+        if auth_header is not None:
+            # Raises ValueError on any malformed input — no silent fallback to default.
+            public_key, secret_key = _parse_basic_auth(auth_header)
             cache_key = (public_key, secret_key)
             if cache_key not in state.project_clients:
                 init_params = inspect.signature(Langfuse.__init__).parameters
@@ -1135,6 +1169,8 @@ def _resolve_client(state: "MCPState", ctx: Context) -> Langfuse:
                     "secret_key": secret_key,
                     "host": state.host,
                     "debug": False,
+                    # Disable background batching: per-request clients must not hold
+                    # background threads or accumulate events between MCP tool calls.
                     "flush_at": 0,
                     "flush_interval": None,
                 }
@@ -1142,14 +1178,14 @@ def _resolve_client(state: "MCPState", ctx: Context) -> Langfuse:
                     langfuse_kwargs["timeout"] = state.timeout
                 if "tracing_enabled" in init_params:
                     langfuse_kwargs["tracing_enabled"] = False
-                logger.info(f"Creating Langfuse client for public_key={public_key[:8]}...")
+                logger.info("Creating Langfuse client for public_key=%s…", public_key[:8])
                 state.project_clients[cache_key] = Langfuse(**langfuse_kwargs)
             return state.project_clients[cache_key]
     if state.langfuse_client is None:
         raise ValueError(
-            "No Langfuse credentials. Provide x-langfuse-public-key and "
-            "x-langfuse-secret-key HTTP headers, or set LANGFUSE_PUBLIC_KEY / "
-            "LANGFUSE_SECRET_KEY at startup."
+            "No Langfuse credentials. Provide an "
+            "'Authorization: Basic <base64(public_key:secret_key)>' header, "
+            "or set LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY at startup."
         )
     return state.langfuse_client
 

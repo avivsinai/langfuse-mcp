@@ -187,3 +187,98 @@ def test_bind_host_default_is_localhost(monkeypatch):
     parser = _build_arg_parser(_read_env_defaults())
     args = parser.parse_args([])
     assert args.bind_host == "127.0.0.1"
+
+
+# ---------------------------------------------------------------------------
+# _parse_basic_auth
+# ---------------------------------------------------------------------------
+
+
+class TestParseBasicAuth:
+    """Tests for Authorization: Basic header parsing."""
+
+    def _encode(self, value: str) -> str:
+        import base64
+
+        return base64.b64encode(value.encode()).decode()
+
+    def test_valid_credentials(self):
+        """Valid base64(pk:sk) must return (pk, sk)."""
+        from langfuse_mcp.__main__ import _parse_basic_auth
+
+        pk, sk = _parse_basic_auth(f"Basic {self._encode('pk-lf-abc:sk-lf-xyz')}")
+        assert pk == "pk-lf-abc"
+        assert sk == "sk-lf-xyz"
+
+    def test_case_insensitive_scheme(self):
+        """Scheme matching must be case-insensitive (BASIC / basic / Basic)."""
+        from langfuse_mcp.__main__ import _parse_basic_auth
+
+        pk, sk = _parse_basic_auth(f"BASIC {self._encode('pk:sk')}")
+        assert pk == "pk"
+        assert sk == "sk"
+
+    def test_secret_with_colon(self):
+        """A colon inside the secret_key must be preserved."""
+        from langfuse_mcp.__main__ import _parse_basic_auth
+
+        pk, sk = _parse_basic_auth(f"Basic {self._encode('pk-lf-abc:sk:with:colons')}")
+        assert pk == "pk-lf-abc"
+        assert sk == "sk:with:colons"
+
+    def test_wrong_scheme_raises(self):
+        """Bearer or any non-Basic scheme must be rejected."""
+        from langfuse_mcp.__main__ import _parse_basic_auth
+
+        with pytest.raises(ValueError, match="scheme"):
+            _parse_basic_auth(f"Bearer {self._encode('pk:sk')}")
+
+    def test_invalid_base64_raises(self):
+        """Non-base64 credentials must raise ValueError."""
+        from langfuse_mcp.__main__ import _parse_basic_auth
+
+        with pytest.raises(ValueError, match="base64"):
+            _parse_basic_auth("Basic not-valid-base64!!!")
+
+    def test_missing_colon_raises(self):
+        """Credentials without a colon separator must be rejected."""
+        from langfuse_mcp.__main__ import _parse_basic_auth
+
+        with pytest.raises(ValueError, match="public_key:secret_key"):
+            _parse_basic_auth(f"Basic {self._encode('nocolon')}")
+
+    def test_empty_public_key_raises(self):
+        """Empty public_key (leading colon) must be rejected."""
+        from langfuse_mcp.__main__ import _parse_basic_auth
+
+        with pytest.raises(ValueError, match="public_key"):
+            _parse_basic_auth(f"Basic {self._encode(':sk-lf-xyz')}")
+
+    def test_empty_secret_key_raises(self):
+        """Empty secret_key (trailing colon) must be rejected."""
+        from langfuse_mcp.__main__ import _parse_basic_auth
+
+        with pytest.raises(ValueError, match="secret_key"):
+            _parse_basic_auth(f"Basic {self._encode('pk-lf-abc:')}")
+
+    def test_empty_credentials_field_raises(self):
+        """Whitespace-only credentials field must be rejected."""
+        from langfuse_mcp.__main__ import _parse_basic_auth
+
+        with pytest.raises(ValueError, match="missing credentials"):
+            _parse_basic_auth("Basic ")
+
+    def test_secret_never_appears_in_error_message(self):
+        """The secret must not leak into any ValueError message."""
+        from langfuse_mcp.__main__ import _parse_basic_auth
+
+        secret = "super-secret-value-abc123"
+        cases = [
+            f"Bearer {self._encode(f'pk:{secret}')}",  # wrong scheme
+        ]
+        for header in cases:
+            with pytest.raises(ValueError) as exc_info:
+                _parse_basic_auth(header)
+            assert secret not in str(exc_info.value), (
+                f"Secret leaked into error message for header={header!r}"
+            )
