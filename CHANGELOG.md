@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Streamable HTTP transport** (`--transport streamable-http`): run a single persistent
+  server instance that serves multiple MCP clients over HTTP, eliminating the need for
+  one process/container per project.
+  - `--bind-host` (default `127.0.0.1`) and `--port` (default `8000`) control the
+    listening address. Expose on `0.0.0.0` only behind a TLS-terminating,
+    authenticating reverse-proxy or within a trusted network.
+  - `LANGFUSE_MCP_BIND_HOST` and `LANGFUSE_MCP_PORT` env-var counterparts.
+- **Per-request project credentials via `Authorization: Basic`**: pass
+  `Authorization: Basic <base64(public_key:secret_key)>` on each HTTP request to
+  target a specific Langfuse project. Absent header falls back to startup env
+  credentials; any malformed value is rejected (fail closed — no silent fallback).
+  Per-project clients are cached in a bounded LRU (max 32 entries); evicted clients
+  are flushed and shut down to prevent resource leaks.
+
 ## [0.9.1] - 2026-05-06
 ### Changed
 - Re-enabled Python 3.14 support now that the supported Langfuse SDK range includes v4, which uses Pydantic v2; CI now covers Python 3.10 through 3.14.

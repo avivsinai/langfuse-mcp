@@ -196,7 +196,7 @@ Create `.cursor/mcp.json` in your project (or `~/.cursor/mcp.json` for global):
 }
 ```
 
-### Docker
+### Docker (single project)
 
 ```bash
 docker run --rm -i \
@@ -205,6 +205,51 @@ docker run --rm -i \
   -e LANGFUSE_HOST=https://cloud.langfuse.com \
   ghcr.io/avivsinai/langfuse-mcp:latest
 ```
+
+### HTTP transport — shared server for multiple projects
+
+Run one persistent server instance and route each MCP client to its own Langfuse
+project by passing credentials in the `Authorization` header.
+
+```bash
+# Start a shared server (binds to localhost by default)
+docker run -d -p 127.0.0.1:8000:8000 \
+  -e LANGFUSE_HOST=https://cloud.langfuse.com \
+  ghcr.io/avivsinai/langfuse-mcp:latest \
+  --transport streamable-http --bind-host 0.0.0.0
+```
+
+> **Security note:** `--bind-host 0.0.0.0` exposes the port on all interfaces. In
+> production, place the server behind a TLS-terminating reverse proxy (nginx, Caddy,
+> Cloudflare Tunnel) that enforces HTTPS. The `Authorization` header containing your
+> keys is transmitted in plaintext over plain HTTP. If startup credentials are set,
+> the proxy must enforce authentication; otherwise unauthenticated callers without an
+> `Authorization` header can use the default project. For shared public HTTP deployments,
+> omit default `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` credentials unless the
+> fronting proxy authenticates every request.
+
+Register each project separately in your MCP client, passing its credentials as a
+`Basic` auth header (`base64(public_key:secret_key)`):
+
+```bash
+# Generate the header value for each project:
+echo -n "pk-lf-YOURKEY:sk-lf-YOURSECRET" | base64
+# cGstbGYtWU9VUktFWTpzay1sZi1ZT1VSU0VDUkVU
+
+# Register in Claude Code (one entry per project):
+claude mcp add langfuse-audit \
+  --transport http http://localhost:8000/mcp \
+  -H "Authorization: Basic cGstbGYtWU9VUktFWTpzay1sZi1ZT1VSU0VDUkVU"
+
+claude mcp add langfuse-staging \
+  --transport http http://localhost:8000/mcp \
+  -H "Authorization: Basic <base64 for staging project>"
+```
+
+**Auth semantics:** `Basic` here carries Langfuse API keys, not user passwords. An
+absent header falls back to startup env credentials (`LANGFUSE_PUBLIC_KEY` /
+`LANGFUSE_SECRET_KEY`). Any malformed header is rejected outright — there is no
+silent fallback to a different project.
 
 ### Optional environment variables
 

@@ -47,17 +47,9 @@ def patch_dependencies(monkeypatch: pytest.MonkeyPatch):
     sys.modules.setdefault("mcp.server", server_pkg)
     sys.modules.setdefault("mcp.server.fastmcp", fastmcp_mod)
 
-    # Minimal cachetools with an LRUCache placeholder so that `langfuse_mcp` can
-    # import it without requiring the real dependency.
-    cachetools_mod = types.ModuleType("cachetools")
-
-    class LRUCache(dict):
-        def __init__(self, maxsize=128) -> None:
-            super().__init__()
-            self.maxsize = maxsize
-
-    cachetools_mod.LRUCache = LRUCache
-    sys.modules.setdefault("cachetools", cachetools_mod)
+    # `cachetools` is a declared project dependency: no stub needed.  Installing a
+    # plain-dict stub here would silently disable maxsize enforcement and break the
+    # _BoundedClientCache tests.  The real library is always available in the dev env.
 
     # Provide a minimal stub of the `pydantic` module with BaseModel and Field
     # used only for type hints within `langfuse_mcp`.

@@ -4,6 +4,7 @@ import importlib
 import logging
 import os
 import sys
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -61,8 +62,8 @@ def test_max_age_days_env_override(monkeypatch):
         importlib.reload(main_module)
 
 
-def test_cli_requires_keys_without_env(monkeypatch):
-    """Missing env and args should keep credentials required."""
+def test_cli_accepts_no_keys_without_env(monkeypatch):
+    """Keys are optional — credentials can be supplied per-request via HTTP headers."""
     monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
     monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
     monkeypatch.delenv("LANGFUSE_LOG_LEVEL", raising=False)
@@ -72,8 +73,9 @@ def test_cli_requires_keys_without_env(monkeypatch):
     from langfuse_mcp.__main__ import _build_arg_parser, _read_env_defaults
 
     parser = _build_arg_parser(_read_env_defaults())
-    with pytest.raises(SystemExit):
-        parser.parse_args([])
+    args = parser.parse_args([])
+    assert args.public_key is None
+    assert args.secret_key is None
 
 
 def test_package_importable():
@@ -104,3 +106,177 @@ def test_python_version():
     python_version = sys.version_info
     assert python_version.major == 3
     assert python_version.minor >= 10, f"Python version {python_version.major}.{python_version.minor} is not supported"
+
+
+# ---------------------------------------------------------------------------
+# _BoundedClientCache
+# ---------------------------------------------------------------------------
+
+
+class TestBoundedClientCache:
+    """Tests for the bounded LRU cache used to hold per-request Langfuse clients."""
+
+    def _make_cache(self, maxsize: int = 2):
+        from langfuse_mcp.__main__ import _BoundedClientCache
+
+        return _BoundedClientCache(maxsize=maxsize)
+
+    def test_never_exceeds_maxsize(self):
+        """Cache length must never exceed maxsize regardless of insertion count."""
+        maxsize = 5
+        cache = self._make_cache(maxsize)
+        for i in range(maxsize + 10):
+            cache[(f"pk_{i}", f"sk_{i}")] = MagicMock()
+        assert len(cache) <= maxsize
+
+    def test_lru_eviction_flushes_and_shuts_down_client(self):
+        """The LRU client must be flushed and shut down when it is evicted."""
+        cache = self._make_cache(maxsize=2)
+        client_a = MagicMock()
+        client_b = MagicMock()
+        client_c = MagicMock()
+
+        cache[("pk_a", "sk_a")] = client_a
+        cache[("pk_b", "sk_b")] = client_b
+        # Access client_a to promote it — client_b becomes LRU
+        _ = cache[("pk_a", "sk_a")]
+        # Inserting client_c must evict client_b (LRU)
+        cache[("pk_c", "sk_c")] = client_c
+
+        client_b.flush.assert_called_once()
+        client_b.shutdown.assert_called_once()
+        # client_a and client_c must not be touched
+        client_a.flush.assert_not_called()
+        client_c.flush.assert_not_called()
+
+    def test_evicted_key_removed_from_cache(self):
+        """After eviction the key must no longer be present in the cache."""
+        cache = self._make_cache(maxsize=2)
+        cache[("pk_a", "sk_a")] = MagicMock()
+        cache[("pk_b", "sk_b")] = MagicMock()
+        # Access a so b is LRU; inserting c evicts b
+        _ = cache[("pk_a", "sk_a")]
+        cache[("pk_c", "sk_c")] = MagicMock()
+
+        assert ("pk_b", "sk_b") not in cache
+        assert ("pk_a", "sk_a") in cache
+        assert ("pk_c", "sk_c") in cache
+
+    def test_no_eviction_below_maxsize(self):
+        """Clients must not be flushed or shut down before the cache is full."""
+        cache = self._make_cache(maxsize=3)
+        clients = [MagicMock() for _ in range(3)]
+        for i, client in enumerate(clients):
+            cache[(f"pk_{i}", f"sk_{i}")] = client
+
+        for client in clients:
+            client.flush.assert_not_called()
+            client.shutdown.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# bind_host default
+# ---------------------------------------------------------------------------
+
+
+def test_bind_host_default_is_localhost(monkeypatch):
+    """--bind-host must default to 127.0.0.1, not 0.0.0.0."""
+    monkeypatch.delenv("LANGFUSE_MCP_BIND_HOST", raising=False)
+    from langfuse_mcp.__main__ import _build_arg_parser, _read_env_defaults
+
+    parser = _build_arg_parser(_read_env_defaults())
+    args = parser.parse_args([])
+    assert args.bind_host == "127.0.0.1"
+
+
+# ---------------------------------------------------------------------------
+# _parse_basic_auth
+# ---------------------------------------------------------------------------
+
+
+class TestParseBasicAuth:
+    """Tests for Authorization: Basic header parsing."""
+
+    def _encode(self, value: str) -> str:
+        import base64
+
+        return base64.b64encode(value.encode()).decode()
+
+    def test_valid_credentials(self):
+        """Valid base64(pk:sk) must return (pk, sk)."""
+        from langfuse_mcp.__main__ import _parse_basic_auth
+
+        pk, sk = _parse_basic_auth(f"Basic {self._encode('pk-lf-abc:sk-lf-xyz')}")
+        assert pk == "pk-lf-abc"
+        assert sk == "sk-lf-xyz"
+
+    def test_case_insensitive_scheme(self):
+        """Scheme matching must be case-insensitive (BASIC / basic / Basic)."""
+        from langfuse_mcp.__main__ import _parse_basic_auth
+
+        pk, sk = _parse_basic_auth(f"BASIC {self._encode('pk:sk')}")
+        assert pk == "pk"
+        assert sk == "sk"
+
+    def test_secret_with_colon(self):
+        """A colon inside the secret_key must be preserved."""
+        from langfuse_mcp.__main__ import _parse_basic_auth
+
+        pk, sk = _parse_basic_auth(f"Basic {self._encode('pk-lf-abc:sk:with:colons')}")
+        assert pk == "pk-lf-abc"
+        assert sk == "sk:with:colons"
+
+    def test_wrong_scheme_raises(self):
+        """Bearer or any non-Basic scheme must be rejected."""
+        from langfuse_mcp.__main__ import _parse_basic_auth
+
+        with pytest.raises(ValueError, match="scheme"):
+            _parse_basic_auth(f"Bearer {self._encode('pk:sk')}")
+
+    def test_invalid_base64_raises(self):
+        """Non-base64 credentials must raise ValueError."""
+        from langfuse_mcp.__main__ import _parse_basic_auth
+
+        with pytest.raises(ValueError, match="base64"):
+            _parse_basic_auth("Basic not-valid-base64!!!")
+
+    def test_missing_colon_raises(self):
+        """Credentials without a colon separator must be rejected."""
+        from langfuse_mcp.__main__ import _parse_basic_auth
+
+        with pytest.raises(ValueError, match="public_key:secret_key"):
+            _parse_basic_auth(f"Basic {self._encode('nocolon')}")
+
+    def test_empty_public_key_raises(self):
+        """Empty public_key (leading colon) must be rejected."""
+        from langfuse_mcp.__main__ import _parse_basic_auth
+
+        with pytest.raises(ValueError, match="public_key"):
+            _parse_basic_auth(f"Basic {self._encode(':sk-lf-xyz')}")
+
+    def test_empty_secret_key_raises(self):
+        """Empty secret_key (trailing colon) must be rejected."""
+        from langfuse_mcp.__main__ import _parse_basic_auth
+
+        with pytest.raises(ValueError, match="secret_key"):
+            _parse_basic_auth(f"Basic {self._encode('pk-lf-abc:')}")
+
+    def test_empty_credentials_field_raises(self):
+        """Whitespace-only credentials field must be rejected."""
+        from langfuse_mcp.__main__ import _parse_basic_auth
+
+        with pytest.raises(ValueError, match="missing credentials"):
+            _parse_basic_auth("Basic ")
+
+    def test_secret_never_appears_in_error_message(self):
+        """The secret must not leak into any ValueError message."""
+        from langfuse_mcp.__main__ import _parse_basic_auth
+
+        secret = "super-secret-value-abc123"
+        cases = [
+            f"Bearer {self._encode(f'pk:{secret}')}",  # wrong scheme
+        ]
+        for header in cases:
+            with pytest.raises(ValueError) as exc_info:
+                _parse_basic_auth(header)
+            assert secret not in str(exc_info.value), f"Secret leaked into error message for header={header!r}"

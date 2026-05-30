@@ -5,6 +5,7 @@ agents to query trace data, observations, and exceptions from Langfuse.
 """
 
 import argparse
+import base64
 import functools
 import inspect
 import json
@@ -352,15 +353,15 @@ def _build_arg_parser(env_defaults: dict[str, Any]) -> argparse.ArgumentParser:
         "--public-key",
         type=str,
         default=env_defaults["public_key"],
-        required=env_defaults["public_key"] is None,
-        help="Langfuse public key",
+        required=False,
+        help="Langfuse public key (optional if provided via Authorization: Basic <base64(public_key:secret_key)> HTTP header)",
     )
     parser.add_argument(
         "--secret-key",
         type=str,
         default=env_defaults["secret_key"],
-        required=env_defaults["secret_key"] is None,
-        help="Langfuse secret key",
+        required=False,
+        help="Langfuse secret key (optional if provided via Authorization: Basic <base64(public_key:secret_key)> HTTP header)",
     )
     parser.add_argument("--host", type=str, default=env_defaults["host"], help="Langfuse host URL")
     parser.add_argument(
@@ -419,6 +420,30 @@ def _build_arg_parser(env_defaults: dict[str, Any]) -> argparse.ArgumentParser:
         action="store_true",
         default=os.getenv("LANGFUSE_MCP_READ_ONLY", "").lower() in ("1", "true", "yes"),
         help="Disable all write operations (create/update/delete tools). Safer for read-only access.",
+    )
+    parser.add_argument(
+        "--transport",
+        type=str,
+        default=os.getenv("LANGFUSE_MCP_TRANSPORT", "stdio"),
+        choices=["stdio", "streamable-http"],
+        help="MCP transport: stdio (default) or streamable-http. Set via LANGFUSE_MCP_TRANSPORT.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.getenv("LANGFUSE_MCP_PORT", "8000")),
+        help="Port for HTTP transport (default: 8000). Set via LANGFUSE_MCP_PORT.",
+    )
+    parser.add_argument(
+        "--bind-host",
+        type=str,
+        default=os.getenv("LANGFUSE_MCP_BIND_HOST", "127.0.0.1"),
+        help=(
+            "Bind address for HTTP transport (default: 127.0.0.1, localhost only). "
+            "Use 0.0.0.0 to expose on all interfaces — only do this behind an "
+            "authenticating reverse-proxy or within a trusted network. "
+            "Set via LANGFUSE_MCP_BIND_HOST."
+        ),
     )
 
     return parser
@@ -1114,6 +1139,29 @@ def process_data_with_mode(
     return process_compact_data(data), None
 
 
+_MAX_PROJECT_CLIENTS = 32  # Maximum number of per-request Langfuse clients to cache.
+
+
+class _BoundedClientCache(LRUCache):
+    """LRU cache for Langfuse clients that flushes and shuts down evicted entries.
+
+    When the cache is full and a new client must be inserted, ``cachetools``
+    calls :meth:`popitem` to evict the least-recently-used entry before
+    inserting the new one.  We override that hook to cleanly close the evicted
+    ``Langfuse`` client so file-handles and background threads are not leaked.
+    """
+
+    def popitem(self) -> tuple[tuple[str, str], "Langfuse"]:
+        """Remove the LRU client, flush and shut it down, then return the pair."""
+        key, client = super().popitem()
+        try:
+            client.flush()
+            client.shutdown()
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Error closing evicted Langfuse client for key=%s…: %s", key[0][:8], exc)
+        return key, client
+
+
 @dataclass
 class MCPState:
     """State object passed from lifespan context to tools.
@@ -1122,7 +1170,12 @@ class MCPState:
     performance when querying and filtering observations and exceptions.
     """
 
-    langfuse_client: Langfuse
+    langfuse_client: Langfuse | None
+    host: str = "https://cloud.langfuse.com"
+    timeout: int = 30
+    # Per-request project clients keyed by (public_key, secret_key); bounded to prevent
+    # unbounded growth from arbitrary caller-supplied header pairs.
+    project_clients: _BoundedClientCache = field(default_factory=lambda: _BoundedClientCache(maxsize=_MAX_PROJECT_CLIENTS))
     # LRU caches for efficient exception lookup
     observation_cache: LRUCache = field(
         default_factory=lambda: LRUCache(maxsize=100), metadata={"description": "Cache for observations to reduce API calls"}
@@ -1143,6 +1196,80 @@ class MCPState:
         default=OutputMode.COMPACT,
         metadata={"description": "Default output_mode applied to MCP tool schemas and runtime fallbacks"},
     )
+
+
+def _parse_basic_auth(header: str) -> tuple[str, str]:
+    """Parse an ``Authorization: Basic`` header into ``(public_key, secret_key)``.
+
+    Raises ``ValueError`` on any malformed input so callers fail closed.
+    The secret_key never appears in error messages or logs.
+
+    Args:
+        header: Raw value of the Authorization HTTP header.
+
+    Returns:
+        Tuple of (public_key, secret_key).
+    """
+    scheme, _, credentials = header.partition(" ")
+    if scheme.lower() != "basic":
+        raise ValueError(f"Unsupported Authorization scheme '{scheme}'; expected 'Basic'.")
+    if not credentials.strip():
+        raise ValueError("Authorization header is missing credentials.")
+    try:
+        decoded = base64.b64decode(credentials.strip().encode()).decode("utf-8")
+    except Exception:
+        raise ValueError("Authorization credentials are not valid base64.")
+    if ":" not in decoded:
+        raise ValueError("Authorization credentials must be base64(public_key:secret_key).")
+    public_key, secret_key = decoded.split(":", 1)
+    if not public_key:
+        raise ValueError("public_key in Authorization credentials is empty.")
+    if not secret_key:
+        raise ValueError("secret_key in Authorization credentials is empty.")
+    return public_key, secret_key
+
+
+def _resolve_client(state: "MCPState", ctx: Context) -> Langfuse:
+    """Resolve a Langfuse client from an HTTP Authorization header or fall back to the default.
+
+    Reads ``Authorization: Basic <base64(public_key:secret_key)>`` from the incoming
+    HTTP request. If the header is present, it is parsed strictly — any malformed value
+    raises ``ValueError`` (fail closed). Only a *missing* header falls back to the
+    startup-configured default client.
+    """
+    request = getattr(ctx.request_context, "request", None)
+    if request is not None:
+        auth_header = request.headers.get("authorization")
+        if auth_header is not None:
+            # Raises ValueError on any malformed input — no silent fallback to default.
+            public_key, secret_key = _parse_basic_auth(auth_header)
+            cache_key = (public_key, secret_key)
+            if cache_key not in state.project_clients:
+                init_params = inspect.signature(Langfuse.__init__).parameters
+                langfuse_kwargs: dict[str, Any] = {
+                    "public_key": public_key,
+                    "secret_key": secret_key,
+                    "host": state.host,
+                    "debug": False,
+                    # Disable background batching: per-request clients must not hold
+                    # background threads or accumulate events between MCP tool calls.
+                    "flush_at": 0,
+                    "flush_interval": None,
+                }
+                if "timeout" in init_params:
+                    langfuse_kwargs["timeout"] = state.timeout
+                if "tracing_enabled" in init_params:
+                    langfuse_kwargs["tracing_enabled"] = False
+                logger.info("Creating Langfuse client for public_key=%s…", public_key[:8])
+                state.project_clients[cache_key] = Langfuse(**langfuse_kwargs)
+            return state.project_clients[cache_key]
+    if state.langfuse_client is None:
+        raise ValueError(
+            "No Langfuse credentials. Provide an "
+            "'Authorization: Basic <base64(public_key:secret_key)>' header, "
+            "or set LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY at startup."
+        )
+    return state.langfuse_client
 
 
 class ExceptionCount(BaseModel):
@@ -1218,7 +1345,7 @@ async def _efficient_fetch_observations(
     Returns:
         Dictionary of observation_id -> observation
     """
-    langfuse_client = state.langfuse_client
+    langfuse_client = state.langfuse_client  # type: ignore[assignment]  # dead code, never called
 
     # Use a cache key that includes the time range
     cache_key = f"{from_timestamp.isoformat()}-{to_timestamp.isoformat()}"
@@ -1291,13 +1418,13 @@ async def _efficient_fetch_observations(
     return observations
 
 
-async def _embed_observations_in_traces(state: MCPState, traces: list[Any]) -> None:
+async def _embed_observations_in_traces(langfuse_client: Langfuse, traces: list[Any]) -> None:
     """Fetch and embed full observation objects into traces.
 
     This replaces the observation IDs list with a list of the actual observation objects.
 
     Args:
-        state: MCP state with Langfuse client
+        langfuse_client: Langfuse client to use for fetching observations
         traces: List of trace objects to process
     """
     if not traces:
@@ -1326,7 +1453,7 @@ async def _embed_observations_in_traces(state: MCPState, traces: list[Any]) -> N
         full_observations = []
         for obs_id in observation_refs:
             try:
-                obs = _get_observation(state.langfuse_client, obs_id)
+                obs = _get_observation(langfuse_client, obs_id)
                 obs_data = _sdk_object_to_python(obs)
                 full_observations.append(obs_data)
                 logger.debug(f"Fetched observation {obs_id} for trace {trace.get('id', 'unknown')}")
@@ -1384,7 +1511,7 @@ async def fetch_traces(
 
         # Use the resource-style API when available (Langfuse v3) with fallback to v2 helpers
         trace_items, pagination = _list_traces(
-            state.langfuse_client,
+            _resolve_client(state, ctx),
             limit=limit,
             page=page,
             include_observations=include_observations,
@@ -1402,7 +1529,7 @@ async def fetch_traces(
         # If include_observations is True, fetch and embed the full observation objects
         if include_observations and raw_traces:
             logger.info(f"Fetching full observation details for {sum(len(t.get('observations', [])) for t in raw_traces)} observations")
-            await _embed_observations_in_traces(state, raw_traces)
+            await _embed_observations_in_traces(_resolve_client(state, ctx), raw_traces)
 
         # Process based on output mode
         mode = _ensure_output_mode(output_mode)
@@ -1486,7 +1613,7 @@ async def fetch_trace(
 
     try:
         # Use the resource-style API when available
-        trace = _get_trace(state.langfuse_client, trace_id, include_observations)
+        trace = _get_trace(_resolve_client(state, ctx), trace_id, include_observations)
 
         # Convert response to a serializable format
         raw_trace = _sdk_object_to_python(trace)
@@ -1500,7 +1627,7 @@ async def fetch_trace(
             embedded = raw_trace.get("observations", []) if isinstance(raw_trace, dict) else []
             if embedded and isinstance(embedded[0], str):
                 logger.info(f"Fetching full observation details for {len(embedded)} observations")
-                await _embed_observations_in_traces(state, [raw_trace])
+                await _embed_observations_in_traces(_resolve_client(state, ctx), [raw_trace])
 
         # Process based on output mode
         mode = _ensure_output_mode(output_mode)
@@ -1578,7 +1705,7 @@ async def fetch_observations(
 
     try:
         observation_items, pagination = _list_observations(
-            state.langfuse_client,
+            _resolve_client(state, ctx),
             limit=limit,
             page=page,
             from_start_time=from_start_time,
@@ -1653,7 +1780,7 @@ async def fetch_observation(
 
     try:
         # Use the resource-style API when available
-        observation = _get_observation(state.langfuse_client, observation_id)
+        observation = _get_observation(_resolve_client(state, ctx), observation_id)
 
         # Convert response to a serializable format
         raw_observation = _sdk_object_to_python(observation)
@@ -2065,7 +2192,7 @@ async def fetch_sessions(
 
     try:
         session_items, pagination = _list_sessions(
-            state.langfuse_client,
+            _resolve_client(state, ctx),
             limit=limit,
             page=page,
             from_timestamp=from_timestamp,
@@ -2146,7 +2273,7 @@ async def get_session_details(
     try:
         # Fetch traces with this session ID
         trace_items, pagination = _list_traces(
-            state.langfuse_client,
+            _resolve_client(state, ctx),
             limit=50,
             page=1,
             include_observations=include_observations,
@@ -2181,7 +2308,7 @@ async def get_session_details(
             total_observations = sum(len(t.get("observations", [])) for t in raw_traces)
             if total_observations > 0:
                 logger.info(f"Fetching full observation details for {total_observations} observations across {len(raw_traces)} traces")
-                await _embed_observations_in_traces(state, raw_traces)
+                await _embed_observations_in_traces(_resolve_client(state, ctx), raw_traces)
 
         # Create a session object with all traces that have this session ID
         session = {
@@ -2271,7 +2398,7 @@ async def get_user_sessions(
 
         # Fetch traces for this user
         trace_items, pagination = _list_traces(
-            state.langfuse_client,
+            _resolve_client(state, ctx),
             limit=100,
             page=1,
             include_observations=include_observations,
@@ -2291,7 +2418,7 @@ async def get_user_sessions(
             total_observations = sum(len(t.get("observations", [])) for t in raw_traces)
             if total_observations > 0:
                 logger.info(f"Fetching full observation details for {total_observations} observations across {len(raw_traces)} traces")
-                await _embed_observations_in_traces(state, raw_traces)
+                await _embed_observations_in_traces(_resolve_client(state, ctx), raw_traces)
 
         # Group traces by session_id
         sessions_dict: dict[str, dict[str, Any]] = {}
@@ -2388,7 +2515,7 @@ async def find_exceptions(
     try:
         # Fetch all SPAN observations since they may contain exceptions
         observation_items, _ = _list_observations(
-            state.langfuse_client,
+            _resolve_client(state, ctx),
             limit=100,
             page=1,
             from_start_time=from_timestamp,
@@ -2483,7 +2610,7 @@ async def find_exceptions_in_file(
     try:
         # Fetch all SPAN observations since they may contain exceptions
         observation_items, _ = _list_observations(
-            state.langfuse_client,
+            _resolve_client(state, ctx),
             limit=100,
             page=1,
             from_start_time=from_timestamp,
@@ -2589,7 +2716,7 @@ async def get_exception_details(
 
     try:
         # First get the trace details
-        trace = _get_trace(state.langfuse_client, trace_id, include_observations=False)
+        trace = _get_trace(_resolve_client(state, ctx), trace_id, include_observations=False)
         trace_data = _sdk_object_to_python(trace)
         mode = _ensure_output_mode(output_mode)
         if not trace_data:
@@ -2604,7 +2731,7 @@ async def get_exception_details(
 
         # Get all observations for this trace
         observation_items, _ = _list_observations(
-            state.langfuse_client,
+            _resolve_client(state, ctx),
             limit=100,
             page=1,
             from_start_time=None,
@@ -2720,7 +2847,7 @@ async def get_error_count(
     try:
         # Fetch all SPAN observations since they may contain exceptions
         observation_items, _ = _list_observations(
-            state.langfuse_client,
+            _resolve_client(state, ctx),
             limit=100,
             page=1,
             from_start_time=from_timestamp,
@@ -2938,7 +3065,7 @@ async def get_prompt(
         if version:
             kwargs["version"] = version
 
-        prompt = state.langfuse_client.get_prompt(**kwargs)
+        prompt = _resolve_client(state, ctx).get_prompt(**kwargs)
 
         if prompt is None:
             label_msg = f" with label '{label}'" if label else ""
@@ -3034,16 +3161,16 @@ async def get_prompt_unresolved(
             api_kwargs["version"] = version
 
         # Access the prompts API directly.
-        if not hasattr(state.langfuse_client, "api") or not hasattr(state.langfuse_client.api, "prompts"):
+        if not hasattr(_resolve_client(state, ctx), "api") or not hasattr(_resolve_client(state, ctx).api, "prompts"):
             raise RuntimeError("Langfuse SDK does not expose prompts.get; upgrade the SDK to use this tool.")
-        if not hasattr(state.langfuse_client.api.prompts, "get"):
+        if not hasattr(_resolve_client(state, ctx).api.prompts, "get"):
             raise RuntimeError("Langfuse SDK does not expose prompts.get; upgrade the SDK to use this tool.")
-        supports_resolve = _prompts_get_supports_resolve(state.langfuse_client.api.prompts)
+        supports_resolve = _prompts_get_supports_resolve(_resolve_client(state, ctx).api.prompts)
         try:
             if supports_resolve:
-                prompt_response = _prompts_get(state.langfuse_client.api.prompts, name=name, resolve=False, **api_kwargs)
+                prompt_response = _prompts_get(_resolve_client(state, ctx).api.prompts, name=name, resolve=False, **api_kwargs)
             else:
-                prompt_response = _prompts_get(state.langfuse_client.api.prompts, name=name, **api_kwargs)
+                prompt_response = _prompts_get(_resolve_client(state, ctx).api.prompts, name=name, **api_kwargs)
         except TypeError as e:
             msg = str(e)
             if "resolve" in msg or "unexpected keyword" in msg:
@@ -3112,7 +3239,7 @@ async def list_prompts(
             api_kwargs["tag"] = tag
 
         # Call prompts list API
-        response = state.langfuse_client.api.prompts.list(**api_kwargs)
+        response = _resolve_client(state, ctx).api.prompts.list(**api_kwargs)
 
         # Extract items and pagination
         items, pagination = _extract_items_from_response(response)
@@ -3198,7 +3325,7 @@ async def create_text_prompt(
         if commit_message is not None:
             create_kwargs["commit_message"] = commit_message
 
-        created_prompt = state.langfuse_client.create_prompt(**create_kwargs)
+        created_prompt = _resolve_client(state, ctx).create_prompt(**create_kwargs)
 
         result = {
             "name": getattr(created_prompt, "name", name),
@@ -3270,7 +3397,7 @@ async def create_chat_prompt(
         if commit_message is not None:
             create_kwargs["commit_message"] = commit_message
 
-        created_prompt = state.langfuse_client.create_prompt(**create_kwargs)
+        created_prompt = _resolve_client(state, ctx).create_prompt(**create_kwargs)
 
         prompt_content = None
         if hasattr(created_prompt, "prompt"):
@@ -3329,10 +3456,10 @@ async def update_prompt_labels(
 
         def _get_existing_labels() -> list[str]:
             try:
-                if hasattr(state.langfuse_client, "get_prompt"):
-                    prompt_obj = state.langfuse_client.get_prompt(name=name, version=version)
-                elif hasattr(state.langfuse_client, "api") and hasattr(state.langfuse_client.api, "prompts"):
-                    prompt_obj = _prompts_get(state.langfuse_client.api.prompts, name=name, version=version)
+                if hasattr(_resolve_client(state, ctx), "get_prompt"):
+                    prompt_obj = _resolve_client(state, ctx).get_prompt(name=name, version=version)
+                elif hasattr(_resolve_client(state, ctx), "api") and hasattr(_resolve_client(state, ctx).api, "prompts"):
+                    prompt_obj = _prompts_get(_resolve_client(state, ctx).api.prompts, name=name, version=version)
                 else:
                     prompt_obj = None
             except Exception as exc:
@@ -3364,10 +3491,10 @@ async def update_prompt_labels(
                 return None
 
         updated_prompt = None
-        if hasattr(state.langfuse_client, "update_prompt"):
-            updated_prompt = _try_update(state.langfuse_client.update_prompt)
-        elif hasattr(state.langfuse_client, "api"):
-            api = state.langfuse_client.api
+        if hasattr(_resolve_client(state, ctx), "update_prompt"):
+            updated_prompt = _try_update(_resolve_client(state, ctx).update_prompt)
+        elif hasattr(_resolve_client(state, ctx), "api"):
+            api = _resolve_client(state, ctx).api
             for attr in ("prompt_version", "promptVersion", "prompt_versions", "promptVersions"):
                 if not hasattr(api, attr):
                     continue
@@ -3428,7 +3555,7 @@ async def list_datasets(
         page = _normalize_field_default(page) or 1
         limit = _normalize_field_default(limit) or 50
 
-        response = state.langfuse_client.api.datasets.list(page=page, limit=limit)
+        response = _resolve_client(state, ctx).api.datasets.list(page=page, limit=limit)
 
         items, pagination = _extract_items_from_response(response)
         raw_datasets = [_sdk_object_to_python(d) for d in items]
@@ -3488,7 +3615,7 @@ async def get_dataset(
     state = cast(MCPState, ctx.request_context.lifespan_context)
 
     try:
-        dataset = state.langfuse_client.api.datasets.get(dataset_name=name)
+        dataset = _resolve_client(state, ctx).api.datasets.get(dataset_name=name)
 
         if dataset is None:
             raise LookupError(f"Dataset '{name}' not found")
@@ -3556,7 +3683,7 @@ async def list_dataset_items(
         if source_observation_id:
             api_kwargs["source_observation_id"] = source_observation_id
 
-        response = state.langfuse_client.api.dataset_items.list(**api_kwargs)
+        response = _resolve_client(state, ctx).api.dataset_items.list(**api_kwargs)
 
         items, pagination = _extract_items_from_response(response)
         raw_items = [_sdk_object_to_python(item) for item in items]
@@ -3621,7 +3748,7 @@ async def get_dataset_item(
     state = cast(MCPState, ctx.request_context.lifespan_context)
 
     try:
-        item = state.langfuse_client.api.dataset_items.get(id=item_id)
+        item = _resolve_client(state, ctx).api.dataset_items.get(id=item_id)
 
         if item is None:
             raise LookupError(f"Dataset item '{item_id}' not found")
@@ -3690,9 +3817,9 @@ async def create_dataset(
         # Both supported SDKs (v3 ≥3.11.2, v4 ≥4.0.0) expose the top-level
         # ``Langfuse.create_dataset`` shortcut, so we don't ship a v3/v4 fallback
         # for ``api.datasets.create`` that would never run in practice.
-        if not hasattr(state.langfuse_client, "create_dataset"):
+        if not hasattr(_resolve_client(state, ctx), "create_dataset"):
             raise RuntimeError("Unsupported Langfuse client: missing top-level create_dataset() shortcut")
-        dataset = state.langfuse_client.create_dataset(**kwargs)
+        dataset = _resolve_client(state, ctx).create_dataset(**kwargs)
 
         result = _sdk_object_to_python(dataset)
 
@@ -3769,9 +3896,9 @@ async def create_dataset_item(
         # As with create_dataset above, both supported SDKs expose the top-level
         # ``Langfuse.create_dataset_item`` shortcut, so the api-level fallback
         # would never run for any supported client.
-        if not hasattr(state.langfuse_client, "create_dataset_item"):
+        if not hasattr(_resolve_client(state, ctx), "create_dataset_item"):
             raise RuntimeError("Unsupported Langfuse client: missing top-level create_dataset_item() shortcut")
-        item = state.langfuse_client.create_dataset_item(**kwargs)
+        item = _resolve_client(state, ctx).create_dataset_item(**kwargs)
 
         result = _sdk_object_to_python(item)
 
@@ -3805,7 +3932,7 @@ async def delete_dataset_item(
     state = cast(MCPState, ctx.request_context.lifespan_context)
 
     try:
-        response = state.langfuse_client.api.dataset_items.delete(id=item_id)
+        response = _resolve_client(state, ctx).api.dataset_items.delete(id=item_id)
 
         result = _sdk_object_to_python(response) if response else {}
 
@@ -3837,7 +3964,7 @@ async def list_annotation_queues(
         page = _normalize_field_default(page) or 1
         limit = _normalize_field_default(limit) or 50
 
-        response = state.langfuse_client.api.annotation_queues.list_queues(page=page, limit=limit)
+        response = _resolve_client(state, ctx).api.annotation_queues.list_queues(page=page, limit=limit)
         items, pagination = _extract_items_from_response(response)
         queues = [_sdk_object_to_python(item) for item in items]
         logger.info(f"Listed {len(queues)} annotation queues (page={page}, limit={limit})")
@@ -3866,7 +3993,7 @@ async def create_annotation_queue(
         # don't leak through to the SDK call.
         score_config_ids = _normalize_field_default(score_config_ids) or []
 
-        method = state.langfuse_client.api.annotation_queues.create_queue
+        method = _resolve_client(state, ctx).api.annotation_queues.create_queue
         queue = _compat.call_with_request_or_kwargs(
             method,
             lambda: _build_create_annotation_queue_request(name=name, description=description, score_config_ids=score_config_ids),
@@ -3889,7 +4016,7 @@ async def get_annotation_queue(
     """Get a single annotation queue by ID."""
     state = cast(MCPState, ctx.request_context.lifespan_context)
     try:
-        queue = state.langfuse_client.api.annotation_queues.get_queue(queue_id=queue_id)
+        queue = _resolve_client(state, ctx).api.annotation_queues.get_queue(queue_id=queue_id)
         result = _sdk_object_to_python(queue)
         if not result:
             raise LookupError(f"Annotation queue '{queue_id}' not found")
@@ -3912,7 +4039,7 @@ async def list_annotation_queue_items(
         page = _normalize_field_default(page) or 1
         limit = _normalize_field_default(limit) or 50
 
-        response = state.langfuse_client.api.annotation_queues.list_queue_items(queue_id=queue_id, page=page, limit=limit)
+        response = _resolve_client(state, ctx).api.annotation_queues.list_queue_items(queue_id=queue_id, page=page, limit=limit)
         items, pagination = _extract_items_from_response(response)
         queue_items = [_sdk_object_to_python(item) for item in items]
         logger.info(f"Listed {len(queue_items)} items from annotation queue '{queue_id}'")
@@ -3939,7 +4066,7 @@ async def get_annotation_queue_item(
     """Get a specific annotation queue item by queue and item ID."""
     state = cast(MCPState, ctx.request_context.lifespan_context)
     try:
-        item = state.langfuse_client.api.annotation_queues.get_queue_item(queue_id=queue_id, item_id=item_id)
+        item = _resolve_client(state, ctx).api.annotation_queues.get_queue_item(queue_id=queue_id, item_id=item_id)
         result = _sdk_object_to_python(item)
         if not result:
             raise LookupError(f"Annotation queue item '{item_id}' not found in queue '{queue_id}'")
@@ -3965,7 +4092,7 @@ async def create_annotation_queue_item(
         if status is not None:
             body_kwargs["status"] = status
 
-        method = state.langfuse_client.api.annotation_queues.create_queue_item
+        method = _resolve_client(state, ctx).api.annotation_queues.create_queue_item
         item = _compat.call_with_request_or_kwargs(
             method,
             lambda: _build_create_annotation_queue_item_request(**body_kwargs),
@@ -3989,7 +4116,7 @@ async def update_annotation_queue_item(
     """Update the status of an annotation queue item."""
     state = cast(MCPState, ctx.request_context.lifespan_context)
     try:
-        method = state.langfuse_client.api.annotation_queues.update_queue_item
+        method = _resolve_client(state, ctx).api.annotation_queues.update_queue_item
         item = _compat.call_with_request_or_kwargs(
             method,
             lambda: _build_update_annotation_queue_item_request(status=status),
@@ -4012,7 +4139,7 @@ async def delete_annotation_queue_item(
     """Delete an annotation queue item."""
     state = cast(MCPState, ctx.request_context.lifespan_context)
     try:
-        response = state.langfuse_client.api.annotation_queues.delete_queue_item(queue_id=queue_id, item_id=item_id)
+        response = _resolve_client(state, ctx).api.annotation_queues.delete_queue_item(queue_id=queue_id, item_id=item_id)
         result = _sdk_object_to_python(response) if response else {}
         logger.info(f"Deleted annotation queue item '{item_id}' in queue '{queue_id}'")
         return {"data": result, "metadata": {"deleted": True, "queue_id": queue_id, "item_id": item_id}}
@@ -4065,7 +4192,7 @@ async def create_annotation_queue_assignment(
     """Assign a user to an annotation queue."""
     state = cast(MCPState, ctx.request_context.lifespan_context)
     try:
-        method = state.langfuse_client.api.annotation_queues.create_queue_assignment
+        method = _resolve_client(state, ctx).api.annotation_queues.create_queue_assignment
         response = _compat.call_with_request_or_kwargs(
             method,
             lambda: _build_annotation_queue_assignment_request(user_id),
@@ -4088,7 +4215,7 @@ async def delete_annotation_queue_assignment(
     """Unassign a user from an annotation queue."""
     state = cast(MCPState, ctx.request_context.lifespan_context)
     try:
-        method = state.langfuse_client.api.annotation_queues.delete_queue_assignment
+        method = _resolve_client(state, ctx).api.annotation_queues.delete_queue_assignment
         response = _compat.call_with_request_or_kwargs(
             method,
             lambda: _build_annotation_queue_assignment_request(user_id),
@@ -4172,7 +4299,7 @@ async def list_scores_v2(
         }
         api_kwargs = {k: v for k, v in api_kwargs.items() if v is not None}
 
-        scores_namespace = _compat.get_score_namespace(state.langfuse_client)
+        scores_namespace = _compat.get_score_namespace(_resolve_client(state, ctx))
         if scores_namespace is None:
             raise RuntimeError("Unsupported Langfuse client: no scores namespace exposed")
         list_method = _compat.get_score_list_method(scores_namespace)
@@ -4204,7 +4331,7 @@ async def get_score_v2(
     """Get a score by ID from the scores API (v3 ``score_v_2`` or v4 ``scores``)."""
     state = cast(MCPState, ctx.request_context.lifespan_context)
     try:
-        scores_namespace = _compat.get_score_namespace(state.langfuse_client)
+        scores_namespace = _compat.get_score_namespace(_resolve_client(state, ctx))
         if scores_namespace is None or not hasattr(scores_namespace, "get_by_id"):
             raise RuntimeError("Unsupported Langfuse client: no get_by_id method on scores namespace")
         score = scores_namespace.get_by_id(score_id=score_id)
@@ -4219,8 +4346,8 @@ async def get_score_v2(
 
 
 def app_factory(
-    public_key: str,
-    secret_key: str,
+    public_key: str | None,
+    secret_key: str | None,
     host: str,
     cache_size: int = 100,
     dump_dir: str | None = None,
@@ -4228,6 +4355,8 @@ def app_factory(
     timeout: int = 30,
     read_only: bool = False,
     default_output_mode: OutputMode = OutputMode.COMPACT,
+    bind_host: str = "127.0.0.1",
+    port: int = 8000,
 ) -> FastMCP:
     """Create a FastMCP server with Langfuse tools.
 
@@ -4242,6 +4371,9 @@ def app_factory(
         timeout: API request timeout in seconds (default: 30). The Langfuse SDK defaults to 5s which is too aggressive.
         read_only: If True, disable all write operations (create/update/delete tools).
         default_output_mode: Default output_mode exposed in MCP tool schemas.
+        bind_host: Bind address for HTTP transport (default: 127.0.0.1, localhost only).
+            Use 0.0.0.0 only behind an authenticating reverse-proxy or trusted network.
+        port: Port for HTTP transport (default: 8000).
     """
     if enabled_tools is None:
         enabled_tools = ALL_TOOL_GROUPS
@@ -4252,22 +4384,27 @@ def app_factory(
 
     @asynccontextmanager
     async def lifespan(server: FastMCP) -> AsyncIterator[MCPState]:
-        init_params = inspect.signature(Langfuse.__init__).parameters
-        langfuse_kwargs = {
-            "public_key": public_key,
-            "secret_key": secret_key,
-            "host": host,
-            "debug": False,
-            "flush_at": 0,
-            "flush_interval": None,
-        }
-        if "timeout" in init_params:
-            langfuse_kwargs["timeout"] = timeout
-        if "tracing_enabled" in init_params:
-            langfuse_kwargs["tracing_enabled"] = False
+        default_client: Langfuse | None = None
+        if public_key and secret_key:
+            init_params = inspect.signature(Langfuse.__init__).parameters
+            langfuse_kwargs: dict[str, Any] = {
+                "public_key": public_key,
+                "secret_key": secret_key,
+                "host": host,
+                "debug": False,
+                "flush_at": 0,
+                "flush_interval": None,
+            }
+            if "timeout" in init_params:
+                langfuse_kwargs["timeout"] = timeout
+            if "tracing_enabled" in init_params:
+                langfuse_kwargs["tracing_enabled"] = False
+            default_client = Langfuse(**langfuse_kwargs)
 
         state = MCPState(
-            langfuse_client=Langfuse(**langfuse_kwargs),
+            langfuse_client=default_client,
+            host=host,
+            timeout=timeout,
             observation_cache=LRUCache(maxsize=cache_size),
             file_to_observations_map=LRUCache(maxsize=cache_size),
             exception_type_map=LRUCache(maxsize=cache_size),
@@ -4278,11 +4415,18 @@ def app_factory(
         try:
             yield state
         finally:
-            logger.info("Cleaning up Langfuse client")
-            state.langfuse_client.flush()
-            state.langfuse_client.shutdown()
+            logger.info("Cleaning up Langfuse clients")
+            all_clients = list(state.project_clients.values())
+            if state.langfuse_client is not None:
+                all_clients.append(state.langfuse_client)
+            for client in all_clients:
+                try:
+                    client.flush()
+                    client.shutdown()
+                except Exception as e:
+                    logger.warning(f"Error shutting down Langfuse client: {e}")
 
-    mcp = FastMCP("Langfuse MCP Server", lifespan=lifespan)
+    mcp = FastMCP("Langfuse MCP Server", lifespan=lifespan, host=bind_host, port=port)
 
     # Tool function lookup
     tool_funcs = {
@@ -4405,9 +4549,15 @@ def main():
         timeout=args.timeout,
         read_only=args.read_only,
         default_output_mode=_ensure_output_mode(args.default_output_mode),
+        bind_host=args.bind_host,
+        port=args.port,
     )
 
-    app.run(transport="stdio")
+    if args.transport == "streamable-http":
+        logger.info(f"Starting HTTP transport on {args.bind_host}:{args.port}")
+        app.run(transport="streamable-http")
+    else:
+        app.run(transport="stdio")
 
 
 if __name__ == "__main__":
