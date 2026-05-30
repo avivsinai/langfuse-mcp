@@ -279,6 +279,4 @@ class TestParseBasicAuth:
         for header in cases:
             with pytest.raises(ValueError) as exc_info:
                 _parse_basic_auth(header)
-            assert secret not in str(exc_info.value), (
-                f"Secret leaked into error message for header={header!r}"
-            )
+            assert secret not in str(exc_info.value), f"Secret leaked into error message for header={header!r}"

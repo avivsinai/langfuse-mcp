@@ -1091,9 +1091,7 @@ class MCPState:
     timeout: int = 30
     # Per-request project clients keyed by (public_key, secret_key); bounded to prevent
     # unbounded growth from arbitrary caller-supplied header pairs.
-    project_clients: _BoundedClientCache = field(
-        default_factory=lambda: _BoundedClientCache(maxsize=_MAX_PROJECT_CLIENTS)
-    )
+    project_clients: _BoundedClientCache = field(default_factory=lambda: _BoundedClientCache(maxsize=_MAX_PROJECT_CLIENTS))
     # LRU caches for efficient exception lookup
     observation_cache: LRUCache = field(
         default_factory=lambda: LRUCache(maxsize=100), metadata={"description": "Cache for observations to reduce API calls"}
