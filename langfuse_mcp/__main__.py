@@ -347,14 +347,14 @@ def _build_arg_parser(env_defaults: dict[str, Any]) -> argparse.ArgumentParser:
         type=str,
         default=env_defaults["public_key"],
         required=False,
-        help="Langfuse public key (optional if provided via x-langfuse-public-key HTTP header)",
+        help="Langfuse public key (optional if provided via Authorization: Basic <base64(public_key:secret_key)> HTTP header)",
     )
     parser.add_argument(
         "--secret-key",
         type=str,
         default=env_defaults["secret_key"],
         required=False,
-        help="Langfuse secret key (optional if provided via x-langfuse-secret-key HTTP header)",
+        help="Langfuse secret key (optional if provided via Authorization: Basic <base64(public_key:secret_key)> HTTP header)",
     )
     parser.add_argument("--host", type=str, default=env_defaults["host"], help="Langfuse host URL")
     parser.add_argument(

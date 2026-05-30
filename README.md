@@ -187,7 +187,11 @@ docker run -d -p 127.0.0.1:8000:8000 \
 > **Security note:** `--bind-host 0.0.0.0` exposes the port on all interfaces. In
 > production, place the server behind a TLS-terminating reverse proxy (nginx, Caddy,
 > Cloudflare Tunnel) that enforces HTTPS. The `Authorization` header containing your
-> keys is transmitted in plaintext over plain HTTP.
+> keys is transmitted in plaintext over plain HTTP. If startup credentials are set,
+> the proxy must enforce authentication; otherwise unauthenticated callers without an
+> `Authorization` header can use the default project. For shared public HTTP deployments,
+> omit default `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` credentials unless the
+> fronting proxy authenticates every request.
 
 Register each project separately in your MCP client, passing its credentials as a
 `Basic` auth header (`base64(public_key:secret_key)`):
@@ -199,11 +203,11 @@ echo -n "pk-lf-YOURKEY:sk-lf-YOURSECRET" | base64
 
 # Register in Claude Code (one entry per project):
 claude mcp add langfuse-audit \
-  --transport http http://localhost:8000 \
+  --transport http http://localhost:8000/mcp \
   -H "Authorization: Basic cGstbGYtWU9VUktFWTpzay1sZi1ZT1VSU0VDUkVU"
 
 claude mcp add langfuse-staging \
-  --transport http http://localhost:8000 \
+  --transport http http://localhost:8000/mcp \
   -H "Authorization: Basic <base64 for staging project>"
 ```
 
