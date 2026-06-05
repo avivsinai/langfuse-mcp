@@ -103,6 +103,50 @@ def _seed_route_decision_observations(client):
     )
 
 
+def _seed_emitted_failed_route_decision(client):
+    """Add the real WisePick-emitted no-route span from issue #43 as a fixture.
+
+    Unlike the synthetic ``route_ok`` / ``route_low`` seeds, this is the exact
+    failed-path envelope a producing runtime emits: full span envelope with parent
+    linkage, a W3C ``traceparent``, the stable protocol fields
+    (``router_version`` / ``policy_version`` / ``decision_method`` /
+    ``feedback_expected``), and null selected-decision fields for the no-match case.
+    It exercises metadata fields the synthetic seeds never set.
+    """
+    start = datetime(2026, 5, 29, 10, 45, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 5, 29, 10, 45, 5, 78000, tzinfo=timezone.utc)
+    client._store.observations["obs_failed_route_19c5fa4"] = FakeObservation(
+        id="obs_failed_route_19c5fa4",
+        trace_id="trace_wisepick_eval_002",
+        parent_observation_id="obs_parent_agent_turn_99f",
+        type="SPAN",
+        name="mcp.route_decision",
+        status="SUCCEEDED",
+        start_time=start,
+        end_time=end,
+        metadata={
+            "schema_version": "mcp.route_decision.v1",
+            "traceparent": "00-trace_wisepick_eval_002-span_failed_route_19c5fa4-01",
+            "decision_id": "dec_19c5fa40a0f64ff4",
+            "router_name": "wisepick",
+            "router_version": "0.1.6",
+            "policy_version": "bootstrap-v0",
+            "decision_method": "ecu_deterministic_routing",
+            "capability_id": None,
+            "provider": None,
+            "execution_type": None,
+            "callable": False,
+            "selected_tool": None,
+            "confidence": 0.0008,
+            "latency_ms": 5078,
+            "candidate_count": 0,
+            "top_candidates": [],
+            "reason_codes": ["no_match_found"],
+            "feedback_expected": False,
+        },
+    )
+
+
 def test_fetch_traces_with_observations(state):
     """fetch_traces should use the v3 traces resource and embed observations."""
     from langfuse_mcp.__main__ import fetch_traces
@@ -284,6 +328,71 @@ def test_find_route_decisions_excludes_non_route_metadata(observation_state):
 
     assert result["metadata"]["item_count"] == 0
     assert result["data"] == []
+
+
+def test_get_route_decision_round_trips_real_emitted_failed_path(observation_state):
+    """The real WisePick failed-path envelope (issue #43) round-trips through the read layer.
+
+    Guards the full no-route contract end to end: span envelope linkage, the stable
+    protocol fields the synthetic seeds never set, and null selected-decision fields.
+    """
+    from langfuse_mcp.__main__ import get_route_decision
+
+    _seed_emitted_failed_route_decision(observation_state.langfuse_client)
+    ctx = FakeContext(observation_state)
+    result = asyncio.run(get_route_decision(ctx, decision_id="dec_19c5fa40a0f64ff4", age=30, output_mode="compact"))
+
+    assert result["metadata"]["found"] is True
+    decision = result["data"]
+    # Read-layer mapping preserves the schema contract the filter keyed on.
+    assert decision["schema_version"] == "mcp.route_decision.v1"
+    # Span envelope linkage.
+    assert decision["trace_id"] == "trace_wisepick_eval_002"
+    assert decision["parent_observation_id"] == "obs_parent_agent_turn_99f"
+    assert decision["metadata"]["traceparent"] == "00-trace_wisepick_eval_002-span_failed_route_19c5fa4-01"
+    # Stable protocol fields not covered by the synthetic seeds.
+    assert decision["router_version"] == "0.1.6"
+    assert decision["policy_version"] == "bootstrap-v0"
+    assert decision["decision_method"] == "ecu_deterministic_routing"
+    assert decision["feedback_expected"] is False
+    # No-route contract: null selected-decision fields, no candidates.
+    assert decision["callable"] is False
+    assert decision["selected_tool"] is None
+    assert decision["capability_id"] is None
+    assert decision["provider"] is None
+    assert decision["execution_type"] is None
+    assert decision["confidence"] == 0.0008
+    assert decision["candidate_count"] == 0
+    assert decision["top_candidates"] == []
+    assert decision["reason_codes"] == ["no_match_found"]
+
+
+def test_find_low_confidence_flags_real_emitted_failed_path(observation_state):
+    """The real failed-path envelope is surfaced as both low-confidence and uncallable."""
+    from langfuse_mcp.__main__ import find_low_confidence_route_decisions
+
+    _seed_emitted_failed_route_decision(observation_state.langfuse_client)
+    ctx = FakeContext(observation_state)
+    result = asyncio.run(
+        find_low_confidence_route_decisions(
+            ctx,
+            age=30,
+            trace_id=None,
+            session_id=None,
+            router_name="wisepick",
+            provider=None,
+            capability_id=None,
+            max_confidence=0.5,
+            include_uncallable=True,
+            page=1,
+            limit=50,
+            output_mode="compact",
+        )
+    )
+
+    assert result["metadata"]["item_count"] == 1
+    assert result["data"][0]["decision_id"] == "dec_19c5fa40a0f64ff4"
+    assert result["data"][0]["callable"] is False
 
 
 def test_summarize_route_decisions_counts_low_confidence(observation_state):
