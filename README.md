@@ -21,7 +21,7 @@ Use `langfuse-mcp` from Claude Code, Codex, Cursor, or any MCP client to query t
 
 - [Quick Start](#quick-start)
 - [Agent Skill](#agent-skill)
-- [Tools](#tools-37-total)
+- [Tools](#tools-46-total)
 - [Selective Tool Loading](#selective-tool-loading)
 - [Read-Only Mode](#read-only-mode)
 - [Other Clients](#other-clients)
@@ -104,7 +104,7 @@ why was this user's session slow?
 
 The MCP server provides the tools; the skill provides the agent-facing workflow. See [`skills/langfuse/SKILL.md`](skills/langfuse/SKILL.md), [`skills/langfuse/references/setup.md`](skills/langfuse/references/setup.md), and [`skills/langfuse/references/tool-reference.md`](skills/langfuse/references/tool-reference.md).
 
-## Tools (41 total)
+## Tools (46 total)
 
 | Category | Tools |
 |----------|-------|
@@ -114,7 +114,7 @@ The MCP server provides the tools; the skill provides the agent-facing workflow.
 | Sessions | `fetch_sessions`, `get_session_details`, `get_user_sessions` |
 | Exceptions | `find_exceptions`, `find_exceptions_in_file`, `get_exception_details`, `get_error_count` |
 | Prompts | `list_prompts`, `get_prompt`, `get_prompt_unresolved`, `create_text_prompt`, `create_chat_prompt`, `update_prompt_labels` |
-| Datasets | `list_datasets`, `get_dataset`, `list_dataset_items`, `get_dataset_item`, `create_dataset`, `create_dataset_item`, `delete_dataset_item` |
+| Datasets | `list_datasets`, `get_dataset`, `list_dataset_items`, `get_dataset_item`, `create_dataset`, `create_dataset_item`, `delete_dataset_item`, `list_dataset_runs`, `get_dataset_run`, `list_dataset_run_items`, `create_dataset_run_item`, `delete_dataset_run` |
 | Annotation Queues | `list_annotation_queues`, `create_annotation_queue`, `get_annotation_queue`, `list_annotation_queue_items`, `get_annotation_queue_item`, `create_annotation_queue_item`, `update_annotation_queue_item`, `delete_annotation_queue_item`, `create_annotation_queue_assignment`, `delete_annotation_queue_assignment` |
 | Scores | `list_scores_v2`, `get_score_v2` |
 | Schema | `get_data_schema` |
@@ -157,7 +157,7 @@ langfuse-mcp --read-only
 LANGFUSE_MCP_READ_ONLY=true langfuse-mcp
 ```
 
-This disables: `create_text_prompt`, `create_chat_prompt`, `update_prompt_labels`, `create_dataset`, `create_dataset_item`, `delete_dataset_item`, `create_annotation_queue`, `create_annotation_queue_item`, `update_annotation_queue_item`, `delete_annotation_queue_item`, `create_annotation_queue_assignment`, `delete_annotation_queue_assignment`
+This disables: `create_text_prompt`, `create_chat_prompt`, `update_prompt_labels`, `create_dataset`, `create_dataset_item`, `delete_dataset_item`, `create_dataset_run_item`, `delete_dataset_run`, `create_annotation_queue`, `create_annotation_queue_item`, `update_annotation_queue_item`, `delete_annotation_queue_item`, `create_annotation_queue_assignment`, `delete_annotation_queue_assignment`
 
 ## Default Output Mode
 

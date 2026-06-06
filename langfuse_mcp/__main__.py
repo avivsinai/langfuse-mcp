@@ -134,6 +134,12 @@ TOOL_GROUPS = {
         "create_dataset",
         "create_dataset_item",
         "delete_dataset_item",
+        # Dataset-run tools: Codex dataset-runs lane. Claude owns final cross-branch merge.
+        "list_dataset_runs",
+        "get_dataset_run",
+        "list_dataset_run_items",
+        "create_dataset_run_item",
+        "delete_dataset_run",
     ],
     "annotation_queues": [
         "list_annotation_queues",
@@ -160,6 +166,9 @@ WRITE_TOOLS = {
     "create_dataset",
     "create_dataset_item",
     "delete_dataset_item",
+    # Dataset-run writes: Codex dataset-runs lane. Claude owns final cross-branch merge.
+    "create_dataset_run_item",
+    "delete_dataset_run",
     "create_annotation_queue",
     "create_annotation_queue_item",
     "update_annotation_queue_item",
@@ -3948,6 +3957,214 @@ async def delete_dataset_item(
         raise
 
 
+async def list_dataset_runs(
+    ctx: Context,
+    dataset_name: str = Field(..., description="The name of the dataset to list runs from"),
+    page: int = Field(1, ge=1, description="Page number for pagination (starts at 1)"),
+    limit: int = Field(50, ge=1, le=100, description="Items per page (max 100)"),
+) -> ResponseDict:
+    """List runs for a dataset by dataset name."""
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+
+    try:
+        page = _normalize_field_default(page) or 1
+        limit = _normalize_field_default(limit) or 50
+
+        response = _resolve_client(state, ctx).api.datasets.get_runs(dataset_name, page=page, limit=limit)
+        items, pagination = _extract_items_from_response(response)
+        runs = [_sdk_object_to_python(item) for item in items]
+
+        logger.info(f"Listed {len(runs)} dataset runs for '{dataset_name}' (page={page}, limit={limit})")
+
+        return {
+            "data": runs,
+            "metadata": {
+                "dataset_name": dataset_name,
+                "page": page,
+                "limit": limit,
+                "item_count": len(runs),
+                "total": pagination.get("total"),
+            },
+        }
+    except Exception as e:
+        logger.error(f"Error listing dataset runs for '{dataset_name}': {e}")
+        raise
+
+
+async def get_dataset_run(
+    ctx: Context,
+    dataset_name: str = Field(..., description="The name of the dataset that owns the run"),
+    run_name: str = Field(..., description="The dataset run name to fetch"),
+    output_mode: OUTPUT_MODE_LITERAL = Field(
+        "compact",
+        description="Output format: 'compact' truncates, 'full_json_string' returns full data, 'full_json_file' writes to file",
+    ),
+) -> ResponseDict | str:
+    """Get a dataset run, including any run items returned by the SDK."""
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+
+    try:
+        run = _resolve_client(state, ctx).api.datasets.get_run(dataset_name, run_name)
+        result = _sdk_object_to_python(run)
+        if not result:
+            raise LookupError(f"Dataset run '{run_name}' not found in dataset '{dataset_name}'")
+
+        mode = _ensure_output_mode(output_mode)
+        processed_result, file_meta = process_data_with_mode(result, mode, f"dataset_run_{dataset_name}_{run_name}", state)
+
+        logger.info(f"Fetched dataset run '{run_name}' from '{dataset_name}'")
+
+        if mode == OutputMode.FULL_JSON_STRING:
+            return processed_result
+
+        metadata_block = {"dataset_name": dataset_name, "run_name": run_name, "output_mode": mode.value}
+        if file_meta:
+            metadata_block.update(file_meta)
+
+        return {"data": processed_result, "metadata": metadata_block}
+    except Exception as e:
+        logger.error(f"Error fetching dataset run '{run_name}' from '{dataset_name}': {e}")
+        raise
+
+
+async def list_dataset_run_items(
+    ctx: Context,
+    dataset_id: str = Field(..., description="Dataset ID that owns the run items"),
+    run_name: str = Field(..., description="Dataset run name to list items from"),
+    page: int = Field(1, ge=1, description="Page number for pagination (starts at 1)"),
+    limit: int = Field(50, ge=1, le=100, description="Items per page (max 100)"),
+    output_mode: OUTPUT_MODE_LITERAL = Field(
+        "compact",
+        description="Output format: 'compact' truncates, 'full_json_string' returns full data, 'full_json_file' writes to file",
+    ),
+) -> ResponseDict | str:
+    """List dataset run items by dataset ID and run name."""
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+
+    try:
+        page = _normalize_field_default(page) or 1
+        limit = _normalize_field_default(limit) or 50
+
+        response = _resolve_client(state, ctx).api.dataset_run_items.list(
+            dataset_id=dataset_id,
+            run_name=run_name,
+            page=page,
+            limit=limit,
+        )
+        items, pagination = _extract_items_from_response(response)
+        raw_items = [_sdk_object_to_python(item) for item in items]
+
+        mode = _ensure_output_mode(output_mode)
+        processed_items, file_meta = process_data_with_mode(raw_items, mode, f"dataset_run_items_{dataset_id}_{run_name}", state)
+
+        logger.info(f"Listed {len(raw_items)} dataset run items for dataset '{dataset_id}' run '{run_name}'")
+
+        if mode == OutputMode.FULL_JSON_STRING:
+            return processed_items
+
+        metadata_block = {
+            "dataset_id": dataset_id,
+            "run_name": run_name,
+            "page": page,
+            "limit": limit,
+            "item_count": len(raw_items),
+            "total": pagination.get("total"),
+            "output_mode": mode.value,
+        }
+        if file_meta:
+            metadata_block.update(file_meta)
+
+        return {"data": processed_items, "metadata": metadata_block}
+    except Exception as e:
+        logger.error(f"Error listing dataset run items for dataset '{dataset_id}' run '{run_name}': {e}")
+        raise
+
+
+async def create_dataset_run_item(
+    ctx: Context,
+    run_name: str = Field(..., description="Dataset run name to append this item to"),
+    dataset_item_id: str = Field(..., description="Dataset item ID to include in the run"),
+    run_description: str | None = Field(None, description="Optional run description"),
+    metadata: dict[str, Any] | None = Field(None, description="Optional run-item metadata"),
+    observation_id: str | None = Field(None, description="Optional observation ID linked to this run item"),
+    trace_id: str | None = Field(None, description="Optional trace ID linked to this run item"),
+    dataset_version: str | None = Field(None, description="Optional ISO8601 dataset version timestamp"),
+    created_at: str | None = Field(None, description="Optional ISO8601 creation timestamp"),
+) -> ResponseDict:
+    """Create a dataset run item and flush the ingestion write."""
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+
+    try:
+        run_description = _normalize_field_default(run_description)
+        metadata = _normalize_field_default(metadata)
+        observation_id = _normalize_field_default(observation_id)
+        trace_id = _normalize_field_default(trace_id)
+        dataset_version_dt = _coerce_optional_datetime(dataset_version, "dataset_version")
+        created_at_dt = _coerce_optional_datetime(created_at, "created_at")
+
+        kwargs: dict[str, Any] = {
+            "run_name": run_name,
+            "dataset_item_id": dataset_item_id,
+        }
+        if run_description is not None:
+            kwargs["run_description"] = run_description
+        if metadata is not None:
+            kwargs["metadata"] = metadata
+        if observation_id is not None:
+            kwargs["observation_id"] = observation_id
+        if trace_id is not None:
+            kwargs["trace_id"] = trace_id
+        if dataset_version_dt is not None:
+            kwargs["dataset_version"] = dataset_version_dt
+        if created_at_dt is not None:
+            kwargs["created_at"] = created_at_dt
+
+        client = _resolve_client(state, ctx)
+        response = client.api.dataset_run_items.create(**kwargs)
+        if hasattr(client, "flush"):
+            client.flush()
+
+        result = _sdk_object_to_python(response) if response is not None else _sdk_object_to_python(kwargs)
+
+        logger.info(f"Submitted dataset run item for run '{run_name}' dataset_item_id='{dataset_item_id}'")
+
+        return {
+            "data": result,
+            "metadata": {
+                "submitted": True,
+                "run_name": run_name,
+                "dataset_item_id": dataset_item_id,
+                "submitted_fields": sorted(kwargs.keys()),
+            },
+        }
+    except Exception as e:
+        logger.error(f"Error creating dataset run item for run '{run_name}' item '{dataset_item_id}': {e}")
+        raise
+
+
+async def delete_dataset_run(
+    ctx: Context,
+    dataset_name: str = Field(..., description="The name of the dataset that owns the run"),
+    run_name: str = Field(..., description="The dataset run name to delete"),
+) -> ResponseDict:
+    """Delete a dataset run by dataset name and run name."""
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+
+    try:
+        response = _resolve_client(state, ctx).api.datasets.delete_run(dataset_name, run_name)
+        result = _sdk_object_to_python(response) if response else {}
+
+        logger.info(f"Deleted dataset run '{run_name}' from '{dataset_name}'")
+
+        return {
+            "data": result,
+            "metadata": {"deleted": True, "dataset_name": dataset_name, "run_name": run_name},
+        }
+    except Exception as e:
+        logger.error(f"Error deleting dataset run '{run_name}' from '{dataset_name}': {e}")
+        raise
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Annotation Queue Tools
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4460,6 +4677,12 @@ def app_factory(
         "create_dataset": create_dataset,
         "create_dataset_item": create_dataset_item,
         "delete_dataset_item": delete_dataset_item,
+        # Dataset-run tools: Codex dataset-runs lane. Claude owns final cross-branch merge.
+        "list_dataset_runs": list_dataset_runs,
+        "get_dataset_run": get_dataset_run,
+        "list_dataset_run_items": list_dataset_run_items,
+        "create_dataset_run_item": create_dataset_run_item,
+        "delete_dataset_run": delete_dataset_run,
         # Annotation queue tools
         "list_annotation_queues": list_annotation_queues,
         "create_annotation_queue": create_annotation_queue,
