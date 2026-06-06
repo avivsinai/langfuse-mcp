@@ -216,3 +216,78 @@ def test_get_metrics_method_prefers_v2_then_legacy_then_none():
 
     neither = SimpleNamespace(api=SimpleNamespace())
     assert _compat.get_metrics_method(neither) is None
+
+
+def test_query_metrics_falls_back_to_legacy_on_v2_404(tmp_path):
+    """A v2 404 (Cloud-only) should retry the legacy endpoint when it is available.
+
+    On SDK 3.11.2 the metrics_v_2 namespace is always present, so a self-hosted 404 must
+    not fail closed while the legacy /api/public/metrics endpoint exists and accepts the
+    same views.
+    """
+    from langfuse_mcp.__main__ import query_metrics
+
+    class _ApiError(Exception):
+        status_code = 404
+
+    class _V2:
+        def metrics(self, *, query):
+            raise _ApiError()
+
+    class _Legacy:
+        def __init__(self):
+            self.last_query = None
+
+        def metrics(self, *, query):
+            self.last_query = query
+            return {"data": [{"providedModelName": "claude-opus-4-8", "count_count": 3}]}
+
+    legacy = _Legacy()
+
+    class _Client:
+        def __init__(self):
+            self.api = SimpleNamespace(metrics_v_2=_V2(), metrics=legacy)
+
+        def flush(self):  # pragma: no cover - cleanup shim
+            pass
+
+        def shutdown(self):  # pragma: no cover - cleanup shim
+            pass
+
+    ctx = FakeContext(_state(tmp_path, _Client()))
+    result = asyncio.run(query_metrics(ctx, view="observations", metrics=[{"measure": "count", "aggregation": "count"}]))
+    assert legacy.last_query is not None, "legacy endpoint should have been invoked after the v2 404"
+    assert result["metadata"]["metrics_endpoint"] == "legacy"
+    assert result["data"][0]["count_count"] == 3
+
+
+def test_query_metrics_rejects_malformed_filter(tmp_path):
+    """A filter object missing required keys should raise locally."""
+    from langfuse_mcp.__main__ import query_metrics
+
+    ctx = FakeContext(_state(tmp_path))
+    with pytest.raises(ValueError, match="filter"):
+        asyncio.run(
+            query_metrics(
+                ctx,
+                view="observations",
+                metrics=[{"measure": "count", "aggregation": "count"}],
+                filters=[{"column": "userId", "operator": "="}],  # missing value + type
+            )
+        )
+
+
+def test_query_metrics_rejects_bad_order_by_direction(tmp_path):
+    """An order_by item with an invalid direction should raise locally."""
+    from langfuse_mcp.__main__ import query_metrics
+
+    ctx = FakeContext(_state(tmp_path))
+    with pytest.raises(ValueError, match="order_by"):
+        asyncio.run(
+            query_metrics(
+                ctx,
+                view="observations",
+                metrics=[{"measure": "count", "aggregation": "count"}],
+                order_by=[{"field": "count", "direction": "upward"}],
+            )
+        )

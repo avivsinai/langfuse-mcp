@@ -103,6 +103,22 @@ def get_metrics_method(client: Any) -> tuple[Callable[..., Any], Literal["v2", "
     return None
 
 
+def get_legacy_metrics_method(client: Any) -> Callable[..., Any] | None:
+    """Return the legacy metrics callable (``client.api.metrics.metrics``) or ``None``.
+
+    Used as the v2-404 fallback: ``/api/public/metrics`` accepts the same query envelope
+    and supports the same ``observations`` / ``scores-numeric`` / ``scores-categorical``
+    views (plus ``traces``, which the caller does not pass). Distinct from
+    ``get_metrics_method`` because that one returns v2 whenever the v2 *namespace* exists
+    (always true on SDK 3.11.2), which is exactly when the runtime 404 fallback is needed.
+    """
+    api = getattr(client, "api", None)
+    legacy = getattr(api, "metrics", None) if api is not None else None
+    if legacy is not None and hasattr(legacy, "metrics"):
+        return legacy.metrics
+    return None
+
+
 def get_observations_single_fetcher(client: Any) -> Callable[[str], Any] | None:
     """Return a callable ``f(observation_id) -> observation`` or ``None``.
 

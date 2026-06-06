@@ -21,7 +21,7 @@ Use `langfuse-mcp` from Claude Code, Codex, Cursor, or any MCP client to query t
 
 - [Quick Start](#quick-start)
 - [Agent Skill](#agent-skill)
-- [Tools](#tools-46-total)
+- [Tools](#tools-48-total)
 - [Selective Tool Loading](#selective-tool-loading)
 - [Read-Only Mode](#read-only-mode)
 - [Other Clients](#other-clients)

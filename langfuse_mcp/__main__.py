@@ -4689,10 +4689,18 @@ async def query_metrics(
                 raise ValueError(f"'{field_name}' is high-cardinality and cannot be a grouping dimension; pass it as a filter instead")
             dimension_objs.append({"field": field_name})
 
-    if filters is not None and not isinstance(filters, list):
-        raise ValueError("filters must be a list of filter objects")
-    if order_by is not None and not isinstance(order_by, list):
-        raise ValueError("order_by must be a list of {'field','direction'} objects")
+    if filters is not None:
+        if not isinstance(filters, list):
+            raise ValueError("filters must be a list of filter objects")
+        for filter_obj in filters:
+            if not isinstance(filter_obj, dict) or not {"column", "operator", "value", "type"} <= filter_obj.keys():
+                raise ValueError("each filter must be an object with 'column', 'operator', 'value', 'type' (and optional 'key')")
+    if order_by is not None:
+        if not isinstance(order_by, list):
+            raise ValueError("order_by must be a list of {'field','direction'} objects")
+        for order_obj in order_by:
+            if not isinstance(order_obj, dict) or "field" not in order_obj or order_obj.get("direction") not in ("asc", "desc"):
+                raise ValueError("each order_by item must be an object with 'field' and 'direction' in {'asc','desc'}")
     if time_granularity is not None and time_granularity not in METRICS_GRANULARITIES:
         raise ValueError(f"time_granularity must be one of {METRICS_GRANULARITIES}")
 
@@ -4718,24 +4726,35 @@ async def query_metrics(
     if order_by:
         query["orderBy"] = order_by
 
-    resolved = _compat.get_metrics_method(_resolve_client(state, ctx))
+    client = _resolve_client(state, ctx)
+    resolved = _compat.get_metrics_method(client)
     if resolved is None:
         raise RuntimeError("This Langfuse SDK does not expose a metrics endpoint.")
     method, endpoint_mode = resolved
     if endpoint_mode == "legacy":
-        logger.warning("v2 metrics endpoint unavailable; falling back to legacy /api/public/metrics")
+        logger.warning("v2 metrics endpoint unavailable; using legacy /api/public/metrics")
 
+    query_json = json.dumps(query)
     try:
-        raw = method(query=json.dumps(query))
+        raw = method(query=query_json)
     except Exception as exc:
         status = getattr(exc, "status_code", None)
-        if status == 404:
+        # v2 metrics is Cloud-only and 404s on self-hosted. The legacy endpoint supports the
+        # same three views (traces excluded — but `view` is already restricted to the v2 set),
+        # so retry legacy on a v2 404 when it is available rather than failing closed.
+        legacy_method = _compat.get_legacy_metrics_method(client) if endpoint_mode == "v2" else None
+        if status == 404 and legacy_method is not None:
+            logger.warning("v2 metrics returned 404 (Cloud-only); retrying legacy /api/public/metrics")
+            raw = legacy_method(query=query_json)
+            endpoint_mode = "legacy"
+        elif status == 404:
             raise RuntimeError(
-                "The Langfuse metrics endpoint returned 404. The v2 metrics API is Langfuse Cloud-only; "
-                "self-hosted instances may not support it."
+                "The Langfuse metrics endpoint returned 404. The v2 metrics API is Langfuse Cloud-only "
+                "and no legacy metrics endpoint is available on this SDK/instance."
             ) from exc
-        logger.exception("Error querying metrics")
-        raise
+        else:
+            logger.exception("Error querying metrics")
+            raise
 
     raw_data = _sdk_object_to_python(raw)
     rows = raw_data.get("data") if isinstance(raw_data, dict) else raw_data
