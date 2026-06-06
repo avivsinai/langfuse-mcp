@@ -148,6 +148,7 @@ TOOL_GROUPS = {
         "delete_annotation_queue_assignment",
     ],
     "scores": ["list_scores_v2", "get_score_v2"],
+    "metrics": ["query_metrics", "get_metrics_schema"],
 }
 ALL_TOOL_GROUPS = set(TOOL_GROUPS.keys())
 ROUTE_DECISION_SCHEMA_VERSION = "mcp.route_decision.v1"
@@ -4345,6 +4346,268 @@ async def get_score_v2(
         raise
 
 
+# =============================================================================
+# Metrics Tools
+# =============================================================================
+
+METRICS_VIEWS = ("observations", "scores-numeric", "scores-categorical")
+METRICS_AGGREGATIONS = ("sum", "avg", "count", "max", "min", "p50", "p75", "p90", "p95", "p99", "histogram")
+METRICS_GRANULARITIES = ("auto", "minute", "hour", "day", "week", "month")
+# High-cardinality fields rejected as grouping dimensions by the v2 metrics API (must be filters).
+METRICS_HIGH_CARDINALITY_DIMENSIONS = {"id", "traceId", "userId", "sessionId", "observationId", "parentObservationId"}
+DEFAULT_METRICS_LOOKBACK_MINUTES = 1440  # 24h, used when neither age nor from_timestamp is supplied
+
+
+async def query_metrics(
+    ctx: Context,
+    view: Literal["observations", "scores-numeric", "scores-categorical"] = Field(
+        ...,
+        description=(
+            "Data view to aggregate over: 'observations' (spans/generations/events — latency, cost, tokens, counts), "
+            "'scores-numeric' (numeric/boolean scores), or 'scores-categorical' (categorical scores). "
+            "Call get_metrics_schema for the full dimension/measure catalog per view."
+        ),
+    ),
+    metrics: list[dict[str, Any]] = Field(
+        ...,
+        description=(
+            "One or more metrics to compute. Each item is {'measure': <name>, 'aggregation': <fn>}, e.g. "
+            "[{'measure': 'totalCost', 'aggregation': 'sum'}, {'measure': 'latency', 'aggregation': 'p95'}]. "
+            "Aggregations: sum, avg, count, max, min, p50, p75, p90, p95, p99, histogram."
+        ),
+    ),
+    dimensions: list[str] | None = Field(
+        None,
+        description=(
+            "Optional fields to group results by, e.g. ['providedModelName']. Do NOT use high-cardinality fields "
+            "(id, traceId, userId, sessionId) as dimensions — pass them as filters instead."
+        ),
+    ),
+    filters: list[dict[str, Any]] | None = Field(
+        None,
+        description=(
+            "Optional filter objects: {'column','operator','value','type', plus 'key' for metadata/object types}. "
+            "Example: [{'column':'userId','operator':'=','value':'u1','type':'string'}]. "
+            "See get_metrics_schema for operators and types."
+        ),
+    ),
+    age: int | None = Field(
+        None,
+        description=(
+            "Minutes to look back from now (e.g. 1440 for 24h). Used when from_timestamp is omitted; "
+            f"defaults to {DEFAULT_METRICS_LOOKBACK_MINUTES} (24h) when no time range is given."
+        ),
+        gt=0,
+        le=MAX_AGE_MINUTES,
+    ),
+    from_timestamp: str | None = Field(None, description="ISO-8601 start of the time range. Overrides 'age' when provided."),
+    to_timestamp: str | None = Field(None, description="ISO-8601 end of the time range. Defaults to now (UTC)."),
+    time_granularity: Literal["auto", "minute", "hour", "day", "week", "month"] | None = Field(
+        None,
+        description="When set, results are bucketed by this granularity across the time range (time series).",
+    ),
+    order_by: list[dict[str, Any]] | None = Field(
+        None,
+        description="Optional ordering: list of {'field': <dimension-or-metric>, 'direction': 'asc'|'desc'}.",
+    ),
+    output_mode: OUTPUT_MODE_LITERAL = Field(
+        "compact",
+        description=(
+            "Controls the output format and action. "
+            "'compact' (default): Returns a summarized JSON object optimized for direct agent consumption. "
+            "'full_json_string': Returns the complete, raw JSON data serialized as a string. "
+            "'full_json_file': Returns a summarized JSON object AND saves the complete data to a file."
+        ),
+    ),
+) -> ResponseDict | str:
+    """Query aggregated metrics (cost, latency, token usage, counts, score values) from Langfuse.
+
+    Wraps the Langfuse v2 metrics endpoint. Use this for analytics questions — "what did
+    inference cost in the last 24h grouped by model", "p95 latency per prompt", "score
+    distribution by name" — instead of pulling raw observations and aggregating client-side.
+    Per-parameter contracts live in the Field descriptions above.
+
+    Notes:
+        - The v2 metrics endpoint is Langfuse Cloud-only; self-hosted instances may return 404.
+        - Recently-ingested data can lag (OTEL ingestion delay up to ~10 minutes).
+        - High-cardinality fields (id, traceId, userId, sessionId) must be filters, not dimensions.
+    """
+    state = cast(MCPState, ctx.request_context.lifespan_context)
+
+    # Normalize pydantic Field defaults so direct (non-MCP) callers see real values.
+    metrics = _normalize_field_default(metrics)
+    dimensions = _normalize_field_default(dimensions)
+    filters = _normalize_field_default(filters)
+    age = _normalize_field_default(age)
+    from_timestamp = _normalize_field_default(from_timestamp)
+    to_timestamp = _normalize_field_default(to_timestamp)
+    time_granularity = _normalize_field_default(time_granularity)
+    order_by = _normalize_field_default(order_by)
+
+    if view not in METRICS_VIEWS:
+        raise ValueError(f"view must be one of {METRICS_VIEWS}")
+
+    if not metrics or not isinstance(metrics, list):
+        raise ValueError("metrics must be a non-empty list of {'measure','aggregation'} objects")
+    normalized_metrics: list[dict[str, Any]] = []
+    for metric in metrics:
+        if not isinstance(metric, dict) or "measure" not in metric or "aggregation" not in metric:
+            raise ValueError("each metric must be an object with 'measure' and 'aggregation'")
+        aggregation = metric["aggregation"]
+        if aggregation not in METRICS_AGGREGATIONS:
+            raise ValueError(f"aggregation '{aggregation}' is invalid; must be one of {METRICS_AGGREGATIONS}")
+        normalized_metrics.append({"measure": metric["measure"], "aggregation": aggregation})
+
+    dimension_objs: list[dict[str, str]] = []
+    if dimensions:
+        if not isinstance(dimensions, list) or not all(isinstance(field_name, str) for field_name in dimensions):
+            raise ValueError("dimensions must be a list of field-name strings")
+        for field_name in dimensions:
+            if field_name in METRICS_HIGH_CARDINALITY_DIMENSIONS:
+                raise ValueError(f"'{field_name}' is high-cardinality and cannot be a grouping dimension; pass it as a filter instead")
+            dimension_objs.append({"field": field_name})
+
+    if filters is not None and not isinstance(filters, list):
+        raise ValueError("filters must be a list of filter objects")
+    if order_by is not None and not isinstance(order_by, list):
+        raise ValueError("order_by must be a list of {'field','direction'} objects")
+
+    # Resolve the time range. from/to override age; to_timestamp defaults to now.
+    to_dt = _coerce_optional_datetime(to_timestamp, "to_timestamp") or datetime.now(timezone.utc)
+    from_dt = _coerce_optional_datetime(from_timestamp, "from_timestamp")
+    if from_dt is None:
+        lookback = validate_age(age if age is not None else DEFAULT_METRICS_LOOKBACK_MINUTES)
+        from_dt = to_dt - timedelta(minutes=lookback)
+    if from_dt >= to_dt:
+        raise ValueError("from_timestamp must be before to_timestamp")
+
+    query: dict[str, Any] = {
+        "view": view,
+        "metrics": normalized_metrics,
+        "dimensions": dimension_objs,
+        "filters": filters or [],
+        "fromTimestamp": from_dt.isoformat(),
+        "toTimestamp": to_dt.isoformat(),
+    }
+    if time_granularity:
+        query["timeDimension"] = {"granularity": time_granularity}
+    if order_by:
+        query["orderBy"] = order_by
+
+    resolved = _compat.get_metrics_method(_resolve_client(state, ctx))
+    if resolved is None:
+        raise RuntimeError("This Langfuse SDK does not expose a metrics endpoint.")
+    method, endpoint_mode = resolved
+    if endpoint_mode == "legacy":
+        logger.warning("v2 metrics endpoint unavailable; falling back to legacy /api/public/metrics")
+
+    try:
+        raw = method(query=json.dumps(query))
+    except Exception as exc:
+        status = getattr(exc, "status_code", None)
+        if status == 404:
+            raise RuntimeError(
+                "The Langfuse metrics endpoint returned 404. The v2 metrics API is Langfuse Cloud-only; "
+                "self-hosted instances may not support it."
+            ) from exc
+        logger.exception("Error querying metrics")
+        raise
+
+    raw_data = _sdk_object_to_python(raw)
+    rows = raw_data.get("data") if isinstance(raw_data, dict) else raw_data
+
+    mode = _ensure_output_mode(output_mode)
+    processed_data, file_meta = process_data_with_mode(rows, mode, f"metrics_{view}", state)
+    logger.info("Queried metrics view=%s metrics=%d via %s endpoint", view, len(normalized_metrics), endpoint_mode)
+
+    if mode == OutputMode.FULL_JSON_STRING:
+        return processed_data
+
+    metadata_block: dict[str, Any] = {
+        "item_count": len(rows) if isinstance(rows, list) else None,
+        "view": view,
+        "metrics_endpoint": endpoint_mode,
+        "from_timestamp": query["fromTimestamp"],
+        "to_timestamp": query["toTimestamp"],
+        "file_path": None,
+        "file_info": None,
+    }
+    if file_meta:
+        metadata_block.update(file_meta)
+    return {"data": processed_data, "metadata": metadata_block}
+
+
+async def get_metrics_schema(ctx: Context, dummy: str = "") -> str:
+    """Get the query schema for the metrics API (views, dimensions, measures, aggregations).
+
+    Companion to query_metrics: describes which views exist, the dimensions and measures
+    available on each, the supported aggregations/operators, and the query-object shape.
+    ``dummy`` is unused and exists only for MCP API compatibility.
+    """
+    return _METRICS_SCHEMA_MARKDOWN
+
+
+_METRICS_SCHEMA_MARKDOWN = """
+# Langfuse Metrics Query Schema
+
+`query_metrics` aggregates telemetry server-side (v2 metrics endpoint). Pick a `view`, one
+or more `metrics`, and optionally `dimensions`, `filters`, and a time range.
+
+## Views
+
+### observations
+Observation-level data (spans, generations, events).
+- **Dimensions:** environment, type, name, level, version, tags, release, traceName,
+  traceRelease, traceVersion, providedModelName, promptName, promptVersion, startTimeMonth
+- **Measures:** count, latency, streamingLatency, inputTokens, outputTokens, totalTokens,
+  outputTokensPerSecond, tokensPerSecond, inputCost, outputCost, totalCost,
+  timeToFirstToken, countScores
+
+### scores-numeric
+Numeric and boolean score data.
+- **Dimensions:** environment, name, source, dataType, configId, timestampMonth, timestampDay,
+  value, traceName, tags, traceRelease, traceVersion, observationName, observationModelName,
+  observationPromptName, observationPromptVersion
+- **Measures:** count, value
+
+### scores-categorical
+Categorical score data (same dimensions as scores-numeric, using `stringValue` instead of `value`).
+- **Measures:** count
+
+## Aggregations
+sum, avg, count, max, min, p50, p75, p90, p95, p99, histogram
+
+## Time granularities (timeDimension)
+auto, minute, hour, day, week, month — `auto` bins into ~50 buckets over the range.
+
+## High-cardinality fields (use as filters, NOT dimensions)
+observations: id, traceId, userId, sessionId, parentObservationId
+scores: id, traceId, userId, sessionId, observationId
+
+## Filter operators by type
+- datetime: >, <, >=, <=
+- string: =, contains, does not contain, starts with, ends with
+- stringOptions / arrayOptions: any of, none of (arrayOptions also: all of)
+- number: =, >, <, >=, <=
+- boolean: =, <>
+- null: is null, is not null
+- stringObject / numberObject: same as string/number, plus a required `key` (e.g. metadata)
+
+## Tool inputs
+- `view`: one of the three views above (required)
+- `metrics`: list of {measure, aggregation} (required, at least one)
+- `dimensions`: list of field names to group by (optional)
+- `filters`: list of {column, operator, value, type, [key]} (optional)
+- `age` / `from_timestamp` / `to_timestamp`: time range (age is minutes back from now; defaults to 24h)
+- `time_granularity`: bucket granularity for time-series output (optional)
+- `order_by`: list of {field, direction} (optional)
+
+## Notes
+- The v2 metrics endpoint is Langfuse Cloud-only; self-hosted instances may return 404.
+- Recently-ingested data can lag (OTEL ingestion delay up to ~10 minutes).
+"""
+
+
 def app_factory(
     public_key: str | None,
     secret_key: str | None,
@@ -4367,7 +4630,7 @@ def app_factory(
         cache_size: Size of LRU caches
         dump_dir: Directory for full_json_file output mode
         enabled_tools: Tool groups to enable (default: all). Options: traces, observations, routing,
-            sessions, exceptions, prompts, datasets, annotation_queues, scores, schema
+            sessions, exceptions, prompts, datasets, annotation_queues, scores, metrics, schema
         timeout: API request timeout in seconds (default: 30). The Langfuse SDK defaults to 5s which is too aggressive.
         read_only: If True, disable all write operations (create/update/delete tools).
         default_output_mode: Default output_mode exposed in MCP tool schemas.
@@ -4474,6 +4737,9 @@ def app_factory(
         # Score v2 tools
         "list_scores_v2": list_scores_v2,
         "get_score_v2": get_score_v2,
+        # Metrics tools
+        "query_metrics": query_metrics,
+        "get_metrics_schema": get_metrics_schema,
     }
 
     # Register only enabled tool groups (skip write tools in read-only mode)

@@ -104,7 +104,7 @@ why was this user's session slow?
 
 The MCP server provides the tools; the skill provides the agent-facing workflow. See [`skills/langfuse/SKILL.md`](skills/langfuse/SKILL.md), [`skills/langfuse/references/setup.md`](skills/langfuse/references/setup.md), and [`skills/langfuse/references/tool-reference.md`](skills/langfuse/references/tool-reference.md).
 
-## Tools (41 total)
+## Tools (43 total)
 
 | Category | Tools |
 |----------|-------|
@@ -117,6 +117,7 @@ The MCP server provides the tools; the skill provides the agent-facing workflow.
 | Datasets | `list_datasets`, `get_dataset`, `list_dataset_items`, `get_dataset_item`, `create_dataset`, `create_dataset_item`, `delete_dataset_item` |
 | Annotation Queues | `list_annotation_queues`, `create_annotation_queue`, `get_annotation_queue`, `list_annotation_queue_items`, `get_annotation_queue_item`, `create_annotation_queue_item`, `update_annotation_queue_item`, `delete_annotation_queue_item`, `create_annotation_queue_assignment`, `delete_annotation_queue_assignment` |
 | Scores | `list_scores_v2`, `get_score_v2` |
+| Metrics | `query_metrics`, `get_metrics_schema` |
 | Schema | `get_data_schema` |
 
 ## Dataset Item Updates (Upsert)
@@ -132,6 +133,22 @@ create_dataset_item(
 )
 ```
 
+## Metrics Queries
+
+`query_metrics` aggregates telemetry server-side (cost, latency, tokens, counts, score values) so agents can answer "what did inference cost?" or "what's p95 latency by model?" without pulling raw traces. Call `get_metrics_schema` for the full view/dimension/measure catalog.
+
+```python
+query_metrics(
+  view="observations",
+  metrics=[{"measure": "totalCost", "aggregation": "sum"},
+           {"measure": "latency", "aggregation": "p95"}],
+  dimensions=["providedModelName"],
+  age=1440,  # last 24h; or pass from_timestamp / to_timestamp
+)
+```
+
+High-cardinality fields (`id`, `traceId`, `userId`, `sessionId`) must be used in `filters`, not `dimensions`. The v2 metrics endpoint is Langfuse Cloud-only; self-hosted instances may return 404.
+
 ## Selective Tool Loading
 
 Load only the tool groups you need to reduce token overhead:
@@ -140,7 +157,7 @@ Load only the tool groups you need to reduce token overhead:
 langfuse-mcp --tools traces,prompts
 ```
 
-Available groups: `traces`, `observations`, `routing`, `sessions`, `exceptions`, `prompts`, `datasets`, `annotation_queues`, `scores`, `schema`
+Available groups: `traces`, `observations`, `routing`, `sessions`, `exceptions`, `prompts`, `datasets`, `annotation_queues`, `scores`, `metrics`, `schema`
 
 The `routing` group is router-neutral. It reads Langfuse span observations with
 `metadata.schema_version: "mcp.route_decision.v1"` and filters on route-decision
