@@ -7,7 +7,7 @@ import inspect
 
 import pytest
 
-from tests.fakes import FakeContext, FakeLangfuse
+from tests.fakes import FakeContext, FakeDataset, FakeDatasetItem, FakeLangfuse, FakeLangfuseV4
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tool Registration Test
@@ -325,6 +325,41 @@ def test_create_dataset_run_item_signature_matches_sdk_request_model():
 
     assert "dataset_version" not in params
     assert "created_at" not in params
+
+
+def test_create_dataset_run_item_supports_v4_direct_kwargs_shape(tmp_path):
+    """create_dataset_run_item should also support v4 clients that accept direct kwargs."""
+    from langfuse_mcp.__main__ import MCPState, create_dataset_run_item
+
+    client = FakeLangfuseV4()
+    dataset = FakeDataset(id="dataset_eval-set", name="eval-set")
+    item = FakeDatasetItem(id="item_1", dataset_id=dataset.id, input={"question": "q"})
+    client._store.datasets[dataset.name] = dataset
+    client._store.dataset_items[item.id] = item
+    ctx = FakeContext(MCPState(langfuse_client=client, dump_dir=str(tmp_path)))
+
+    result = asyncio.run(
+        create_dataset_run_item(
+            ctx,
+            run_name="baseline-v4",
+            dataset_item_id=item.id,
+            run_description="v4 eval",
+            metadata={"model": "gpt-4.1"},
+            trace_id="trace_1",
+            observation_id="obs_1",
+        )
+    )
+
+    assert result["data"]["dataset_item_id"] == item.id
+    assert result["data"]["run_name"] == "baseline-v4"
+    assert client.api.dataset_run_items.last_create_kwargs == {
+        "run_name": "baseline-v4",
+        "dataset_item_id": item.id,
+        "run_description": "v4 eval",
+        "metadata": {"model": "gpt-4.1"},
+        "trace_id": "trace_1",
+        "observation_id": "obs_1",
+    }
 
 
 def test_list_dataset_runs_uses_dataset_name(state):
