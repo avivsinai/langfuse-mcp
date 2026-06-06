@@ -726,6 +726,29 @@ class _ScoresV4API:
         return self._store.scores.get(score_id)
 
 
+@dataclass
+class FakeMetricsResponse:
+    """Minimal metrics response mirroring the real ``MetricsV2Response`` shape (``data`` only)."""
+
+    data: list[Any]
+
+
+class _MetricsV2API:
+    """Fake implementation of the v2 metrics resource client (``/api/public/v2/metrics``).
+
+    Records the raw ``query`` JSON string so tests can assert how the tool builds the
+    query object, and returns canned rows from the backing store.
+    """
+
+    def __init__(self, store: FakeDataStore) -> None:
+        self._store = store
+        self.last_query: str | None = None
+
+    def metrics(self, *, query: str, **kwargs: Any) -> FakeMetricsResponse:
+        self.last_query = query
+        return FakeMetricsResponse(data=list(self._store.metrics_rows))
+
+
 class FakeAPI:
     """Aggregate object exposed via FakeLangfuse.api."""
 
@@ -739,6 +762,7 @@ class FakeAPI:
         self.dataset_items = _DatasetItemsAPI(store)
         self.annotation_queues = _AnnotationQueuesAPI(store)
         self.score_v_2 = _ScoreV2API(store)
+        self.metrics_v_2 = _MetricsV2API(store)
 
 
 class _ObservationsV4API:
@@ -823,6 +847,7 @@ class FakeAPIV4:
         self.prompts = _PromptsAPI(store)
         self.scores = _ScoresV4API(store)
         self.annotation_queues = _AnnotationQueuesV4API(store)
+        self.metrics_v_2 = _MetricsV2API(store)
         # datasets/dataset_items are filled in by S4.
         self.legacy = _LegacyAPI(store)
 
@@ -879,6 +904,11 @@ class FakeDataStore:
         }
         self.annotation_queue_items: dict[str, FakeAnnotationQueueItem] = {}
         self.queue_assignments: dict[str, set[str]] = {}
+        # Canned metric rows returned by the fake v2 metrics endpoint.
+        self.metrics_rows: list[dict[str, Any]] = [
+            {"providedModelName": "claude-opus-4-8", "totalCost_sum": 1.23, "count_count": 7},
+            {"providedModelName": "claude-sonnet-4-6", "totalCost_sum": 0.45, "count_count": 12},
+        ]
         self.scores: dict[str, FakeScore] = {
             "score_1": FakeScore(
                 id="score_1",
