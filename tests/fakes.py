@@ -77,6 +77,36 @@ class FakeDatasetItem:
 
 
 @dataclass
+class FakeDatasetRun:
+    """Dataset run record returned by the fake SDK."""
+
+    id: str
+    dataset_id: str
+    dataset_name: str
+    name: str
+    description: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass
+class FakeDatasetRunItem:
+    """Dataset run item record returned by the fake SDK."""
+
+    id: str
+    dataset_id: str
+    dataset_item_id: str
+    run_name: str
+    run_description: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    observation_id: str | None = None
+    trace_id: str | None = None
+    dataset_version: datetime | None = None
+    created_at: datetime | None = None
+
+
+@dataclass
 class FakeAnnotationQueue:
     """Annotation queue record returned by the fake SDK."""
 
@@ -314,6 +344,9 @@ class _DatasetsAPI:
         self.last_list_kwargs: dict[str, Any] | None = None
         self.last_get_kwargs: dict[str, Any] | None = None
         self.last_create_kwargs: dict[str, Any] | None = None
+        self.last_get_runs_kwargs: dict[str, Any] | None = None
+        self.last_get_run_kwargs: dict[str, Any] | None = None
+        self.last_delete_run_kwargs: dict[str, Any] | None = None
 
     def list(self, **kwargs: Any) -> FakePaginatedResponse:
         self.last_list_kwargs = kwargs
@@ -349,6 +382,48 @@ class _DatasetsAPI:
         )
         self._store.datasets[name] = dataset
         return dataset
+
+    def get_runs(self, dataset_name: str, **kwargs: Any) -> FakePaginatedResponse:
+        self.last_get_runs_kwargs = {"dataset_name": dataset_name, **kwargs}
+        page = kwargs.get("page", 1)
+        limit = kwargs.get("limit", 50)
+        dataset = self._store.datasets.get(dataset_name)
+        runs = []
+        if dataset is not None:
+            runs = [run.__dict__ for run in self._store.dataset_runs.values() if run.dataset_id == dataset.id]
+
+        total = len(runs)
+        start = (page - 1) * limit
+        end = start + limit
+        return FakePaginatedResponse(data=runs[start:end], meta={"next_page": None, "total": total})
+
+    def get_run(self, dataset_name: str, run_name: str, **kwargs: Any) -> Any:
+        self.last_get_run_kwargs = {"dataset_name": dataset_name, "run_name": run_name, **kwargs}
+        dataset = self._store.datasets.get(dataset_name)
+        if dataset is None:
+            return None
+        run = self._store.dataset_runs.get((dataset.id, run_name))
+        if run is None:
+            return None
+        data = run.__dict__.copy()
+        run_items = []
+        for item in self._store.dataset_run_items.values():
+            if item.dataset_id == dataset.id and item.run_name == run_name:
+                run_items.append(item.__dict__)
+        data["items"] = run_items
+        return data
+
+    def delete_run(self, dataset_name: str, run_name: str, **kwargs: Any) -> dict[str, Any]:
+        self.last_delete_run_kwargs = {"dataset_name": dataset_name, "run_name": run_name, **kwargs}
+        dataset = self._store.datasets.get(dataset_name)
+        if dataset is not None:
+            self._store.dataset_runs.pop((dataset.id, run_name), None)
+            self._store.dataset_run_items = {
+                key: item
+                for key, item in self._store.dataset_run_items.items()
+                if not (item.dataset_id == dataset.id and item.run_name == run_name)
+            }
+        return {"success": True}
 
 
 class _DatasetItemsAPI:
@@ -437,6 +512,71 @@ class _DatasetItemsAPI:
         if id in self._store.dataset_items:
             del self._store.dataset_items[id]
         return {"success": True}
+
+
+class _DatasetRunItemsAPI:
+    """Fake implementation of dataset_run_items resource client."""
+
+    def __init__(self, store: FakeDataStore) -> None:
+        self._store = store
+        self.last_list_kwargs: dict[str, Any] | None = None
+        self.last_create_kwargs: dict[str, Any] | None = None
+
+    def list(self, **kwargs: Any) -> FakePaginatedResponse:
+        self.last_list_kwargs = kwargs
+        dataset_id = kwargs.get("dataset_id")
+        run_name = kwargs.get("run_name")
+        page = kwargs.get("page", 1)
+        limit = kwargs.get("limit", 50)
+
+        items = []
+        for item in self._store.dataset_run_items.values():
+            if item.dataset_id == dataset_id and item.run_name == run_name:
+                items.append(item.__dict__)
+        total = len(items)
+        start = (page - 1) * limit
+        end = start + limit
+        return FakePaginatedResponse(data=items[start:end], meta={"next_page": None, "total": total})
+
+    def create(self, **kwargs: Any) -> FakeDatasetRunItem:
+        self.last_create_kwargs = kwargs
+        now = datetime.now(timezone.utc)
+        dataset_item_id = kwargs["dataset_item_id"]
+        dataset_item = self._store.dataset_items[dataset_item_id]
+        run_name = kwargs["run_name"]
+        run_description = kwargs.get("run_description")
+        metadata = kwargs.get("metadata") or {}
+
+        run_key = (dataset_item.dataset_id, run_name)
+        dataset = next((ds for ds in self._store.datasets.values() if ds.id == dataset_item.dataset_id), None)
+        self._store.dataset_runs.setdefault(
+            run_key,
+            FakeDatasetRun(
+                id=f"run_{len(self._store.dataset_runs) + 1}",
+                dataset_id=dataset_item.dataset_id,
+                dataset_name=dataset.name if dataset else dataset_item.dataset_id,
+                name=run_name,
+                description=run_description,
+                metadata=metadata,
+                created_at=now,
+                updated_at=now,
+            ),
+        )
+
+        item = FakeDatasetRunItem(
+            id=f"run_item_{len(self._store.dataset_run_items) + 1}",
+            dataset_id=dataset_item.dataset_id,
+            dataset_item_id=dataset_item_id,
+            run_name=run_name,
+            run_description=run_description,
+            metadata=metadata,
+            observation_id=kwargs.get("observation_id"),
+            trace_id=kwargs.get("trace_id"),
+            dataset_version=kwargs.get("dataset_version"),
+            created_at=kwargs.get("created_at") or now,
+        )
+        self._store.dataset_run_items[item.id] = item
+        return item
 
 
 class _AnnotationQueuesAPI:
@@ -760,6 +900,7 @@ class FakeAPI:
         self.prompts = _PromptsAPI(store)
         self.datasets = _DatasetsAPI(store)
         self.dataset_items = _DatasetItemsAPI(store)
+        self.dataset_run_items = _DatasetRunItemsAPI(store)
         self.annotation_queues = _AnnotationQueuesAPI(store)
         self.score_v_2 = _ScoreV2API(store)
         self.metrics_v_2 = _MetricsV2API(store)
@@ -893,6 +1034,8 @@ class FakeDataStore:
         self.prompts: dict[str, list[FakePromptBase]] = {}
         self.datasets: dict[str, FakeDataset] = {}
         self.dataset_items: dict[str, FakeDatasetItem] = {}
+        self.dataset_runs: dict[tuple[str, str], FakeDatasetRun] = {}
+        self.dataset_run_items: dict[str, FakeDatasetRunItem] = {}
         self.annotation_queues: dict[str, FakeAnnotationQueue] = {
             "queue_1": FakeAnnotationQueue(
                 id="queue_1",
@@ -931,6 +1074,7 @@ class FakeLangfuse:
         self._store = FakeDataStore()
         self.api = FakeAPI(self._store)
         self.closed = False
+        self.flush_count = 0
         self.last_create_kwargs: dict[str, Any] | None = None
         self.last_update_kwargs: dict[str, Any] | None = None
 
@@ -1099,7 +1243,8 @@ class FakeLangfuse:
 
     # Backwards compatibility for cleanup logic.
     def flush(self) -> None:  # pragma: no cover - compatibility shim
-        """No-op for compatibility with legacy cleanup hooks."""
+        """Count flushes for tests while matching the SDK cleanup hook."""
+        self.flush_count += 1
         return None
 
     def shutdown(self) -> None:  # pragma: no cover - compatibility shim
