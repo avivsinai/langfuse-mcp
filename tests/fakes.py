@@ -538,14 +538,20 @@ class _DatasetRunItemsAPI:
         end = start + limit
         return FakePaginatedResponse(data=items[start:end], meta={"next_page": None, "total": total})
 
-    def create(self, **kwargs: Any) -> FakeDatasetRunItem:
-        self.last_create_kwargs = kwargs
+    def create(self, *, request: Any, **kwargs: Any) -> FakeDatasetRunItem:
+        self.last_create_kwargs = {"request": request, **kwargs}
         now = datetime.now(timezone.utc)
-        dataset_item_id = kwargs["dataset_item_id"]
+
+        def request_value(field: str) -> Any:
+            if isinstance(request, dict):
+                return request.get(field)
+            return getattr(request, field, None)
+
+        dataset_item_id = request_value("dataset_item_id")
         dataset_item = self._store.dataset_items[dataset_item_id]
-        run_name = kwargs["run_name"]
-        run_description = kwargs.get("run_description")
-        metadata = kwargs.get("metadata") or {}
+        run_name = request_value("run_name")
+        run_description = request_value("run_description")
+        metadata = request_value("metadata") or {}
 
         run_key = (dataset_item.dataset_id, run_name)
         dataset = next((ds for ds in self._store.datasets.values() if ds.id == dataset_item.dataset_id), None)
@@ -570,10 +576,9 @@ class _DatasetRunItemsAPI:
             run_name=run_name,
             run_description=run_description,
             metadata=metadata,
-            observation_id=kwargs.get("observation_id"),
-            trace_id=kwargs.get("trace_id"),
-            dataset_version=kwargs.get("dataset_version"),
-            created_at=kwargs.get("created_at") or now,
+            observation_id=request_value("observation_id"),
+            trace_id=request_value("trace_id"),
+            created_at=now,
         )
         self._store.dataset_run_items[item.id] = item
         return item

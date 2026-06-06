@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 
 import pytest
 
@@ -304,6 +305,26 @@ def test_create_dataset_run_item_flushes_and_returns_submitted_metadata(state):
     assert result["metadata"]["submitted"] is True
     assert result["metadata"]["run_name"] == "baseline"
     assert result["metadata"]["dataset_item_id"] == item_id
+    assert state.langfuse_client.api.dataset_run_items.last_create_kwargs is not None
+    request = state.langfuse_client.api.dataset_run_items.last_create_kwargs["request"]
+    if isinstance(request, dict):
+        request_data = request
+    elif hasattr(request, "model_dump"):
+        request_data = request.model_dump(by_alias=False)
+    else:
+        request_data = request.dict(by_alias=False)
+    assert request_data["run_name"] == "baseline"
+    assert request_data["dataset_item_id"] == item_id
+
+
+def test_create_dataset_run_item_signature_matches_sdk_request_model():
+    """create_dataset_run_item should expose only fields accepted by CreateDatasetRunItemRequest."""
+    from langfuse_mcp.__main__ import create_dataset_run_item
+
+    params = inspect.signature(create_dataset_run_item).parameters
+
+    assert "dataset_version" not in params
+    assert "created_at" not in params
 
 
 def test_list_dataset_runs_uses_dataset_name(state):
