@@ -540,18 +540,34 @@ class _DatasetRunItemsAPI:
 
     def create(self, *, request: Any, **kwargs: Any) -> FakeDatasetRunItem:
         self.last_create_kwargs = {"request": request, **kwargs}
-        now = datetime.now(timezone.utc)
 
         def request_value(field: str) -> Any:
             if isinstance(request, dict):
                 return request.get(field)
             return getattr(request, field, None)
 
-        dataset_item_id = request_value("dataset_item_id")
+        return self._create_run_item(
+            run_name=request_value("run_name"),
+            dataset_item_id=request_value("dataset_item_id"),
+            run_description=request_value("run_description"),
+            metadata=request_value("metadata"),
+            observation_id=request_value("observation_id"),
+            trace_id=request_value("trace_id"),
+        )
+
+    def _create_run_item(
+        self,
+        *,
+        run_name: str,
+        dataset_item_id: str,
+        run_description: str | None,
+        metadata: dict[str, Any] | None,
+        observation_id: str | None,
+        trace_id: str | None,
+    ) -> FakeDatasetRunItem:
+        now = datetime.now(timezone.utc)
         dataset_item = self._store.dataset_items[dataset_item_id]
-        run_name = request_value("run_name")
-        run_description = request_value("run_description")
-        metadata = request_value("metadata") or {}
+        metadata = metadata or {}
 
         run_key = (dataset_item.dataset_id, run_name)
         dataset = next((ds for ds in self._store.datasets.values() if ds.id == dataset_item.dataset_id), None)
@@ -576,12 +592,45 @@ class _DatasetRunItemsAPI:
             run_name=run_name,
             run_description=run_description,
             metadata=metadata,
-            observation_id=request_value("observation_id"),
-            trace_id=request_value("trace_id"),
+            observation_id=observation_id,
+            trace_id=trace_id,
             created_at=now,
         )
         self._store.dataset_run_items[item.id] = item
         return item
+
+
+class _DatasetRunItemsV4API(_DatasetRunItemsAPI):
+    """Fake v4 dataset_run_items client where writes take direct kwargs."""
+
+    def create(
+        self,
+        *,
+        run_name: str,
+        dataset_item_id: str,
+        run_description: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        observation_id: str | None = None,
+        trace_id: str | None = None,
+        **kwargs: Any,
+    ) -> FakeDatasetRunItem:
+        self.last_create_kwargs = {
+            "run_name": run_name,
+            "dataset_item_id": dataset_item_id,
+            **({"run_description": run_description} if run_description is not None else {}),
+            **({"metadata": metadata} if metadata is not None else {}),
+            **({"observation_id": observation_id} if observation_id is not None else {}),
+            **({"trace_id": trace_id} if trace_id is not None else {}),
+            **kwargs,
+        }
+        return self._create_run_item(
+            run_name=run_name,
+            dataset_item_id=dataset_item_id,
+            run_description=run_description,
+            metadata=metadata,
+            observation_id=observation_id,
+            trace_id=trace_id,
+        )
 
 
 class _AnnotationQueuesAPI:
@@ -979,10 +1028,10 @@ class FakeAPIV4:
     - ``observations.get`` is absent; ``observations.get_many`` is cursor-only.
     - ``api.legacy.observations_v1`` exposes the page-based v1 fallback.
     - Annotation queue write methods take direct kwargs (no ``request=``).
-    - ``api.datasets`` / ``api.dataset_items`` are intentionally not wired —
-      production code only calls them through the top-level
-      ``Langfuse.create_dataset`` / ``create_dataset_item`` shortcuts that v3
-      and v4 both expose, so the api-level surface here would be unused.
+    - ``api.dataset_run_items.create`` takes direct kwargs (no ``request=``).
+    - ``api.datasets`` / ``api.dataset_items`` are intentionally not wired for
+      creates — production code calls them through the top-level
+      ``Langfuse.create_dataset`` / ``create_dataset_item`` shortcuts.
     """
 
     def __init__(self, store: FakeDataStore) -> None:
@@ -994,6 +1043,7 @@ class FakeAPIV4:
         self.scores = _ScoresV4API(store)
         self.annotation_queues = _AnnotationQueuesV4API(store)
         self.metrics_v_2 = _MetricsV2API(store)
+        self.dataset_run_items = _DatasetRunItemsV4API(store)
         # datasets/dataset_items are filled in by S4.
         self.legacy = _LegacyAPI(store)
 
