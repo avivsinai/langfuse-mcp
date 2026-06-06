@@ -126,6 +126,22 @@ def test_query_metrics_rejects_invalid_aggregation(tmp_path):
         )
 
 
+def test_query_metrics_rejects_invalid_granularity(tmp_path):
+    """An unsupported time_granularity should raise locally, not reach the API."""
+    from langfuse_mcp.__main__ import query_metrics
+
+    ctx = FakeContext(_state(tmp_path))
+    with pytest.raises(ValueError, match="granularity"):
+        asyncio.run(
+            query_metrics(
+                ctx,
+                view="observations",
+                metrics=[{"measure": "count", "aggregation": "count"}],
+                time_granularity="fortnight",
+            )
+        )
+
+
 def test_query_metrics_requires_at_least_one_metric(tmp_path):
     """An empty metrics list should raise."""
     from langfuse_mcp.__main__ import query_metrics

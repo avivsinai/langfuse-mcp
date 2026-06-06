@@ -4693,6 +4693,8 @@ async def query_metrics(
         raise ValueError("filters must be a list of filter objects")
     if order_by is not None and not isinstance(order_by, list):
         raise ValueError("order_by must be a list of {'field','direction'} objects")
+    if time_granularity is not None and time_granularity not in METRICS_GRANULARITIES:
+        raise ValueError(f"time_granularity must be one of {METRICS_GRANULARITIES}")
 
     # Resolve the time range. from/to override age; to_timestamp defaults to now.
     to_dt = _coerce_optional_datetime(to_timestamp, "to_timestamp") or datetime.now(timezone.utc)
