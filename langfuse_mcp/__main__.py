@@ -4088,8 +4088,6 @@ async def create_dataset_run_item(
     metadata: dict[str, Any] | None = Field(None, description="Optional run-item metadata"),
     observation_id: str | None = Field(None, description="Optional observation ID linked to this run item"),
     trace_id: str | None = Field(None, description="Optional trace ID linked to this run item"),
-    dataset_version: str | None = Field(None, description="Optional ISO8601 dataset version timestamp"),
-    created_at: str | None = Field(None, description="Optional ISO8601 creation timestamp"),
 ) -> ResponseDict:
     """Create a dataset run item and flush the ingestion write."""
     state = cast(MCPState, ctx.request_context.lifespan_context)
@@ -4099,32 +4097,30 @@ async def create_dataset_run_item(
         metadata = _normalize_field_default(metadata)
         observation_id = _normalize_field_default(observation_id)
         trace_id = _normalize_field_default(trace_id)
-        dataset_version_dt = _coerce_optional_datetime(dataset_version, "dataset_version")
-        created_at_dt = _coerce_optional_datetime(created_at, "created_at")
 
-        kwargs: dict[str, Any] = {
+        body_kwargs: dict[str, Any] = {
             "run_name": run_name,
             "dataset_item_id": dataset_item_id,
         }
         if run_description is not None:
-            kwargs["run_description"] = run_description
+            body_kwargs["run_description"] = run_description
         if metadata is not None:
-            kwargs["metadata"] = metadata
+            body_kwargs["metadata"] = metadata
         if observation_id is not None:
-            kwargs["observation_id"] = observation_id
+            body_kwargs["observation_id"] = observation_id
         if trace_id is not None:
-            kwargs["trace_id"] = trace_id
-        if dataset_version_dt is not None:
-            kwargs["dataset_version"] = dataset_version_dt
-        if created_at_dt is not None:
-            kwargs["created_at"] = created_at_dt
+            body_kwargs["trace_id"] = trace_id
 
         client = _resolve_client(state, ctx)
-        response = client.api.dataset_run_items.create(**kwargs)
+        response = _compat.call_with_request_or_kwargs(
+            client.api.dataset_run_items.create,
+            lambda: _build_create_dataset_run_item_request(**body_kwargs),
+            **body_kwargs,
+        )
         if hasattr(client, "flush"):
             client.flush()
 
-        result = _sdk_object_to_python(response) if response is not None else _sdk_object_to_python(kwargs)
+        result = _sdk_object_to_python(response) if response is not None else _sdk_object_to_python(body_kwargs)
 
         logger.info(f"Submitted dataset run item for run '{run_name}' dataset_item_id='{dataset_item_id}'")
 
@@ -4134,12 +4130,21 @@ async def create_dataset_run_item(
                 "submitted": True,
                 "run_name": run_name,
                 "dataset_item_id": dataset_item_id,
-                "submitted_fields": sorted(kwargs.keys()),
+                "submitted_fields": sorted(body_kwargs.keys()),
             },
         }
     except Exception as e:
         logger.error(f"Error creating dataset run item for run '{run_name}' item '{dataset_item_id}': {e}")
         raise
+
+
+def _build_create_dataset_run_item_request(**kwargs: Any) -> Any:
+    """Construct the v3 ``CreateDatasetRunItemRequest`` body for dataset-run item writes."""
+    return _compat.resolve_request_model(
+        "dataset_run_items",
+        "create_dataset_run_item_request",
+        "CreateDatasetRunItemRequest",
+    )(**kwargs)
 
 
 async def delete_dataset_run(
