@@ -82,6 +82,43 @@ def get_score_list_method(scores_namespace: Any) -> Any | None:
     return getattr(scores_namespace, "get_many", None) or getattr(scores_namespace, "get", None)
 
 
+def get_metrics_method(client: Any) -> tuple[Callable[..., Any], Literal["v2", "legacy"]] | None:
+    """Return ``(callable, mode)`` for the metrics query endpoint, or ``None``.
+
+    Prefers v2 (``client.api.metrics_v_2.metrics`` -> ``"v2"``) over legacy
+    (``client.api.metrics.metrics`` -> ``"legacy"``). Both accept ``query=<json
+    string>``. Presence is an attribute check only: the v2 *HTTP* endpoint is
+    Langfuse Cloud-only, so the callable can exist while the server answers 404
+    at call time — that 404 is handled by the caller, not here.
+    """
+    api = getattr(client, "api", None)
+    if api is None:
+        return None
+    v2 = getattr(api, "metrics_v_2", None)
+    if v2 is not None and hasattr(v2, "metrics"):
+        return v2.metrics, "v2"
+    legacy = getattr(api, "metrics", None)
+    if legacy is not None and hasattr(legacy, "metrics"):
+        return legacy.metrics, "legacy"
+    return None
+
+
+def get_legacy_metrics_method(client: Any) -> Callable[..., Any] | None:
+    """Return the legacy metrics callable (``client.api.metrics.metrics``) or ``None``.
+
+    Used as the v2-404 fallback: ``/api/public/metrics`` accepts the same query envelope
+    and supports the same ``observations`` / ``scores-numeric`` / ``scores-categorical``
+    views (plus ``traces``, which the caller does not pass). Distinct from
+    ``get_metrics_method`` because that one returns v2 whenever the v2 *namespace* exists
+    (always true on SDK 3.11.2), which is exactly when the runtime 404 fallback is needed.
+    """
+    api = getattr(client, "api", None)
+    legacy = getattr(api, "metrics", None) if api is not None else None
+    if legacy is not None and hasattr(legacy, "metrics"):
+        return legacy.metrics
+    return None
+
+
 def get_observations_single_fetcher(client: Any) -> Callable[[str], Any] | None:
     """Return a callable ``f(observation_id) -> observation`` or ``None``.
 

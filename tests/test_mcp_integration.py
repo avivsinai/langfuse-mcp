@@ -46,9 +46,9 @@ async def graceful_stdio_client(server_params):
         raise
 
 
-async def run_get_schema_test():
-    """Run the get_data_schema tool with dummy credentials."""
-    server_params = StdioServerParameters(
+def _dummy_langfuse_server_params():
+    """Build server parameters for a local langfuse-mcp stdio process."""
+    return StdioServerParameters(
         command=sys.executable,
         args=[
             "-m",
@@ -61,6 +61,11 @@ async def run_get_schema_test():
             "https://cloud.langfuse.com",
         ],
     )
+
+
+async def run_get_schema_test():
+    """Run the get_data_schema tool with dummy credentials."""
+    server_params = _dummy_langfuse_server_params()
 
     async with graceful_stdio_client(server_params) as stdio_transport:
         read, write = stdio_transport
@@ -96,9 +101,46 @@ async def run_get_schema_test():
                 return {}
 
 
+async def run_get_metrics_schema_test():
+    """Run the get_metrics_schema tool over MCP stdio with dummy credentials."""
+    server_params = _dummy_langfuse_server_params()
+
+    async with graceful_stdio_client(server_params) as stdio_transport:
+        read, write = stdio_transport
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            tools_result = await session.list_tools()
+            tool_names = {tool.name for tool in tools_result.tools}
+            assert {
+                "query_metrics",
+                "get_metrics_schema",
+                "list_dataset_runs",
+                "create_dataset_run_item",
+                "delete_dataset_run",
+            }.issubset(tool_names)
+
+            result = await session.call_tool("get_metrics_schema", {})
+
+            assert result is not None
+            assert result.content
+            schema_text = result.content[0].text
+            assert isinstance(schema_text, str)
+            assert schema_text.strip()
+            assert "observations" in schema_text
+            assert "scores-numeric" in schema_text
+            assert "scores-categorical" in schema_text
+            assert "p95" in schema_text
+
+
 @pytest.mark.asyncio
 async def test_get_data_schema():
     """Test the get_data_schema tool."""
     await run_get_schema_test()
     # Don't assert anything about the schema data in CI
     # This test is mainly to check that we can call the tool without errors
+
+
+@pytest.mark.asyncio
+async def test_get_metrics_schema_over_mcp():
+    """Test the get_metrics_schema tool over the MCP stdio transport."""
+    await run_get_metrics_schema_test()

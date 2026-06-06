@@ -77,6 +77,36 @@ class FakeDatasetItem:
 
 
 @dataclass
+class FakeDatasetRun:
+    """Dataset run record returned by the fake SDK."""
+
+    id: str
+    dataset_id: str
+    dataset_name: str
+    name: str
+    description: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass
+class FakeDatasetRunItem:
+    """Dataset run item record returned by the fake SDK."""
+
+    id: str
+    dataset_id: str
+    dataset_item_id: str
+    run_name: str
+    run_description: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    observation_id: str | None = None
+    trace_id: str | None = None
+    dataset_version: datetime | None = None
+    created_at: datetime | None = None
+
+
+@dataclass
 class FakeAnnotationQueue:
     """Annotation queue record returned by the fake SDK."""
 
@@ -314,6 +344,9 @@ class _DatasetsAPI:
         self.last_list_kwargs: dict[str, Any] | None = None
         self.last_get_kwargs: dict[str, Any] | None = None
         self.last_create_kwargs: dict[str, Any] | None = None
+        self.last_get_runs_kwargs: dict[str, Any] | None = None
+        self.last_get_run_kwargs: dict[str, Any] | None = None
+        self.last_delete_run_kwargs: dict[str, Any] | None = None
 
     def list(self, **kwargs: Any) -> FakePaginatedResponse:
         self.last_list_kwargs = kwargs
@@ -349,6 +382,48 @@ class _DatasetsAPI:
         )
         self._store.datasets[name] = dataset
         return dataset
+
+    def get_runs(self, dataset_name: str, **kwargs: Any) -> FakePaginatedResponse:
+        self.last_get_runs_kwargs = {"dataset_name": dataset_name, **kwargs}
+        page = kwargs.get("page", 1)
+        limit = kwargs.get("limit", 50)
+        dataset = self._store.datasets.get(dataset_name)
+        runs = []
+        if dataset is not None:
+            runs = [run.__dict__ for run in self._store.dataset_runs.values() if run.dataset_id == dataset.id]
+
+        total = len(runs)
+        start = (page - 1) * limit
+        end = start + limit
+        return FakePaginatedResponse(data=runs[start:end], meta={"next_page": None, "total": total})
+
+    def get_run(self, dataset_name: str, run_name: str, **kwargs: Any) -> Any:
+        self.last_get_run_kwargs = {"dataset_name": dataset_name, "run_name": run_name, **kwargs}
+        dataset = self._store.datasets.get(dataset_name)
+        if dataset is None:
+            return None
+        run = self._store.dataset_runs.get((dataset.id, run_name))
+        if run is None:
+            return None
+        data = run.__dict__.copy()
+        run_items = []
+        for item in self._store.dataset_run_items.values():
+            if item.dataset_id == dataset.id and item.run_name == run_name:
+                run_items.append(item.__dict__)
+        data["items"] = run_items
+        return data
+
+    def delete_run(self, dataset_name: str, run_name: str, **kwargs: Any) -> dict[str, Any]:
+        self.last_delete_run_kwargs = {"dataset_name": dataset_name, "run_name": run_name, **kwargs}
+        dataset = self._store.datasets.get(dataset_name)
+        if dataset is not None:
+            self._store.dataset_runs.pop((dataset.id, run_name), None)
+            self._store.dataset_run_items = {
+                key: item
+                for key, item in self._store.dataset_run_items.items()
+                if not (item.dataset_id == dataset.id and item.run_name == run_name)
+            }
+        return {"success": True}
 
 
 class _DatasetItemsAPI:
@@ -437,6 +512,125 @@ class _DatasetItemsAPI:
         if id in self._store.dataset_items:
             del self._store.dataset_items[id]
         return {"success": True}
+
+
+class _DatasetRunItemsAPI:
+    """Fake implementation of dataset_run_items resource client."""
+
+    def __init__(self, store: FakeDataStore) -> None:
+        self._store = store
+        self.last_list_kwargs: dict[str, Any] | None = None
+        self.last_create_kwargs: dict[str, Any] | None = None
+
+    def list(self, **kwargs: Any) -> FakePaginatedResponse:
+        self.last_list_kwargs = kwargs
+        dataset_id = kwargs.get("dataset_id")
+        run_name = kwargs.get("run_name")
+        page = kwargs.get("page", 1)
+        limit = kwargs.get("limit", 50)
+
+        items = []
+        for item in self._store.dataset_run_items.values():
+            if item.dataset_id == dataset_id and item.run_name == run_name:
+                items.append(item.__dict__)
+        total = len(items)
+        start = (page - 1) * limit
+        end = start + limit
+        return FakePaginatedResponse(data=items[start:end], meta={"next_page": None, "total": total})
+
+    def create(self, *, request: Any, **kwargs: Any) -> FakeDatasetRunItem:
+        self.last_create_kwargs = {"request": request, **kwargs}
+
+        def request_value(field: str) -> Any:
+            if isinstance(request, dict):
+                return request.get(field)
+            return getattr(request, field, None)
+
+        return self._create_run_item(
+            run_name=request_value("run_name"),
+            dataset_item_id=request_value("dataset_item_id"),
+            run_description=request_value("run_description"),
+            metadata=request_value("metadata"),
+            observation_id=request_value("observation_id"),
+            trace_id=request_value("trace_id"),
+        )
+
+    def _create_run_item(
+        self,
+        *,
+        run_name: str,
+        dataset_item_id: str,
+        run_description: str | None,
+        metadata: dict[str, Any] | None,
+        observation_id: str | None,
+        trace_id: str | None,
+    ) -> FakeDatasetRunItem:
+        now = datetime.now(timezone.utc)
+        dataset_item = self._store.dataset_items[dataset_item_id]
+        metadata = metadata or {}
+
+        run_key = (dataset_item.dataset_id, run_name)
+        dataset = next((ds for ds in self._store.datasets.values() if ds.id == dataset_item.dataset_id), None)
+        self._store.dataset_runs.setdefault(
+            run_key,
+            FakeDatasetRun(
+                id=f"run_{len(self._store.dataset_runs) + 1}",
+                dataset_id=dataset_item.dataset_id,
+                dataset_name=dataset.name if dataset else dataset_item.dataset_id,
+                name=run_name,
+                description=run_description,
+                metadata=metadata,
+                created_at=now,
+                updated_at=now,
+            ),
+        )
+
+        item = FakeDatasetRunItem(
+            id=f"run_item_{len(self._store.dataset_run_items) + 1}",
+            dataset_id=dataset_item.dataset_id,
+            dataset_item_id=dataset_item_id,
+            run_name=run_name,
+            run_description=run_description,
+            metadata=metadata,
+            observation_id=observation_id,
+            trace_id=trace_id,
+            created_at=now,
+        )
+        self._store.dataset_run_items[item.id] = item
+        return item
+
+
+class _DatasetRunItemsV4API(_DatasetRunItemsAPI):
+    """Fake v4 dataset_run_items client where writes take direct kwargs."""
+
+    def create(
+        self,
+        *,
+        run_name: str,
+        dataset_item_id: str,
+        run_description: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        observation_id: str | None = None,
+        trace_id: str | None = None,
+        **kwargs: Any,
+    ) -> FakeDatasetRunItem:
+        self.last_create_kwargs = {
+            "run_name": run_name,
+            "dataset_item_id": dataset_item_id,
+            **({"run_description": run_description} if run_description is not None else {}),
+            **({"metadata": metadata} if metadata is not None else {}),
+            **({"observation_id": observation_id} if observation_id is not None else {}),
+            **({"trace_id": trace_id} if trace_id is not None else {}),
+            **kwargs,
+        }
+        return self._create_run_item(
+            run_name=run_name,
+            dataset_item_id=dataset_item_id,
+            run_description=run_description,
+            metadata=metadata,
+            observation_id=observation_id,
+            trace_id=trace_id,
+        )
 
 
 class _AnnotationQueuesAPI:
@@ -726,6 +920,29 @@ class _ScoresV4API:
         return self._store.scores.get(score_id)
 
 
+@dataclass
+class FakeMetricsResponse:
+    """Minimal metrics response mirroring the real ``MetricsV2Response`` shape (``data`` only)."""
+
+    data: list[Any]
+
+
+class _MetricsV2API:
+    """Fake implementation of the v2 metrics resource client (``/api/public/v2/metrics``).
+
+    Records the raw ``query`` JSON string so tests can assert how the tool builds the
+    query object, and returns canned rows from the backing store.
+    """
+
+    def __init__(self, store: FakeDataStore) -> None:
+        self._store = store
+        self.last_query: str | None = None
+
+    def metrics(self, *, query: str, **kwargs: Any) -> FakeMetricsResponse:
+        self.last_query = query
+        return FakeMetricsResponse(data=list(self._store.metrics_rows))
+
+
 class FakeAPI:
     """Aggregate object exposed via FakeLangfuse.api."""
 
@@ -737,8 +954,10 @@ class FakeAPI:
         self.prompts = _PromptsAPI(store)
         self.datasets = _DatasetsAPI(store)
         self.dataset_items = _DatasetItemsAPI(store)
+        self.dataset_run_items = _DatasetRunItemsAPI(store)
         self.annotation_queues = _AnnotationQueuesAPI(store)
         self.score_v_2 = _ScoreV2API(store)
+        self.metrics_v_2 = _MetricsV2API(store)
 
 
 class _ObservationsV4API:
@@ -809,10 +1028,10 @@ class FakeAPIV4:
     - ``observations.get`` is absent; ``observations.get_many`` is cursor-only.
     - ``api.legacy.observations_v1`` exposes the page-based v1 fallback.
     - Annotation queue write methods take direct kwargs (no ``request=``).
-    - ``api.datasets`` / ``api.dataset_items`` are intentionally not wired —
-      production code only calls them through the top-level
-      ``Langfuse.create_dataset`` / ``create_dataset_item`` shortcuts that v3
-      and v4 both expose, so the api-level surface here would be unused.
+    - ``api.dataset_run_items.create`` takes direct kwargs (no ``request=``).
+    - ``api.datasets`` / ``api.dataset_items`` are intentionally not wired for
+      creates — production code calls them through the top-level
+      ``Langfuse.create_dataset`` / ``create_dataset_item`` shortcuts.
     """
 
     def __init__(self, store: FakeDataStore) -> None:
@@ -823,6 +1042,8 @@ class FakeAPIV4:
         self.prompts = _PromptsAPI(store)
         self.scores = _ScoresV4API(store)
         self.annotation_queues = _AnnotationQueuesV4API(store)
+        self.metrics_v_2 = _MetricsV2API(store)
+        self.dataset_run_items = _DatasetRunItemsV4API(store)
         # datasets/dataset_items are filled in by S4.
         self.legacy = _LegacyAPI(store)
 
@@ -868,6 +1089,8 @@ class FakeDataStore:
         self.prompts: dict[str, list[FakePromptBase]] = {}
         self.datasets: dict[str, FakeDataset] = {}
         self.dataset_items: dict[str, FakeDatasetItem] = {}
+        self.dataset_runs: dict[tuple[str, str], FakeDatasetRun] = {}
+        self.dataset_run_items: dict[str, FakeDatasetRunItem] = {}
         self.annotation_queues: dict[str, FakeAnnotationQueue] = {
             "queue_1": FakeAnnotationQueue(
                 id="queue_1",
@@ -879,6 +1102,11 @@ class FakeDataStore:
         }
         self.annotation_queue_items: dict[str, FakeAnnotationQueueItem] = {}
         self.queue_assignments: dict[str, set[str]] = {}
+        # Canned metric rows returned by the fake v2 metrics endpoint.
+        self.metrics_rows: list[dict[str, Any]] = [
+            {"providedModelName": "claude-opus-4-8", "totalCost_sum": 1.23, "count_count": 7},
+            {"providedModelName": "claude-sonnet-4-6", "totalCost_sum": 0.45, "count_count": 12},
+        ]
         self.scores: dict[str, FakeScore] = {
             "score_1": FakeScore(
                 id="score_1",
@@ -901,6 +1129,7 @@ class FakeLangfuse:
         self._store = FakeDataStore()
         self.api = FakeAPI(self._store)
         self.closed = False
+        self.flush_count = 0
         self.last_create_kwargs: dict[str, Any] | None = None
         self.last_update_kwargs: dict[str, Any] | None = None
 
@@ -1069,7 +1298,8 @@ class FakeLangfuse:
 
     # Backwards compatibility for cleanup logic.
     def flush(self) -> None:  # pragma: no cover - compatibility shim
-        """No-op for compatibility with legacy cleanup hooks."""
+        """Count flushes for tests while matching the SDK cleanup hook."""
+        self.flush_count += 1
         return None
 
     def shutdown(self) -> None:  # pragma: no cover - compatibility shim

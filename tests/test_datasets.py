@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 
 import pytest
 
-from tests.fakes import FakeContext, FakeLangfuse
+from tests.fakes import FakeContext, FakeDataset, FakeDatasetItem, FakeLangfuse, FakeLangfuseV4
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tool Registration Test
@@ -27,6 +28,11 @@ def test_dataset_tools_in_tool_groups():
         "create_dataset",
         "create_dataset_item",
         "delete_dataset_item",
+        "list_dataset_runs",
+        "get_dataset_run",
+        "list_dataset_run_items",
+        "create_dataset_run_item",
+        "delete_dataset_run",
     ]
     for tool in expected_tools:
         assert tool in dataset_tools, f"Tool {tool} missing from TOOL_GROUPS['datasets']"
@@ -40,6 +46,8 @@ def test_write_tools_defined():
         "create_dataset",
         "create_dataset_item",
         "delete_dataset_item",
+        "create_dataset_run_item",
+        "delete_dataset_run",
         "create_text_prompt",
         "create_chat_prompt",
         "update_prompt_labels",
@@ -262,6 +270,181 @@ def test_delete_dataset_item(state):
     # Verify it's gone
     with pytest.raises(LookupError):
         asyncio.run(get_dataset_item(ctx, item_id=item_id))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dataset Run Tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_create_dataset_run_item_flushes_and_returns_submitted_metadata(state):
+    """create_dataset_run_item should submit through the SDK and flush the write."""
+    from langfuse_mcp.__main__ import create_dataset, create_dataset_item, create_dataset_run_item
+
+    ctx = FakeContext(state)
+    asyncio.run(create_dataset(ctx, name="eval-set"))
+    item_result = asyncio.run(create_dataset_item(ctx, dataset_name="eval-set", input={"question": "q"}))
+    item_id = item_result["data"]["id"]
+
+    result = asyncio.run(
+        create_dataset_run_item(
+            ctx,
+            run_name="baseline",
+            dataset_item_id=item_id,
+            run_description="nightly eval",
+            metadata={"model": "gpt-4.1"},
+            trace_id="trace_1",
+            observation_id="obs_1",
+        )
+    )
+
+    assert state.langfuse_client.flush_count == 1
+    assert result["data"]["dataset_item_id"] == item_id
+    assert result["data"]["run_name"] == "baseline"
+    assert result["data"]["trace_id"] == "trace_1"
+    assert result["metadata"]["submitted"] is True
+    assert result["metadata"]["run_name"] == "baseline"
+    assert result["metadata"]["dataset_item_id"] == item_id
+    assert state.langfuse_client.api.dataset_run_items.last_create_kwargs is not None
+    request = state.langfuse_client.api.dataset_run_items.last_create_kwargs["request"]
+    if isinstance(request, dict):
+        request_data = request
+    elif hasattr(request, "model_dump"):
+        request_data = request.model_dump(by_alias=False)
+    else:
+        request_data = request.dict(by_alias=False)
+    assert request_data["run_name"] == "baseline"
+    assert request_data["dataset_item_id"] == item_id
+
+
+def test_create_dataset_run_item_signature_matches_sdk_request_model():
+    """create_dataset_run_item should expose only fields accepted by CreateDatasetRunItemRequest."""
+    from langfuse_mcp.__main__ import create_dataset_run_item
+
+    params = inspect.signature(create_dataset_run_item).parameters
+
+    assert "dataset_version" not in params
+    assert "created_at" not in params
+
+
+def test_create_dataset_run_item_supports_v4_direct_kwargs_shape(tmp_path):
+    """create_dataset_run_item should also support v4 clients that accept direct kwargs."""
+    from langfuse_mcp.__main__ import MCPState, create_dataset_run_item
+
+    client = FakeLangfuseV4()
+    dataset = FakeDataset(id="dataset_eval-set", name="eval-set")
+    item = FakeDatasetItem(id="item_1", dataset_id=dataset.id, input={"question": "q"})
+    client._store.datasets[dataset.name] = dataset
+    client._store.dataset_items[item.id] = item
+    ctx = FakeContext(MCPState(langfuse_client=client, dump_dir=str(tmp_path)))
+
+    result = asyncio.run(
+        create_dataset_run_item(
+            ctx,
+            run_name="baseline-v4",
+            dataset_item_id=item.id,
+            run_description="v4 eval",
+            metadata={"model": "gpt-4.1"},
+            trace_id="trace_1",
+            observation_id="obs_1",
+        )
+    )
+
+    assert result["data"]["dataset_item_id"] == item.id
+    assert result["data"]["run_name"] == "baseline-v4"
+    assert client.api.dataset_run_items.last_create_kwargs == {
+        "run_name": "baseline-v4",
+        "dataset_item_id": item.id,
+        "run_description": "v4 eval",
+        "metadata": {"model": "gpt-4.1"},
+        "trace_id": "trace_1",
+        "observation_id": "obs_1",
+    }
+
+
+def test_list_dataset_runs_uses_dataset_name(state):
+    """list_dataset_runs should call datasets.get_runs by dataset name."""
+    from langfuse_mcp.__main__ import create_dataset, create_dataset_item, create_dataset_run_item, list_dataset_runs
+
+    ctx = FakeContext(state)
+    asyncio.run(create_dataset(ctx, name="eval-set"))
+    item_result = asyncio.run(create_dataset_item(ctx, dataset_name="eval-set", input="input"))
+    asyncio.run(create_dataset_run_item(ctx, run_name="baseline", dataset_item_id=item_result["data"]["id"]))
+
+    result = asyncio.run(list_dataset_runs(ctx, dataset_name="eval-set", page=1, limit=10))
+
+    assert result["data"][0]["name"] == "baseline"
+    assert result["metadata"]["dataset_name"] == "eval-set"
+    assert state.langfuse_client.api.datasets.last_get_runs_kwargs == {"dataset_name": "eval-set", "page": 1, "limit": 10}
+
+
+def test_get_dataset_run_returns_items(state):
+    """get_dataset_run should return a run with its run items."""
+    from langfuse_mcp.__main__ import create_dataset, create_dataset_item, create_dataset_run_item, get_dataset_run
+
+    ctx = FakeContext(state)
+    asyncio.run(create_dataset(ctx, name="eval-set"))
+    item_result = asyncio.run(create_dataset_item(ctx, dataset_name="eval-set", input="input"))
+    item_id = item_result["data"]["id"]
+    asyncio.run(create_dataset_run_item(ctx, run_name="baseline", dataset_item_id=item_id))
+
+    result = asyncio.run(get_dataset_run(ctx, dataset_name="eval-set", run_name="baseline"))
+
+    assert result["data"]["name"] == "baseline"
+    assert result["data"]["items"][0]["dataset_item_id"] == item_id
+    assert result["metadata"]["dataset_name"] == "eval-set"
+    assert result["metadata"]["run_name"] == "baseline"
+
+
+def test_list_dataset_run_items_uses_dataset_id_and_run_name(state):
+    """list_dataset_run_items should call dataset_run_items.list with dataset_id and run_name."""
+    from langfuse_mcp.__main__ import (
+        create_dataset,
+        create_dataset_item,
+        create_dataset_run_item,
+        list_dataset_run_items,
+    )
+
+    ctx = FakeContext(state)
+    dataset = asyncio.run(create_dataset(ctx, name="eval-set"))["data"]
+    item_result = asyncio.run(create_dataset_item(ctx, dataset_name="eval-set", input="input"))
+    asyncio.run(create_dataset_run_item(ctx, run_name="baseline", dataset_item_id=item_result["data"]["id"]))
+
+    result = asyncio.run(list_dataset_run_items(ctx, dataset_id=dataset["id"], run_name="baseline", page=1, limit=5))
+
+    assert len(result["data"]) == 1
+    assert result["metadata"]["dataset_id"] == dataset["id"]
+    assert result["metadata"]["run_name"] == "baseline"
+    assert state.langfuse_client.api.dataset_run_items.last_list_kwargs == {
+        "dataset_id": dataset["id"],
+        "run_name": "baseline",
+        "page": 1,
+        "limit": 5,
+    }
+
+
+def test_delete_dataset_run_removes_run_and_items(state):
+    """delete_dataset_run should delete the run by dataset name and run name."""
+    from langfuse_mcp.__main__ import (
+        create_dataset,
+        create_dataset_item,
+        create_dataset_run_item,
+        delete_dataset_run,
+        list_dataset_runs,
+    )
+
+    ctx = FakeContext(state)
+    asyncio.run(create_dataset(ctx, name="eval-set"))
+    item_result = asyncio.run(create_dataset_item(ctx, dataset_name="eval-set", input="input"))
+    asyncio.run(create_dataset_run_item(ctx, run_name="baseline", dataset_item_id=item_result["data"]["id"]))
+
+    result = asyncio.run(delete_dataset_run(ctx, dataset_name="eval-set", run_name="baseline"))
+
+    assert result["metadata"]["deleted"] is True
+    assert result["metadata"]["dataset_name"] == "eval-set"
+    assert result["metadata"]["run_name"] == "baseline"
+    runs = asyncio.run(list_dataset_runs(ctx, dataset_name="eval-set"))
+    assert runs["data"] == []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
