@@ -189,9 +189,8 @@ def test_fetch_trace(state):
     # the per-request read timeout so large traces do not time out.
     kwargs = state.langfuse_client.api.trace.last_get_kwargs
     assert kwargs["trace_id"] == "trace_1"
-    request_options = kwargs["request_options"]
-    assert request_options["additional_query_parameters"]["fields"] == "core,io,scores,observations,metrics"
-    assert request_options["timeout_in_seconds"] == 120
+    assert kwargs["fields"] == "core,io,scores,observations,metrics"
+    assert kwargs["request_options"]["timeout_in_seconds"] == 120
 
 
 def test_fetch_trace_without_observations_scopes_fields(state):
@@ -200,7 +199,7 @@ def test_fetch_trace_without_observations_scopes_fields(state):
 
     ctx = FakeContext(state)
     asyncio.run(fetch_trace(ctx, trace_id="trace_1", include_observations=False, output_mode="compact"))
-    fields = state.langfuse_client.api.trace.last_get_kwargs["request_options"]["additional_query_parameters"]["fields"]
+    fields = state.langfuse_client.api.trace.last_get_kwargs["fields"]
     assert "observations" not in fields
     assert fields == "core,io,scores,metrics"
 
