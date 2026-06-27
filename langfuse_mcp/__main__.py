@@ -827,14 +827,15 @@ def _get_trace(langfuse_client: Any, trace_id: str, include_observations: bool) 
     megabytes — even when the caller only wants an overview. That payload is the
     main cause of read timeouts on this tool.
 
-    The SDK's ``trace.get()`` accepts a first-class ``fields`` selector (forwarded as
-    the ``fields`` query param the API supports), so we scope the request: drop the
-    ``observations`` field group unless observations were explicitly asked for, which
-    skips the expensive per-observation IO entirely. We also raise the per-request
-    read timeout for the heavy ``include_observations=True`` case via ``request_options``.
+    The endpoint supports a ``fields`` query param, but the supported SDK floor
+    does not expose it as a first-class ``trace.get()`` argument. We pass it through
+    ``request_options.additional_query_parameters`` instead: drop the
+    ``observations`` field group unless observations were explicitly asked for,
+    which skips the expensive per-observation IO entirely. We also raise the
+    per-request read timeout via the same request options.
 
-    Falls back to a plain ``get()`` for older SDKs whose ``trace.get()`` predates the
-    ``fields``/``request_options`` parameters.
+    Falls back to a plain ``get()`` for older SDKs whose ``trace.get()`` predates
+    ``request_options`` entirely.
     """
     if not hasattr(langfuse_client, "api") or not hasattr(langfuse_client.api, "trace"):
         raise RuntimeError("Unsupported Langfuse client: no trace getter available")
@@ -842,11 +843,14 @@ def _get_trace(langfuse_client: Any, trace_id: str, include_observations: bool) 
     # Note: the endpoint has no "observations without IO" mode — including the
     # observations group always brings their full IO — so we toggle the whole group.
     fields = "core,io,scores,observations,metrics" if include_observations else "core,io,scores,metrics"
-    request_options = {"timeout_in_seconds": TRACE_GET_TIMEOUT_SECONDS}
+    request_options = {
+        "additional_query_parameters": {"fields": fields},
+        "timeout_in_seconds": TRACE_GET_TIMEOUT_SECONDS,
+    }
     try:
-        return langfuse_client.api.trace.get(trace_id=trace_id, fields=fields, request_options=request_options)
+        return langfuse_client.api.trace.get(trace_id=trace_id, request_options=request_options)
     except TypeError:
-        # Older SDK whose trace.get() lacks fields/request_options: fall back to a plain get().
+        # Older SDK without request_options support: fall back to a plain get().
         return langfuse_client.api.trace.get(trace_id=trace_id)
 
 

@@ -32,8 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   megabytes — which is the main cause of read timeouts. `fetch_trace` now drops the
   `observations` field group unless `include_observations=True` (so `include_observations=False`
   no longer returns observation references), and raises the per-request read timeout for
-  the heavy `include_observations=True` path. Falls back to a plain `get()` on older SDKs
-  that do not accept `request_options`.
+  single-trace fetches. The `fields` selector is forwarded through SDK request options so
+  it works on the supported `langfuse>=3.11.2` floor. Falls back to a plain `get()` only
+  on older SDKs that do not accept `request_options`.
 
 ## [0.9.1] - 2026-05-06
 ### Changed
