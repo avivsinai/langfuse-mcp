@@ -112,6 +112,28 @@ MAX_FIELD_LENGTH = 500  # Maximum string length for field values
 MAX_RESPONSE_SIZE = 20000  # Maximum size of response object in characters
 TRUNCATE_SUFFIX = "..."  # Suffix to add to truncated fields
 
+
+def _read_trace_get_timeout_seconds() -> int:
+    """Read the per-request read timeout for single-trace fetches.
+
+    A single trace with many observations can take far longer than the default
+    client timeout (``LANGFUSE_TIMEOUT``, 30s) to download. This override applies
+    only to ``GET /traces/{id}`` so the heavier ``include_observations=True`` path
+    does not hit a premature read timeout. Override via
+    ``LANGFUSE_MCP_TRACE_TIMEOUT_SECONDS``.
+    """
+    raw_value = os.environ.get("LANGFUSE_MCP_TRACE_TIMEOUT_SECONDS", "120")
+    try:
+        timeout_seconds = int(raw_value)
+    except ValueError as exc:
+        raise ValueError("LANGFUSE_MCP_TRACE_TIMEOUT_SECONDS must be an integer number of seconds") from exc
+    if timeout_seconds <= 0:
+        raise ValueError("LANGFUSE_MCP_TRACE_TIMEOUT_SECONDS must be a positive integer")
+    return timeout_seconds
+
+
+TRACE_GET_TIMEOUT_SECONDS = _read_trace_get_timeout_seconds()
+
 # Tool groups for selective loading (reduces token overhead)
 TOOL_GROUPS = {
     "traces": ["fetch_traces", "fetch_trace"],
@@ -799,13 +821,37 @@ def _count_by_key(decisions: list[dict[str, Any]], key: str) -> dict[str, int]:
 def _get_trace(langfuse_client: Any, trace_id: str, include_observations: bool) -> Any:
     """Fetch a single trace handling SDK version differences.
 
-    Note: Some Langfuse SDK versions do not support a `fields` selector on `get()`. We avoid
-    passing `fields` here and rely on embedding observations separately when requested.
+    The public ``GET /traces/{id}`` endpoint returns every field group by default
+    (``core,io,scores,observations,metrics``). For a trace with many observations
+    that means pulling each observation together with its full input/output — often
+    megabytes — even when the caller only wants an overview. That payload is the
+    main cause of read timeouts on this tool.
+
+    The endpoint supports a ``fields`` query param, but the supported SDK floor
+    does not expose it as a first-class ``trace.get()`` argument. We pass it through
+    ``request_options.additional_query_parameters`` instead: drop the
+    ``observations`` field group unless observations were explicitly asked for,
+    which skips the expensive per-observation IO entirely. We also raise the
+    per-request read timeout via the same request options.
+
+    Falls back to a plain ``get()`` for older SDKs whose ``trace.get()`` predates
+    ``request_options`` entirely.
     """
     if not hasattr(langfuse_client, "api") or not hasattr(langfuse_client.api, "trace"):
         raise RuntimeError("Unsupported Langfuse client: no trace getter available")
 
-    return langfuse_client.api.trace.get(trace_id=trace_id)
+    # Note: the endpoint has no "observations without IO" mode — including the
+    # observations group always brings their full IO — so we toggle the whole group.
+    fields = "core,io,scores,observations,metrics" if include_observations else "core,io,scores,metrics"
+    request_options = {
+        "additional_query_parameters": {"fields": fields},
+        "timeout_in_seconds": TRACE_GET_TIMEOUT_SECONDS,
+    }
+    try:
+        return langfuse_client.api.trace.get(trace_id=trace_id, request_options=request_options)
+    except TypeError:
+        # Older SDK without request_options support: fall back to a plain get().
+        return langfuse_client.api.trace.get(trace_id=trace_id)
 
 
 def _list_sessions(
@@ -1576,8 +1622,10 @@ async def fetch_trace(
     include_observations: bool = Field(
         False,
         description=(
-            "If True, fetch and include the full observation objects instead of just IDs. "
-            "Use this when you need access to system prompts, model parameters, or other details stored "
+            "If True, fetch and include the full observation objects. "
+            "If False, the observations field group is dropped entirely to avoid the expensive "
+            "per-observation IO that dominates large-trace payloads. "
+            "Use True when you need access to system prompts, model parameters, or other details stored "
             "within observations. Significantly increases response time but provides complete data. "
             "Pairs well with output_mode='full_json_file' for complete dumps."
         ),
@@ -1597,8 +1645,9 @@ async def fetch_trace(
     Args:
         ctx: Context object containing lifespan context with Langfuse client
         trace_id: The ID of the trace to fetch (unique identifier string)
-        include_observations: If True, fetch and include the full observation objects instead of just IDs.
-            Use this when you need access to system prompts, model parameters, or other details stored
+        include_observations: If True, fetch and include the full observation objects. If False, the
+            observations field group is dropped entirely to avoid expensive per-observation IO.
+            Use True when you need access to system prompts, model parameters, or other details stored
             within observations. Significantly increases response time but provides complete data.
         output_mode: Controls the output format and detail level
 

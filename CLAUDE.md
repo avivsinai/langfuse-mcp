@@ -47,6 +47,7 @@ uv run -m ruff check --fix .
 - `LANGFUSE_MCP_LOG_FILE` defaults to `/tmp/langfuse_mcp.log`
 - `LANGFUSE_MCP_TOOLS` selects comma-separated tool groups
 - `LANGFUSE_MCP_DEFAULT_OUTPUT_MODE` sets the default MCP tool `output_mode`
+- `LANGFUSE_MCP_TRACE_TIMEOUT_SECONDS` sets the per-request read timeout (seconds) for single-trace fetches (`fetch_trace`); defaults to `120`
 
 ## Code style
 

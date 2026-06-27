@@ -21,6 +21,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   credentials; any malformed value is rejected (fail closed — no silent fallback).
   Per-project clients are cached in a bounded LRU (max 32 entries); evicted clients
   are flushed and shut down to prevent resource leaks.
+- **`LANGFUSE_MCP_TRACE_TIMEOUT_SECONDS`** (default `120`): per-request read timeout
+  in seconds for single-trace fetches (`fetch_trace`). Raise it if large traces with
+  `include_observations=True` time out.
+
+### Changed
+- **`fetch_trace` scopes the `GET /traces/{id}` request via a `fields` selector.** The
+  endpoint returns every field group by default (`core,io,scores,observations,metrics`);
+  for traces with many observations that pulls each observation's full IO — often
+  megabytes — which is the main cause of read timeouts. `fetch_trace` now drops the
+  `observations` field group unless `include_observations=True` (so `include_observations=False`
+  no longer returns observation references), and raises the per-request read timeout for
+  single-trace fetches. The `fields` selector is forwarded through SDK request options so
+  it works on the supported `langfuse>=3.11.2` floor. Falls back to a plain `get()` only
+  on older SDKs that do not accept `request_options`.
 
 ## [0.9.1] - 2026-05-06
 ### Changed

@@ -213,14 +213,18 @@ class _TraceAPI:
 
         return FakePaginatedResponse(data=data, meta={"next_page": None, "total": len(data)})
 
-    def get(self, trace_id: str, **kwargs: Any) -> dict[str, Any]:
-        self.last_get_kwargs = {"trace_id": trace_id, **kwargs}
+    def get(self, trace_id: str, *, request_options: dict[str, Any] | None = None) -> dict[str, Any]:
+        self.last_get_kwargs = {"trace_id": trace_id}
+        if request_options is not None:
+            self.last_get_kwargs["request_options"] = request_options
         trace = self._store.traces.get(trace_id)
         if not trace:
             return {}
 
-        include_observations = "fields" in kwargs and kwargs["fields"]
-        if include_observations and "observations" in kwargs["fields"]:
+        query_params = (request_options or {}).get("additional_query_parameters", {})
+        fields = query_params.get("fields", "")
+        include_observations = bool(fields)
+        if include_observations and "observations" in fields:
             obs = [self._store.observations[o_id] for o_id in trace.observations]
             return {**trace.__dict__, "observations": [ob.__dict__ for ob in obs]}
         return trace.__dict__
