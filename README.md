@@ -125,12 +125,7 @@ The MCP server provides the tools; the skill provides the agent-facing workflow.
 Langfuse uses upsert for dataset items. To edit an existing item, call `create_dataset_item` with `item_id`. If the ID exists, it updates; otherwise it creates a new item.
 
 ```python
-create_dataset_item(
-  dataset_name="qa-test-cases",
-  item_id="item_123",
-  input={"question": "What is 2+2?"},
-  expected_output={"answer": "4"}
-)
+create_dataset_item(dataset_name="qa-test-cases", item_id="item_123", input={"question": "What is 2+2?"}, expected_output={"answer": "4"})
 ```
 
 ## Metrics Queries
@@ -139,11 +134,10 @@ create_dataset_item(
 
 ```python
 query_metrics(
-  view="observations",
-  metrics=[{"measure": "totalCost", "aggregation": "sum"},
-           {"measure": "latency", "aggregation": "p95"}],
-  dimensions=["providedModelName"],
-  age=1440,  # last 24h; or pass from_timestamp / to_timestamp
+    view="observations",
+    metrics=[{"measure": "totalCost", "aggregation": "sum"}, {"measure": "latency", "aggregation": "p95"}],
+    dimensions=["providedModelName"],
+    age=1440,  # last 24h; or pass from_timestamp / to_timestamp
 )
 ```
 
