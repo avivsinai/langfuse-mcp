@@ -7,8 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-08-06
 ### Fixed
 - Constrained the MCP SDK below 2.0 and added a clean installed-wheel startup smoke so fresh `uvx langfuse-mcp` installs no longer resolve an incompatible SDK that removed `mcp.server.fastmcp` (closes #67).
+
 
 ## [0.10.0] - 2026-06-27
 ### Added
