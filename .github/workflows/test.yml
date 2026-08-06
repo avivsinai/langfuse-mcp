@@ -24,6 +24,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      with:
+        fetch-depth: 0
 
     - name: Check skill sync
       run: make check-skills
@@ -47,6 +49,14 @@ jobs:
         source .venv/bin/activate
         ruff check .
         ruff format --check .
+
+    - name: Build wheel
+      if: matrix.python-version == '3.12'
+      run: uv build --wheel --python 3.12 --out-dir dist
+
+    - name: Smoke-test installed wheel
+      if: matrix.python-version == '3.12'
+      run: ./scripts/smoke-installed-wheel.sh dist/*.whl
 
   typecheck:
     name: Type Check

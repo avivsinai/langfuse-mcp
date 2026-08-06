@@ -235,6 +235,7 @@ for artifact in artifacts:
     if version not in artifact:
         raise SystemExit(f"error: built artifact does not include release version {version}: {artifact}")
 PY
+  ./scripts/smoke-installed-wheel.sh dist/*.whl
   trap - EXIT
   git tag -d "$tag" >/dev/null 2>&1 || true
 fi

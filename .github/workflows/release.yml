@@ -166,6 +166,19 @@ jobs:
           uv run --python 3.12 ruff format --check .
       - name: Run pyright
         run: uv run --python 3.12 pyright
+      - name: Build distributions
+        run: uv build --clear --python 3.12 --out-dir dist
+      - name: Smoke-test installed wheel
+        run: ./scripts/smoke-installed-wheel.sh dist/*.whl
+      - name: Upload verified release distributions
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-dists
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
 
   release:
     needs: [prepare, verify]
@@ -186,36 +199,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
-
-      - name: Create release tag after verification
-        shell: bash
-        env:
-          TAG: ${{ needs.prepare.outputs.tag }}
-          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
-        run: |
-          set -euo pipefail
-
-          tag_commit_sha() {
-            git rev-parse "refs/tags/${1}^{commit}" 2>/dev/null || git rev-parse "refs/tags/${1}"
-          }
-
-          git fetch --force --tags origin
-          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
-            existing_sha="$(tag_commit_sha "$TAG")"
-            if [[ "$existing_sha" != "$RELEASE_SHA" ]]; then
-              echo "::error::Tag ${TAG} already exists but points to ${existing_sha}, not ${RELEASE_SHA}."
-              exit 1
-            fi
-          else
-            git tag "$TAG" "$RELEASE_SHA"
-            git push origin "refs/tags/${TAG}"
-          fi
-
-      - name: Build distributions
-        run: |
-          rm -rf dist
-          uv build --python 3.12
+      - name: Download verified release distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-dists
+          path: dist/
 
       - name: Collect attestation subjects
         id: attestation_subjects
@@ -258,6 +246,30 @@ jobs:
           pathlib.Path("RELEASE_NOTES.md").write_text(match.group(0).strip() + "\n")
           PY
 
+      - name: Create release tag after verification
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+
+          tag_commit_sha() {
+            git rev-parse "refs/tags/${1}^{commit}" 2>/dev/null || git rev-parse "refs/tags/${1}"
+          }
+
+          git fetch --force --tags origin
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
+            existing_sha="$(tag_commit_sha "$TAG")"
+            if [[ "$existing_sha" != "$RELEASE_SHA" ]]; then
+              echo "::error::Tag ${TAG} already exists but points to ${existing_sha}, not ${RELEASE_SHA}."
+              exit 1
+            fi
+          else
+            git tag "$TAG" "$RELEASE_SHA"
+            git push origin "refs/tags/${TAG}"
+          fi
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
         with:
@@ -269,13 +281,6 @@ jobs:
           files: |
             dist/*.whl
             dist/*.tar.gz
-
-      - name: Upload build artifacts for downstream jobs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: release-dists
-          path: dist/
-          retention-days: 1
 
   pypi-publish:
     name: Publish to PyPI
