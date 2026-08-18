@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- Migrated from MCP Python SDK 1.x (`FastMCP`) to 2.x (`MCPServer`). The runtime pin is now `mcp[cli]>=2,<3`. HTTP bind address and port are passed to `run(transport="streamable-http", ...)` instead of the server constructor.
 
 ## [0.10.1] - 2026-08-06
 ### Fixed

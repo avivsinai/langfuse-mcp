@@ -5,7 +5,7 @@ This is the master agent instruction file for this repository. Keep repository p
 ## Project summary
 
 Langfuse MCP server for accessing Langfuse telemetry such as traces, observations, prompts, and datasets via MCP.
-The CLI entrypoint is `langfuse-mcp`, which runs `langfuse_mcp.__main__:main` using FastMCP.
+The CLI entrypoint is `langfuse-mcp`, which runs `langfuse_mcp.__main__:main` using MCPServer.
 
 ## Repo layout
 

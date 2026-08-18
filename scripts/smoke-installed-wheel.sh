@@ -59,8 +59,8 @@ import sysconfig
 from importlib.metadata import distribution
 from pathlib import Path
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp.client import Client
+from mcp.client.stdio import StdioServerParameters, stdio_client
 
 
 venv = Path(os.environ["SMOKE_VENV"]).resolve()
@@ -76,11 +76,12 @@ mcp_requirement = next(
     (requirement for requirement in app_distribution.requires or [] if requirement.lower().startswith("mcp[")),
     None,
 )
-if mcp_requirement is None or "<2" not in mcp_requirement.replace(" ", ""):
-    raise RuntimeError(f"wheel metadata is missing the MCP upper bound: {mcp_requirement!r}")
+normalized_requirement = (mcp_requirement or "").replace(" ", "")
+if mcp_requirement is None or "<3" not in normalized_requirement:
+    raise RuntimeError(f"wheel metadata is missing the MCP 2.x upper bound: {mcp_requirement!r}")
 
 mcp_version = mcp_distribution.version
-if int(mcp_version.split(".", 1)[0]) >= 2:
+if int(mcp_version.split(".", 1)[0]) != 2:
     raise RuntimeError(f"resolved incompatible MCP version: {mcp_version}")
 
 console_script = Path(sysconfig.get_path("scripts")) / "langfuse-mcp"
@@ -96,13 +97,11 @@ async def probe() -> None:
         args=["--tools", "schema", "--read-only"],
         env=environment,
     )
-    async with stdio_client(parameters) as (read_stream, write_stream):
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
-            tools = await session.list_tools()
-            tool_names = {tool.name for tool in tools.tools}
-            if tool_names != {"get_data_schema"}:
-                raise RuntimeError(f"unexpected installed server tools: {sorted(tool_names)}")
+    async with Client(stdio_client(parameters)) as client:
+        tools = await client.list_tools()
+        tool_names = {tool.name for tool in tools.tools}
+        if tool_names != {"get_data_schema"}:
+            raise RuntimeError(f"unexpected installed server tools: {sorted(tool_names)}")
 
 
 asyncio.run(asyncio.wait_for(probe(), timeout=30))

@@ -42,7 +42,7 @@ from typing import Any
 import pytest
 
 # Bypass the autouse ``patch_dependencies`` fixture in conftest.py — it stubs
-# out ``langfuse``, ``mcp.server.fastmcp``, ``pydantic``, and ``cachetools`` with
+# out ``langfuse``, ``mcp.server.mcpserver``, ``pydantic``, and ``cachetools`` with
 # hand-rolled fakes that prevent the real SDK from being imported. The
 # ``_restore_real_langfuse`` fixture below clears those stubs from
 # ``sys.modules`` before each test body so real Langfuse imports against the

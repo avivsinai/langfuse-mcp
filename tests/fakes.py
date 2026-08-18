@@ -1340,7 +1340,7 @@ class FakeLangfuseV4:
 
 
 class FakeContext:
-    """Mimic `mcp.server.fastmcp.Context` used by the tools."""
+    """Mimic `mcp.server.mcpserver.Context` used by the tools."""
 
     def __init__(self, state: Any) -> None:
         """Expose the minimal request context consumed by tool implementations."""
