@@ -27,7 +27,7 @@ from typing import Annotated, Any, Literal, cast
 
 from cachetools import LRUCache
 from langfuse import Langfuse
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.mcpserver import Context, MCPServer
 from pydantic import AfterValidator, BaseModel, Field
 
 from langfuse_mcp import _compat
@@ -4910,10 +4910,8 @@ def app_factory(
     timeout: int = 30,
     read_only: bool = False,
     default_output_mode: OutputMode = OutputMode.COMPACT,
-    bind_host: str = "127.0.0.1",
-    port: int = 8000,
-) -> FastMCP:
-    """Create a FastMCP server with Langfuse tools.
+) -> MCPServer:
+    """Create an MCPServer with Langfuse tools.
 
     Args:
         public_key: Langfuse public key
@@ -4926,9 +4924,6 @@ def app_factory(
         timeout: API request timeout in seconds (default: 30). The Langfuse SDK defaults to 5s which is too aggressive.
         read_only: If True, disable all write operations (create/update/delete tools).
         default_output_mode: Default output_mode exposed in MCP tool schemas.
-        bind_host: Bind address for HTTP transport (default: 127.0.0.1, localhost only).
-            Use 0.0.0.0 only behind an authenticating reverse-proxy or trusted network.
-        port: Port for HTTP transport (default: 8000).
     """
     if enabled_tools is None:
         enabled_tools = ALL_TOOL_GROUPS
@@ -4938,7 +4933,7 @@ def app_factory(
             enabled_tools = ALL_TOOL_GROUPS
 
     @asynccontextmanager
-    async def lifespan(server: FastMCP) -> AsyncIterator[MCPState]:
+    async def lifespan(server: MCPServer) -> AsyncIterator[MCPState]:
         default_client: Langfuse | None = None
         if public_key and secret_key:
             init_params = inspect.signature(Langfuse.__init__).parameters
@@ -4981,7 +4976,7 @@ def app_factory(
                 except Exception as e:
                     logger.warning(f"Error shutting down Langfuse client: {e}")
 
-    mcp = FastMCP("Langfuse MCP Server", lifespan=lifespan, host=bind_host, port=port)
+    mcp = MCPServer("Langfuse MCP Server", lifespan=lifespan)
 
     # Tool function lookup
     tool_funcs = {
@@ -5113,13 +5108,11 @@ def main():
         timeout=args.timeout,
         read_only=args.read_only,
         default_output_mode=_ensure_output_mode(args.default_output_mode),
-        bind_host=args.bind_host,
-        port=args.port,
     )
 
     if args.transport == "streamable-http":
         logger.info(f"Starting HTTP transport on {args.bind_host}:{args.port}")
-        app.run(transport="streamable-http")
+        app.run(transport="streamable-http", host=args.bind_host, port=args.port)
     else:
         app.run(transport="stdio")
 
