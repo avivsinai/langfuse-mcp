@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Changed
+- README first screen states the product, last-month PyPI downloads, and version. The native comparison is a local-debug vs hosted lane picker.
 - README lead now puts live GitHub stars and PyPI monthly-download badges next to each other, cites pypistats for last-month usage, answers why this vs native Langfuse MCP first, and documents the existing exception-tool path for a failing trace.
 - Migrated from MCP Python SDK 1.x (`FastMCP`) to 2.x (`MCPServer`). The runtime pin is now `mcp[cli]>=2,<3`. HTTP bind address and port are passed to `run(transport="streamable-http", ...)` instead of the server constructor.
 

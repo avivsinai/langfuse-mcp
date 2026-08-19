@@ -7,30 +7,30 @@
 [![Python 3.10–3.14](https://img.shields.io/badge/python-3.10–3.14-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Usage:** [12,518 PyPI downloads last month](https://pypistats.org/packages/langfuse-mcp) ([pypistats](https://pypistats.org/api/packages/langfuse-mcp/recent), 2026-08-19). Stars understate installs because official Langfuse MCP owns the generic "langfuse mcp" query. Latest [v0.10.1](https://pypi.org/project/langfuse-mcp/0.10.1/).
+**Usage:** [12,518 PyPI downloads last month](https://pypistats.org/packages/langfuse-mcp) ([pypistats](https://pypistats.org/api/packages/langfuse-mcp/recent), 2026-08-19). [v0.10.1](https://pypi.org/project/langfuse-mcp/0.10.1/).
 
-Local, debugging-first [Model Context Protocol](https://modelcontextprotocol.io) server and skill for [Langfuse](https://langfuse.com). Use it from Claude Code, Codex, Cursor, or any MCP client.
+Local [MCP](https://modelcontextprotocol.io) server and skill for [Langfuse](https://langfuse.com). Debug traces, sessions, and exceptions from Claude Code, Codex, Cursor, or any MCP client.
 
 ## Why this instead of native Langfuse MCP?
 
-Official [Langfuse MCP](https://langfuse.com/docs/api-and-data-platform/features/mcp-server) is the hosted, zero-install answer. Use it for the broad API surface (score writes, comments, models, media).
+Use this for local debug: first-class traces, sessions, and exceptions; route-decision tools; compact / file-dump output; plus the included [`langfuse` skill](skills/langfuse/SKILL.md).
 
-Use **this** package when you want a local debug layer: first-class traces, sessions, and exceptions; route-decision tools; compact / file-dump output so agents stay token-disciplined; plus an included [`langfuse` skill](skills/langfuse/SKILL.md).
+Use official [Langfuse MCP](https://langfuse.com/docs/api-and-data-platform/features/mcp-server) for hosted, zero-install access to the broader API (score writes, comments, models, media).
 
 As of June 2026:
 
 | | langfuse-mcp | Native Langfuse MCP |
 |-|--------------|---------------------|
-| **Primary fit** | Local, debugging-first MCP server + agent skill | Hosted, zero-install endpoint backed by Langfuse |
+| **Primary fit** | Local debug: traces, sessions, exceptions | Hosted, zero-install API surface |
 | **Deployment** | Local `stdio` or HTTP, via the Langfuse Python SDK | Native streamable HTTP at `/api/public/mcp` |
 | **Trace / session / exception tools** | First-class | Observation/API-oriented access |
 | **Route-decision tools** | Yes | No |
-| **Token & output control** | Compact summaries, truncation, file-dump mode, tool-group gating | Depends on the hosted tool response + client |
+| **Token & output control** | Compact summaries, truncation, file-dump mode, tool-group gating | Hosted tool response + client |
 | **Metrics & dataset runs** | Yes | Yes |
 | **Prompt, dataset, queue & score reads** | Yes | Yes |
-| **Score writes, comments, models, media** | Not yet | Yes |
+| **Score writes, comments, models, media** | No | Yes |
 
-Native MCP for hosted breadth. `langfuse-mcp` for local debug ergonomics.
+`langfuse-mcp` for local debug. Native MCP for hosted breadth.
 
 ## See a failing trace in 2 minutes
 
