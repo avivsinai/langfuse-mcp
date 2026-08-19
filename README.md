@@ -1,36 +1,23 @@
 # Langfuse MCP Server
 
 [![PyPI](https://badge.fury.io/py/langfuse-mcp.svg)](https://badge.fury.io/py/langfuse-mcp)
+[![GitHub stars](https://img.shields.io/github/stars/avivsinai/langfuse-mcp)](https://github.com/avivsinai/langfuse-mcp/stargazers)
+[![PyPI downloads](https://img.shields.io/pypi/dm/langfuse-mcp)](https://pypistats.org/packages/langfuse-mcp)
 [![Downloads](https://static.pepy.tech/badge/langfuse-mcp)](https://pepy.tech/projects/langfuse-mcp)
 [![Python 3.10–3.14](https://img.shields.io/badge/python-3.10–3.14-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Agent-facing [Model Context Protocol](https://modelcontextprotocol.io) server and skill for [Langfuse](https://langfuse.com) observability.
+**Usage:** [12,518 PyPI downloads last month](https://pypistats.org/packages/langfuse-mcp) ([pypistats](https://pypistats.org/api/packages/langfuse-mcp/recent), 2026-08-19). Stars understate installs because official Langfuse MCP owns the generic "langfuse mcp" query. Latest [v0.10.1](https://pypi.org/project/langfuse-mcp/0.10.1/).
 
-Use `langfuse-mcp` from Claude Code, Codex, Cursor, or any MCP client to query traces, inspect generations, debug exceptions, analyze sessions, manage prompts, browse datasets, and understand what your AI agents did in production.
+Local, debugging-first [Model Context Protocol](https://modelcontextprotocol.io) server and skill for [Langfuse](https://langfuse.com). Use it from Claude Code, Codex, Cursor, or any MCP client.
 
-## What You Can Do
+## Why this instead of native Langfuse MCP?
 
-- Debug failing agent runs from Langfuse traces and observations.
-- Find exceptions, slow generations, high-latency spans, and affected users.
-- Inspect sessions and user journeys without leaving your agent workflow.
-- Manage prompt versions, labels, datasets, annotation queues, and scores.
-- Install the included [`langfuse` agent skill](skills/langfuse/SKILL.md) for ready-made debugging playbooks.
+Official [Langfuse MCP](https://langfuse.com/docs/api-and-data-platform/features/mcp-server) is the hosted, zero-install answer. Use it for the broad API surface (score writes, comments, models, media).
 
-## Project Links
+Use **this** package when you want a local debug layer: first-class traces, sessions, and exceptions; route-decision tools; compact / file-dump output so agents stay token-disciplined; plus an included [`langfuse` skill](skills/langfuse/SKILL.md).
 
-- [Quick Start](#quick-start)
-- [Agent Skill](#agent-skill)
-- [Tools](#tools-48-total)
-- [Selective Tool Loading](#selective-tool-loading)
-- [Read-Only Mode](#read-only-mode)
-- [Other Clients](#other-clients)
-
-## Why langfuse-mcp?
-
-Langfuse is where your traces live. `langfuse-mcp` makes that telemetry directly usable by agents that need to answer questions like "what failed?", "why was this slow?", "which prompt version ran?", or "what happened in this user's session?"
-
-Positioning relative to the [native Langfuse MCP](https://langfuse.com/docs/api-and-data-platform/features/mcp-server) (as of June 2026):
+As of June 2026:
 
 | | langfuse-mcp | Native Langfuse MCP |
 |-|--------------|---------------------|
@@ -43,7 +30,42 @@ Positioning relative to the [native Langfuse MCP](https://langfuse.com/docs/api-
 | **Prompt, dataset, queue & score reads** | Yes | Yes |
 | **Score writes, comments, models, media** | Not yet | Yes |
 
-This project does not mirror every native Langfuse MCP tool. It focuses on agent debugging ergonomics — compact trace inspection, exception triage, session analysis, routing-decision workflows, local tool-group gating, and an included skill with ready-made investigation playbooks. Use the native MCP for the broad hosted API surface; use `langfuse-mcp` as a local, token-disciplined layer.
+Native MCP for hosted breadth. `langfuse-mcp` for local debug ergonomics.
+
+## See a failing trace in 2 minutes
+
+Install is `uvx langfuse-mcp` plus Langfuse API keys — [Quick Start](#quick-start) for Claude Code, Codex, Cursor, or Docker.
+
+After the client restarts, ask:
+
+```text
+find exceptions in the last day
+```
+
+That maps to existing tools:
+
+```text
+find_exceptions(age=1440, group_by="file")
+find_exceptions_in_file(filepath="<file from the grouping>", age=1440)
+get_exception_details(trace_id="<trace_id from the file results>")
+```
+
+`find_exceptions` returns `{group, count}` only. `find_exceptions_in_file` is what yields `trace_id`. Then optionally:
+
+```text
+fetch_trace(trace_id="<trace_id>", include_observations=true)
+```
+
+Exceptions are read from SPAN observation events with `exception.type`. If none appear, `get_error_count(age=1440)` and `fetch_traces(age=1440)` still confirm the project has recent telemetry.
+
+## Project Links
+
+- [Quick Start](#quick-start)
+- [Agent Skill](#agent-skill)
+- [Tools](#tools-48-total)
+- [Selective Tool Loading](#selective-tool-loading)
+- [Read-Only Mode](#read-only-mode)
+- [Other Clients](#other-clients)
 
 ## Quick Start
 
