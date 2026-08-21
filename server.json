@@ -1,0 +1,53 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.avivsinai/langfuse-mcp",
+  "title": "Langfuse MCP",
+  "description": "Langfuse MCP server for accessing and analyzing telemetry data via natural language",
+  "websiteUrl": "https://github.com/avivsinai/langfuse-mcp",
+  "repository": {
+    "url": "https://github.com/avivsinai/langfuse-mcp",
+    "source": "github",
+    "id": "952361536"
+  },
+  "version": "0.10.1",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "langfuse-mcp",
+      "version": "0.10.1",
+      "runtimeHint": "uvx",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        {
+          "name": "LANGFUSE_PUBLIC_KEY",
+          "description": "Langfuse public API key",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": true
+        },
+        {
+          "name": "LANGFUSE_SECRET_KEY",
+          "description": "Langfuse secret API key",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": true
+        },
+        {
+          "name": "LANGFUSE_HOST",
+          "description": "Langfuse API base URL (Cloud or self-hosted)",
+          "default": "https://cloud.langfuse.com",
+          "format": "string",
+          "isRequired": false
+        },
+        {
+          "name": "LANGFUSE_MCP_READ_ONLY",
+          "description": "Set true to disable write tools",
+          "default": "false",
+          "format": "boolean",
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}
