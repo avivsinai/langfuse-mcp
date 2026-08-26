@@ -1,0 +1,45 @@
+# First MCP Registry publish still needs the mcp-name HTML comment on a new
+# PyPI version. 0.10.1 is immutable and lacks it, so this job must not run
+# until a later tag ships that README on PyPI.
+#
+# workflow_dispatch only: never runs on pull requests or tag pushes.
+name: Publish to MCP Registry
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to publish (e.g. v0.10.2). Requires that tag's PyPI README to contain the mcp-name comment."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mcp-registry-publish-${{ github.event.inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish server.json to MCP Registry
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          ref: refs/tags/${{ inputs.tag }}
+
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Authenticate to MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish server to MCP Registry
+        run: ./mcp-publisher publish
