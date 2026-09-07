@@ -274,6 +274,67 @@ def test_fetch_observations(observation_state):
     assert namespace.last_get_many_kwargs["limit"] == 50
 
 
+def test_fetch_observations_type_filter_covers_every_langfuse_observation_type():
+    """The Literal on the ``type`` filter must list exactly what the Langfuse SDK's enum lists."""
+    import typing
+
+    from langfuse_mcp import _compat
+    from langfuse_mcp.__main__ import OBSERVATION_TYPE_LITERAL
+
+    # langfuse.api ObservationType, as of langfuse 4.15
+    expected = {"SPAN", "GENERATION", "EVENT", "AGENT", "TOOL", "CHAIN", "RETRIEVER", "EVALUATOR", "EMBEDDING", "GUARDRAIL"}
+    assert set(typing.get_args(OBSERVATION_TYPE_LITERAL)) == expected
+
+    observation_type = _compat.resolve_request_model("ingestion", "observation_type", "ObservationType")
+    if observation_type is not dict:  # the suite stubs langfuse; the real SDK is only present locally
+        assert {member.value for member in observation_type} == expected
+
+
+def test_fetch_observations_passes_a_tool_type_filter_through(observation_state):
+    """A TOOL filter reaches the observations endpoint unchanged."""
+    from langfuse_mcp.__main__ import fetch_observations
+
+    ctx = FakeContext(observation_state)
+    asyncio.run(
+        fetch_observations(
+            ctx,
+            type="TOOL",
+            age=10,
+            name=None,
+            user_id=None,
+            trace_id=None,
+            parent_observation_id=None,
+            page=1,
+            limit=50,
+            output_mode="compact",
+        )
+    )
+
+    namespace = _observation_list_fake(observation_state.langfuse_client)
+    assert namespace.last_get_many_kwargs is not None
+    assert namespace.last_get_many_kwargs["type"] == "TOOL"
+
+
+@pytest.mark.parametrize(
+    "tool_name,kwargs",
+    [
+        ("find_exceptions", {"age": 60, "group_by": "file"}),
+        ("find_exceptions_in_file", {"filepath": "app/main.py", "age": 60, "output_mode": "compact"}),
+        ("get_error_count", {"age": 60}),
+    ],
+)
+def test_exception_tools_request_every_observation_type(observation_state, tool_name, kwargs):
+    """Exceptions are events on whichever observation raised them, so the tools must not filter by SPAN."""
+    import langfuse_mcp.__main__ as main_module
+
+    ctx = FakeContext(observation_state)
+    asyncio.run(getattr(main_module, tool_name)(ctx, **kwargs))
+
+    namespace = _observation_list_fake(observation_state.langfuse_client)
+    assert namespace.last_get_many_kwargs is not None
+    assert namespace.last_get_many_kwargs.get("type") is None
+
+
 def test_fetch_observation(observation_state):
     """fetch_observation should resolve via the v3 namespace or the v4 legacy_v1 fallback."""
     from langfuse_mcp.__main__ import fetch_observation

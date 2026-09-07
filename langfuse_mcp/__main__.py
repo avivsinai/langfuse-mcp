@@ -272,6 +272,9 @@ class OutputMode(str, Enum):
 
 
 OUTPUT_MODE_LITERAL = Literal["compact", "full_json_string", "full_json_file"]
+OBSERVATION_TYPE_LITERAL = Literal[
+    "SPAN", "GENERATION", "EVENT", "AGENT", "TOOL", "CHAIN", "RETRIEVER", "EVALUATOR", "EMBEDDING", "GUARDRAIL"
+]
 
 # Define a custom Dict type for our standardized response format
 ResponseDict = dict[str, Any]
@@ -1714,8 +1717,11 @@ async def fetch_trace(
 
 async def fetch_observations(
     ctx: Context,
-    type: Literal["SPAN", "GENERATION", "EVENT"] | None = Field(
-        None, description="The observation type to filter by ('SPAN', 'GENERATION', or 'EVENT')"
+    type: OBSERVATION_TYPE_LITERAL | None = Field(
+        None,
+        description=(
+            "The observation type to filter by (SPAN, GENERATION, EVENT, AGENT, TOOL, CHAIN, RETRIEVER, EVALUATOR, EMBEDDING or GUARDRAIL)"
+        ),
     ),
     age: ValidatedAge = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)", gt=0, le=MAX_AGE_MINUTES),
     name: str | None = Field(None, description="Optional name filter (string pattern to match)"),
@@ -2572,14 +2578,15 @@ async def find_exceptions(
     to_timestamp = datetime.now(timezone.utc)
 
     try:
-        # Fetch all SPAN observations since they may contain exceptions
+        # Fetch every observation type: an exception is recorded as an event on the observation that
+        # raised it, and tool calls, agent steps and generations raise as much as plain spans do
         observation_items, _ = _list_observations(
             _resolve_client(state, ctx),
             limit=100,
             page=1,
             from_start_time=from_timestamp,
             to_start_time=to_timestamp,
-            obs_type="SPAN",
+            obs_type=None,
             name=None,
             user_id=None,
             trace_id=None,
@@ -2667,14 +2674,15 @@ async def find_exceptions_in_file(
     to_timestamp = datetime.now(timezone.utc)
 
     try:
-        # Fetch all SPAN observations since they may contain exceptions
+        # Fetch every observation type: an exception is recorded as an event on the observation that
+        # raised it, and tool calls, agent steps and generations raise as much as plain spans do
         observation_items, _ = _list_observations(
             _resolve_client(state, ctx),
             limit=100,
             page=1,
             from_start_time=from_timestamp,
             to_start_time=to_timestamp,
-            obs_type="SPAN",
+            obs_type=None,
             name=None,
             user_id=None,
             trace_id=None,
@@ -2904,14 +2912,15 @@ async def get_error_count(
     to_timestamp = datetime.now(timezone.utc)
 
     try:
-        # Fetch all SPAN observations since they may contain exceptions
+        # Fetch every observation type: an exception is recorded as an event on the observation that
+        # raised it, and tool calls, agent steps and generations raise as much as plain spans do
         observation_items, _ = _list_observations(
             _resolve_client(state, ctx),
             limit=100,
             page=1,
             from_start_time=from_timestamp,
             to_start_time=to_timestamp,
-            obs_type="SPAN",
+            obs_type=None,
             name=None,
             user_id=None,
             trace_id=None,
@@ -3010,7 +3019,7 @@ An observation can be a span, generation, or event within a trace.
   "name": "string",               // Name of the observation
   "start_time": "datetime",       // When the observation started
   "end_time": "datetime",         // When the observation ended (for spans/generations)
-  "type": "string",               // Type: SPAN, GENERATION, EVENT
+  "type": "string",               // Type: SPAN, GENERATION, EVENT, AGENT, TOOL, CHAIN, RETRIEVER, EVALUATOR, EMBEDDING, GUARDRAIL
   "level": "string",              // Log level: DEBUG, DEFAULT, WARNING, ERROR
   "status_message": "string",     // Optional status message
   "metadata": "object",           // Optional JSON metadata
