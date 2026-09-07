@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Fixed
-- `fetch_observations` accepts every Langfuse observation type (`AGENT`, `TOOL`, `CHAIN`, `RETRIEVER`, `EVALUATOR`, `EMBEDDING`, `GUARDRAIL` as well as `SPAN`, `GENERATION`, `EVENT`), and `find_exceptions`, `find_exceptions_in_file` and `get_error_count` look at every observation type instead of spans only, so exceptions raised inside tool calls and agent steps are found.
+- `fetch_observations` accepts every Langfuse observation type (`AGENT`, `TOOL`, `CHAIN`, `RETRIEVER`, `EVALUATOR`, `EMBEDDING`, `GUARDRAIL` as well as `SPAN`, `GENERATION`, `EVENT`), and `find_exceptions`, `find_exceptions_in_file` and `get_error_count` look at every observation type instead of the first page of spans, walking the listing page by page (up to 50 pages), so exceptions raised inside tool calls and agent steps are found.
 
 ### Changed
 - README first screen states the product, last-month PyPI downloads, and version. The native comparison is a local-debug vs hosted lane picker.

@@ -110,6 +110,7 @@ MAX_AGE_MINUTES = MAX_AGE_DAYS * DAY
 AGE_LOOKBACK_DESCRIPTION = f"Number of minutes to look back (positive integer, max {MAX_AGE_DAYS} days/{MAX_AGE_MINUTES} minutes)"
 MAX_FIELD_LENGTH = 500  # Maximum string length for field values
 MAX_RESPONSE_SIZE = 20000  # Maximum size of response object in characters
+MAX_EXCEPTION_SCAN_PAGES = 50  # Pages of observations the exception tools walk before giving up
 TRUNCATE_SUFFIX = "..."  # Suffix to add to truncated fields
 
 
@@ -734,6 +735,58 @@ def _list_observations(
         pagination = {**pagination, "filtered_count": len(items)}
 
     return items, pagination
+
+
+def _next_page_number(pagination: dict[str, Any], page: int) -> int | None:
+    """Return the next page to request, or ``None`` when the metadata does not promise one.
+
+    Only explicit page-based metadata continues the walk (``next_page`` from v3 responses,
+    ``total_pages`` / ``totalPages`` from raw API metadata). Cursor-mode responses carry
+    neither, and ``_list_observations`` cannot request page 2 in that mode anyway.
+    """
+    next_page = pagination.get("next_page")
+    if isinstance(next_page, int) and next_page > page:
+        return next_page
+    total_pages = pagination.get("total_pages", pagination.get("totalPages"))
+    if isinstance(total_pages, int) and page < total_pages:
+        return page + 1
+    return None
+
+
+def _list_all_observations(
+    langfuse_client: Any,
+    *,
+    from_start_time: datetime,
+    to_start_time: datetime,
+    obs_type: str | None,
+    page_size: int = 100,
+    max_pages: int = MAX_EXCEPTION_SCAN_PAGES,
+) -> list[Any]:
+    """Fetch every observation in a time window by walking the listing page by page."""
+    items: list[Any] = []
+    page = 1
+    while True:
+        page_items, pagination = _list_observations(
+            langfuse_client,
+            limit=page_size,
+            page=page,
+            from_start_time=from_start_time,
+            to_start_time=to_start_time,
+            obs_type=obs_type,
+            name=None,
+            user_id=None,
+            trace_id=None,
+            parent_observation_id=None,
+            metadata=None,
+        )
+        items.extend(page_items)
+        next_page = _next_page_number(pagination, page)
+        if next_page is None:
+            return items
+        if page >= max_pages:
+            logger.warning("Stopped scanning observations after %d pages; results are partial", max_pages)
+            return items
+        page = next_page
 
 
 def _get_observation(langfuse_client: Any, observation_id: str) -> Any:
@@ -2578,20 +2631,14 @@ async def find_exceptions(
     to_timestamp = datetime.now(timezone.utc)
 
     try:
-        # Fetch every observation type: an exception is recorded as an event on the observation that
-        # raised it, and tool calls, agent steps and generations raise as much as plain spans do
-        observation_items, _ = _list_observations(
+        # Fetch every observation type, page by page: an exception is recorded as an event on the
+        # observation that raised it, and tool calls, agent steps and generations raise as much as
+        # plain spans do, so a single page filtered to spans would miss most of them
+        observation_items = _list_all_observations(
             _resolve_client(state, ctx),
-            limit=100,
-            page=1,
             from_start_time=from_timestamp,
             to_start_time=to_timestamp,
             obs_type=None,
-            name=None,
-            user_id=None,
-            trace_id=None,
-            parent_observation_id=None,
-            metadata=None,
         )
 
         # Process observations to find and group exceptions
@@ -2674,20 +2721,14 @@ async def find_exceptions_in_file(
     to_timestamp = datetime.now(timezone.utc)
 
     try:
-        # Fetch every observation type: an exception is recorded as an event on the observation that
-        # raised it, and tool calls, agent steps and generations raise as much as plain spans do
-        observation_items, _ = _list_observations(
+        # Fetch every observation type, page by page: an exception is recorded as an event on the
+        # observation that raised it, and tool calls, agent steps and generations raise as much as
+        # plain spans do, so a single page filtered to spans would miss most of them
+        observation_items = _list_all_observations(
             _resolve_client(state, ctx),
-            limit=100,
-            page=1,
             from_start_time=from_timestamp,
             to_start_time=to_timestamp,
             obs_type=None,
-            name=None,
-            user_id=None,
-            trace_id=None,
-            parent_observation_id=None,
-            metadata=None,
         )
 
         # Process observations to find exceptions in the specified file
@@ -2912,20 +2953,14 @@ async def get_error_count(
     to_timestamp = datetime.now(timezone.utc)
 
     try:
-        # Fetch every observation type: an exception is recorded as an event on the observation that
-        # raised it, and tool calls, agent steps and generations raise as much as plain spans do
-        observation_items, _ = _list_observations(
+        # Fetch every observation type, page by page: an exception is recorded as an event on the
+        # observation that raised it, and tool calls, agent steps and generations raise as much as
+        # plain spans do, so a single page filtered to spans would miss most of them
+        observation_items = _list_all_observations(
             _resolve_client(state, ctx),
-            limit=100,
-            page=1,
             from_start_time=from_timestamp,
             to_start_time=to_timestamp,
             obs_type=None,
-            name=None,
-            user_id=None,
-            trace_id=None,
-            parent_observation_id=None,
-            metadata=None,
         )
 
         # Count traces and observations with exceptions
