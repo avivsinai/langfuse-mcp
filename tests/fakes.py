@@ -23,7 +23,10 @@ class FakeTrace:
 
 @dataclass
 class FakeObservation:
-    """Observation representation compatible with _sdk_object_to_python."""
+    """Observation representation compatible with _sdk_object_to_python.
+
+    Mirrors the real API shape (level/status_message; no ``events`` — the API never returns them).
+    """
 
     id: str
     type: str
@@ -34,7 +37,8 @@ class FakeObservation:
     trace_id: str | None = None
     parent_observation_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-    events: list[dict[str, Any]] = field(default_factory=list)
+    level: str = "DEFAULT"
+    status_message: str | None = None
 
 
 @dataclass
@@ -243,11 +247,29 @@ class _ObservationsAPI:
         *,
         page: int | None = None,
         limit: int | None = None,
+        level: str | None = None,
+        from_start_time: Any = None,
+        to_start_time: Any = None,
+        trace_id: str | None = None,
+        name: str | None = None,
+        user_id: str | None = None,
+        type: str | None = None,
+        parent_observation_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> FakePaginatedResponse:
         """Return observations using v3 page-based pagination."""
-        self.last_get_many_kwargs = {"page": page, "limit": limit, **kwargs}
+        self.last_get_many_kwargs = {
+            "page": page,
+            "limit": limit,
+            **{k: v for k, v in (("level", level), ("trace_id", trace_id), ("type", type)) if v is not None},
+            **kwargs,
+        }
         observations = list(self._store.observations.values())
+        if level is not None:
+            observations = [obs for obs in observations if obs.level == level]
+        if trace_id is not None:
+            observations = [obs for obs in observations if obs.trace_id == trace_id]
         data = [obs.__dict__ for obs in observations]
         return FakePaginatedResponse(data=data, meta={"next_page": None, "total": len(data)})
 
@@ -977,11 +999,30 @@ class _ObservationsV4API:
         *,
         cursor: str | None = None,
         limit: int | None = None,
+        level: str | None = None,
+        fields: str | None = None,
+        expand_metadata: str | None = None,
+        from_start_time: Any = None,
+        to_start_time: Any = None,
+        trace_id: str | None = None,
         **kwargs: Any,
     ) -> FakePaginatedResponse:
         """Return observations using cursor-based pagination (v4 ObservationsV2)."""
-        self.last_get_many_kwargs = {"cursor": cursor, "limit": limit, **kwargs}
+        self.last_get_many_kwargs = {
+            "cursor": cursor,
+            "limit": limit,
+            **{
+                k: v
+                for k, v in (("level", level), ("fields", fields), ("expand_metadata", expand_metadata), ("trace_id", trace_id))
+                if v is not None
+            },
+            **kwargs,
+        }
         observations = list(self._store.observations.values())
+        if level is not None:
+            observations = [obs for obs in observations if obs.level == level]
+        if trace_id is not None:
+            observations = [obs for obs in observations if obs.trace_id == trace_id]
         data = [obs.__dict__ for obs in observations]
         # v4 ObservationsV2Meta carries only ``cursor``; ``None`` means no further pages.
         return FakePaginatedResponse(data=data, meta={"cursor": None})
@@ -1007,11 +1048,29 @@ class _LegacyObservationsV1API:
         *,
         page: int | None = None,
         limit: int | None = None,
+        level: str | None = None,
+        from_start_time: Any = None,
+        to_start_time: Any = None,
+        trace_id: str | None = None,
+        name: str | None = None,
+        user_id: str | None = None,
+        type: str | None = None,
+        parent_observation_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> FakePaginatedResponse:
         """Return observations using page-based pagination via the legacy v1 endpoint."""
-        self.last_get_many_kwargs = {"page": page, "limit": limit, **kwargs}
+        self.last_get_many_kwargs = {
+            "page": page,
+            "limit": limit,
+            **{k: v for k, v in (("level", level), ("trace_id", trace_id), ("type", type)) if v is not None},
+            **kwargs,
+        }
         observations = list(self._store.observations.values())
+        if level is not None:
+            observations = [obs for obs in observations if obs.level == level]
+        if trace_id is not None:
+            observations = [obs for obs in observations if obs.trace_id == trace_id]
         data = [obs.__dict__ for obs in observations]
         return FakePaginatedResponse(data=data, meta={"next_page": None, "total": len(data)})
 
@@ -1067,7 +1126,6 @@ class FakeDataStore:
                 start_time=now,
                 end_time=now,
                 metadata={"code.filepath": "app.py"},
-                events=[{"attributes": {"exception.type": "ValueError"}}],
             )
         }
         self.traces: dict[str, FakeTrace] = {

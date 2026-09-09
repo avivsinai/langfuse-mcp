@@ -84,7 +84,7 @@ For manual `.mcp.json` setup or troubleshooting, see `setup.md`.
 ```
 find_exceptions(age=1440, group_by="file")
 ```
-→ Shows error counts by file. Pick the worst offender.
+→ Shows error-level observation counts by recorded file. Pick the worst offender; each group carries a representative observation_id/trace_id.
 
 ```
 find_exceptions_in_file(filepath="src/ai/chat.py", age=1440)
@@ -225,7 +225,7 @@ update_prompt_labels(name="...", version=N, labels=["production"])
 | Get trace details | `fetch_trace(trace_id="...", include_observations=true)` |
 | List LLM calls | `fetch_observations(age=N, type="GENERATION")` |
 | Get observation | `fetch_observation(observation_id="...")` |
-| Error count | `get_error_count(age=N)` |
+| Error count | `get_error_count(age=N)` (exception_count is null; counts are error-level observations) |
 | Find exceptions | `find_exceptions(age=N, group_by="file")` |
 | List sessions | `fetch_sessions(age=N)` |
 | User sessions | `get_user_sessions(user_id="...", age=N)` |

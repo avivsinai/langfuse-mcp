@@ -14,7 +14,7 @@ import os
 import sys
 import types
 from collections import Counter
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -744,6 +744,244 @@ def _get_observation(langfuse_client: Any, observation_id: str) -> Any:
     return fetcher(observation_id)
 
 
+ERROR_SCAN_MAX_REQUESTS = 50
+ERROR_SCAN_PAGE_SIZE = 100
+ERR_ERROR_SCAN_LIMIT = "ERR_LANGFUSE_ERROR_SCAN_LIMIT"
+
+
+class ErrorScanLimitError(RuntimeError):
+    """Raised when the shared error scan exhausts its request cap with more data remaining."""
+
+
+def _error_scan_list_method(langfuse_client: Any) -> tuple[Callable[..., Any], str]:
+    """Select the listing callable for the internal error scan.
+
+    Prefers the cursor-based V2 endpoint; falls back to the page-based V1 route only
+    when no cursor capability exists (or the endpoint answers 404/405). Auth errors,
+    timeouts, and other failures propagate — never silently truncated.
+    """
+    api = getattr(langfuse_client, "api", None)
+    if api is not None:
+        observations = getattr(api, "observations", None)
+        cursor_method = getattr(observations, "get_many", None) if observations is not None else None
+        if cursor_method is not None and _compat.method_has_param(cursor_method, "cursor") is True:
+            return cursor_method, "cursor"
+
+        legacy = getattr(api, "legacy", None)
+        legacy_v1 = getattr(legacy, "observations_v1", None) if legacy is not None else None
+        page_method = getattr(legacy_v1, "get_many", None) if legacy_v1 is not None else None
+        if page_method is not None and _compat.method_has_param(page_method, "page") is True:
+            return page_method, "page"
+
+    page_shim = _compat.get_observations_list_method(langfuse_client)
+    if page_shim is None:
+        raise RuntimeError("Unsupported Langfuse client: no observation listing method available")
+    return page_shim
+
+
+def _error_scan_request(
+    method: Callable[..., Any],
+    mode: str,
+    *,
+    from_start_time: datetime | None,
+    to_start_time: datetime | None,
+    trace_id: str | None,
+    cursor_or_page: Any,
+) -> tuple[list[Any], dict[str, Any]]:
+    """Issue one scan request and normalize the response.
+
+    Requests core/basic/metadata field groups plus metadata expansion of the known
+    top-level keys when the endpoint supports ``fields``/``expand_metadata`` (V2).
+    """
+    kwargs: dict[str, Any] = {}
+    if from_start_time is not None:
+        kwargs["from_start_time"] = from_start_time
+    if to_start_time is not None:
+        kwargs["to_start_time"] = to_start_time
+    if trace_id is not None:
+        kwargs["trace_id"] = trace_id
+
+    if mode == "cursor":
+        kwargs["limit"] = ERROR_SCAN_PAGE_SIZE
+        kwargs["cursor"] = cursor_or_page
+        if _compat.method_has_param(method, "fields") is True:
+            kwargs["fields"] = "core,basic,metadata"
+        if _compat.method_has_param(method, "expand_metadata") is True:
+            kwargs["expand_metadata"] = (
+                "attributes,code.filepath,code.function,code.lineno,exception.type,exception.message,exception.stacktrace"
+            )
+    else:
+        kwargs["limit"] = ERROR_SCAN_PAGE_SIZE
+        kwargs["page"] = cursor_or_page
+
+    # Strict server-side level filter in BOTH modes; observation type omitted (scan all types).
+    if _compat.method_has_param(method, "level") is True:
+        kwargs["level"] = "ERROR"
+
+    response = method(**{k: v for k, v in kwargs.items() if v is not None})
+    return _extract_items_from_response(response)
+
+
+def _error_scan_next(
+    mode: str,
+    pagination: dict[str, Any],
+    cursor_or_page: Any,
+) -> Any | None:
+    """Return the next cursor/page token, or None when pagination is exhausted."""
+    if mode == "cursor":
+        next_cursor = pagination.get("cursor")
+        return next_cursor if isinstance(next_cursor, str) and next_cursor else None
+    next_page = pagination.get("next_page")
+    if isinstance(next_page, int) and next_page > cursor_or_page:
+        return next_page
+    total_pages = pagination.get("total_pages", pagination.get("totalPages"))
+    if isinstance(total_pages, int) and cursor_or_page < total_pages:
+        return cursor_or_page + 1
+    return None
+
+
+def _scan_error_observations(
+    langfuse_client: Any,
+    *,
+    from_start_time: datetime | None,
+    to_start_time: datetime | None,
+    trace_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Shared complete scan of ERROR observations across all observation types.
+
+    Walks every page (cursor or page mode) within the frozen ``from_start_time`` /
+    ``to_start_time`` window, deduplicates by ``(trace_id, observation_id)`` and returns
+    normalized observation dicts for observations whose ``level == "ERROR"`` (validated
+    client-side even when the server pre-filters).
+
+    Raises:
+        ErrorScanLimitError: when ERROR_SCAN_MAX_REQUESTS requests are exhausted while
+            pagination still promises more data. No partial results are returned.
+    """
+    method, mode = _error_scan_list_method(langfuse_client)
+
+    seen: set[tuple[str | None, str | None]] = set()
+    error_observations: list[dict[str, Any]] = []
+    cursor_or_page: Any = None if mode == "cursor" else 1
+
+    for _ in range(ERROR_SCAN_MAX_REQUESTS):
+        try:
+            items, pagination = _error_scan_request(
+                method,
+                mode,
+                from_start_time=from_start_time,
+                to_start_time=to_start_time,
+                trace_id=trace_id,
+                cursor_or_page=cursor_or_page,
+            )
+        except Exception as exc:
+            status = getattr(exc, "status_code", None)
+            if mode == "cursor" and status in (404, 405):
+                # Switch only to a CONFIRMED page-mode route (capability already validated by
+                # method_has_param on the legacy_v1 surface). If none exists, propagate the
+                # original error. No repeated cursor fallback.
+                api = getattr(langfuse_client, "api", None)
+                legacy = getattr(api, "legacy", None) if api is not None else None
+                legacy_v1 = getattr(legacy, "observations_v1", None) if legacy is not None else None
+                legacy_get_many = getattr(legacy_v1, "get_many", None) if legacy_v1 is not None else None
+                if legacy_get_many is not None and _compat.method_has_param(legacy_get_many, "page") is True:
+                    method, mode = legacy_get_many, "page"
+                    cursor_or_page = 1
+                    continue
+            raise
+
+        for item in items:
+            obs = _sdk_object_to_python(item)
+            if not isinstance(obs, dict):
+                continue
+            if obs.get("level") != "ERROR":
+                continue
+            identity = (obs.get("trace_id"), obs.get("id"))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            error_observations.append(obs)
+
+        next_token = _error_scan_next(mode, pagination, cursor_or_page)
+        if next_token is None:
+            return error_observations
+        cursor_or_page = next_token
+
+    raise ErrorScanLimitError(
+        f"{ERR_ERROR_SCAN_LIMIT}: the error scan stopped after {ERROR_SCAN_MAX_REQUESTS} pages of "
+        f"{ERROR_SCAN_PAGE_SIZE} observations and more data remains. Narrow the age window or filter "
+        "by trace_id and retry."
+    )
+
+
+STRING_METADATA_KEYS = frozenset(
+    {
+        "code.filepath",
+        "code.function",
+        "exception.type",
+        "exception.message",
+        "exception.stacktrace",
+    }
+)
+INTEGER_METADATA_KEYS = frozenset({"code.lineno"})
+
+
+def _metadata_value(observation: dict[str, Any], key: str) -> Any:
+    """Read a recorded metadata value, top-level keys taking precedence over copied span attributes.
+
+    String fields (code.filepath/function, exception.type/message/stacktrace) return recorded
+    strings only; code.lineno additionally accepts a recorded integer (bool excluded) or its
+    string form from the copied attributes. Both levels are dict-guarded; values are never
+    parsed or stringified. Returns None when absent at both allowed locations.
+    """
+    metadata = observation.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+
+    def _acceptable(value: Any) -> bool:
+        if isinstance(value, str) and value != "":
+            return True
+        return key in INTEGER_METADATA_KEYS and isinstance(value, int) and not isinstance(value, bool)
+
+    value = metadata.get(key)
+    if key in STRING_METADATA_KEYS | INTEGER_METADATA_KEYS and _acceptable(value):
+        return value
+
+    attributes = metadata.get("attributes")
+    if isinstance(attributes, dict):
+        nested = attributes.get(key)
+        if _acceptable(nested):
+            return nested
+    return None
+
+
+def _error_record(observation: dict[str, Any], *, include_filepath: bool = False) -> dict[str, Any]:
+    """Build a normalized exception detail record from a scanned ERROR observation.
+
+    Recorded fields only: absent values are null, never invented. Legacy event keys are
+    kept (always null) so consumers see no silent key removal.
+    """
+    record: dict[str, Any] = {
+        "observation_id": observation.get("id"),
+        "trace_id": observation.get("trace_id"),
+        "timestamp": observation.get("start_time"),
+        "exception_type": _metadata_value(observation, "exception.type"),
+        "exception_message": _metadata_value(observation, "exception.message"),
+        "exception_stacktrace": _metadata_value(observation, "exception.stacktrace"),
+        "function": _metadata_value(observation, "code.function"),
+        "line_number": _metadata_value(observation, "code.lineno"),
+        "level": observation.get("level"),
+        "observation_type": observation.get("type"),
+        "status_message": observation.get("status_message"),
+        "event_id": None,
+        "event_name": None,
+    }
+    if include_filepath:
+        record["filepath"] = _metadata_value(observation, "code.filepath")
+        record["observation_name"] = observation.get("name")
+    return record
+
+
 def _route_decision_metadata_filter(
     *,
     decision_id: str | None = None,
@@ -1332,14 +1570,17 @@ def _resolve_client(state: "MCPState", ctx: Context) -> Langfuse:
 
 
 class ExceptionCount(BaseModel):
-    """Model for exception counts grouped by category.
+    """Model for error-observation counts grouped by category.
 
-    Represents the count of exceptions grouped by file path, function name, or exception type.
-    Used by the find_exceptions endpoint to return aggregated exception data.
+    Represents the count of error-level observations grouped by recorded metadata
+    (file path, function name, exception type, observation name, or observation type).
+    Used by the find_exceptions tool to return aggregated error data.
     """
 
-    group: str = Field(description="The grouping key (file path, function name, or exception type)")
-    count: int = Field(description="Number of exceptions in this group")
+    group: str = Field(description="The grouping key (file path, function name, exception type, observation name, or observation type)")
+    count: int = Field(description="Number of error-level observations in this group")
+    observation_id: str | None = Field(description="Representative observation ID for this group")
+    trace_id: str | None = Field(description="Representative trace ID for this group")
 
 
 def validate_age(age: int) -> int:
@@ -1388,93 +1629,6 @@ def _get_cached_observation(langfuse_client: Langfuse, observation_id: str) -> A
     except Exception as e:
         logger.warning(f"Error fetching observation {observation_id}: {str(e)}")
         return None
-
-
-async def _efficient_fetch_observations(
-    state: MCPState, from_timestamp: datetime, to_timestamp: datetime, filepath: str | None = None
-) -> dict[str, Any]:
-    """Efficiently fetch observations with exception filtering.
-
-    Args:
-        state: MCP state with Langfuse client and caches
-        from_timestamp: Start time
-        to_timestamp: End time
-        filepath: Optional filter by filepath
-
-    Returns:
-        Dictionary of observation_id -> observation
-    """
-    langfuse_client = state.langfuse_client  # type: ignore[assignment]  # dead code, never called
-
-    # Use a cache key that includes the time range
-    cache_key = f"{from_timestamp.isoformat()}-{to_timestamp.isoformat()}"
-
-    # Check if we've already processed this time range
-    if hasattr(state, "observation_cache") and cache_key in state.observation_cache:
-        logger.info("Using cached observations")
-        return state.observation_cache[cache_key]
-
-    # Fetch observations from Langfuse
-    observation_items, _ = _list_observations(
-        langfuse_client,
-        limit=500,
-        page=1,
-        from_start_time=from_timestamp,
-        to_start_time=to_timestamp,
-        obs_type="SPAN",
-        name=None,
-        user_id=None,
-        trace_id=None,
-        parent_observation_id=None,
-        metadata=None,
-    )
-
-    # Process observations and build indices
-    observations: dict[str, Any] = {}
-    for obs in observation_items:
-        events = []
-        if hasattr(obs, "events"):
-            events = getattr(obs, "events") or []
-        elif isinstance(obs, dict):
-            events = obs.get("events", [])
-
-        if not events:
-            continue
-
-        for event in events:
-            attributes = getattr(event, "attributes", None)
-            if attributes is None and isinstance(event, dict):
-                attributes = event.get("attributes")
-            if not attributes or not attributes.get("exception.type"):
-                continue
-
-            # Store observation
-            obs_id = obs.get("id") if isinstance(obs, dict) else getattr(obs, "id", None)
-            if not obs_id:
-                continue
-            observations[obs_id] = _sdk_object_to_python(obs)
-
-            # Update file index if we have filepath info
-            metadata_block = getattr(obs, "metadata", None)
-            if metadata_block is None and isinstance(obs, dict):
-                metadata_block = obs.get("metadata")
-            if metadata_block:
-                file = metadata_block.get("code.filepath")
-                if file:
-                    if file not in state.file_to_observations_map:
-                        state.file_to_observations_map[file] = set()
-                    state.file_to_observations_map[file].add(obs_id)
-
-            # Update exception type index
-            exc_type = attributes["exception.type"]
-            if exc_type not in state.exception_type_map:
-                state.exception_type_map[exc_type] = set()
-            state.exception_type_map[exc_type].add(obs_id)
-
-    # Cache the processed observations
-    state.observation_cache[cache_key] = observations
-
-    return observations
 
 
 async def _embed_observations_in_traces(langfuse_client: Langfuse, traces: list[Any]) -> None:
@@ -2551,23 +2705,28 @@ async def get_user_sessions(
 async def find_exceptions(
     ctx: Context,
     age: ValidatedAge = Field(..., description=AGE_LOOKBACK_DESCRIPTION, gt=0, le=MAX_AGE_MINUTES),
-    group_by: Literal["file", "function", "type"] = Field(
+    group_by: Literal["file", "function", "type", "name", "observation_type"] = Field(
         "file",
         description=(
-            "How to group exceptions - 'file' groups by filename, 'function' groups by function name, or 'type' groups by exception type"
+            "How to group errors - 'file' groups by recorded code.filepath metadata, 'function' by "
+            "code.function, 'type' by recorded exception.type, 'name' by observation name, or "
+            "'observation_type' by observation type. Missing recorded metadata groups as 'unknown'."
         ),
     ),
 ) -> ResponseDict:
-    """Get exception counts grouped by file path, function, or type.
+    """Get error-level observations grouped by file path, function, type, name, or observation type.
 
     Args:
         ctx: Context object containing lifespan context with Langfuse client
         age: Number of minutes to look back; capped by the configured maximum
-        group_by: How to group exceptions - "file" groups by filename, "function" groups by function name,
-                  or "type" groups by exception type
+        group_by: How to group errors - "file" groups by recorded code.filepath, "function" by code.function,
+                  "type" by recorded exception.type, "name" by observation name, or "observation_type" by
+                  observation type
 
     Returns:
-        List of exception counts grouped by the specified category (file, function, or type)
+        List of error-observation counts grouped by the specified category. A group entry carries a
+        representative observation_id and trace_id. Counts describe error-level observations, NOT
+        individual exception events (which the standard observation listing does not expose).
     """
     state = cast(MCPState, ctx.request_context.lifespan_context)
 
@@ -2578,58 +2737,55 @@ async def find_exceptions(
     to_timestamp = datetime.now(timezone.utc)
 
     try:
-        # Fetch all SPAN observations since they may contain exceptions
-        observation_items, _ = _list_observations(
+        error_observations = _scan_error_observations(
             _resolve_client(state, ctx),
-            limit=100,
-            page=1,
             from_start_time=from_timestamp,
             to_start_time=to_timestamp,
-            obs_type="SPAN",
-            name=None,
-            user_id=None,
-            trace_id=None,
-            parent_observation_id=None,
-            metadata=None,
         )
 
-        # Process observations to find and group exceptions
-        exception_groups = Counter()
+        # Process observations to find and group errors by recorded metadata
+        exception_groups: Counter = Counter()
+        representative: dict[str, dict[str, str | None]] = {}
 
-        for observation in (_sdk_object_to_python(obs) for obs in observation_items):
-            events = observation.get("events", []) if isinstance(observation, dict) else []
-            if not events:
-                continue
+        for observation in error_observations:
+            if group_by == "file":
+                group_key = _metadata_value(observation, "code.filepath") or "unknown"
+            elif group_by == "function":
+                group_key = _metadata_value(observation, "code.function") or "unknown"
+            elif group_by == "type":
+                group_key = _metadata_value(observation, "exception.type") or "unknown"
+            elif group_by == "name":
+                group_key = observation.get("name") or "unknown"
+            elif group_by == "observation_type":
+                group_key = observation.get("type") or "unknown"
+            else:
+                group_key = "unknown"
 
-            for event in events:
-                event_dict = event if isinstance(event, dict) else _sdk_object_to_python(event)
+            exception_groups[group_key] += 1
+            representative.setdefault(
+                group_key,
+                {"observation_id": observation.get("id"), "trace_id": observation.get("trace_id")},
+            )
 
-                # Check if this is an exception event
-                if not event_dict.get("attributes", {}).get("exception.type"):
-                    continue
-
-                # Get the grouping key based on group_by parameter
-                if group_by == "file":
-                    meta = observation.get("metadata", {}) if isinstance(observation, dict) else {}
-                    group_key = meta.get("code.filepath", "unknown_file")
-                elif group_by == "function":
-                    meta = observation.get("metadata", {}) if isinstance(observation, dict) else {}
-                    group_key = meta.get("code.function", "unknown_function")
-                elif group_by == "type":
-                    group_key = event_dict.get("attributes", {}).get("exception.type", "unknown_exception")
-                else:
-                    group_key = "unknown"
-
-                # Increment the counter for this group
-                exception_groups[group_key] += 1
-
-        # Convert counter to list of ExceptionCount objects
-        results = [ExceptionCount(group=group, count=count) for group, count in exception_groups.most_common(50)]
+        # Convert counter to list of ExceptionCount objects (top 50 after the full scan)
+        results = [
+            ExceptionCount(
+                group=group,
+                count=count,
+                observation_id=representative[group]["observation_id"],
+                trace_id=representative[group]["trace_id"],
+            )
+            for group, count in exception_groups.most_common(50)
+        ]
 
         data = [item.model_dump() for item in results]
-        metadata_block = {"item_count": len(data)}
+        metadata_block = {
+            "item_count": len(data),
+            "count_basis": "error_level_observations",
+            "observation_count": len(error_observations),
+        }
 
-        logger.info(f"Found {len(data)} exception groups")
+        logger.info(f"Found {len(data)} error groups across {len(error_observations)} error-level observations")
         return {"data": data, "metadata": metadata_block}
     except Exception:
         logger.exception("Error finding exceptions")
@@ -2650,19 +2806,19 @@ async def find_exceptions_in_file(
         ),
     ),
 ) -> ResponseDict | str:
-    """Get detailed exception info for a specific file.
+    """Get detailed error info for a specific file (recorded code.filepath match).
 
     Args:
         ctx: Context object containing lifespan context with Langfuse client
-        filepath: Path to the file to search for exceptions (full path including extension)
+        filepath: Path to the file as recorded in Langfuse metadata (code.filepath)
         age: Number of minutes to look back; capped by the configured maximum
         output_mode: Controls the output format and detail level
 
     Returns:
         Based on output_mode:
-        - compact: List of summarized exception details
+        - compact: List of summarized error records (top 10 newest after the full scan)
         - full_json_string: String containing the full JSON response
-        - full_json_file: List of summarized exception details with file save info
+        - full_json_file: List of summarized error records with file save info
     """
     state = cast(MCPState, ctx.request_context.lifespan_context)
 
@@ -2673,54 +2829,24 @@ async def find_exceptions_in_file(
     to_timestamp = datetime.now(timezone.utc)
 
     try:
-        # Fetch all SPAN observations since they may contain exceptions
-        observation_items, _ = _list_observations(
+        error_observations = _scan_error_observations(
             _resolve_client(state, ctx),
-            limit=100,
-            page=1,
             from_start_time=from_timestamp,
             to_start_time=to_timestamp,
-            obs_type="SPAN",
-            name=None,
-            user_id=None,
-            trace_id=None,
-            parent_observation_id=None,
-            metadata=None,
         )
 
-        # Process observations to find exceptions in the specified file
+        # Process observations to find errors in the specified file (recorded-path match only,
+        # via the shared recorded-value lookup so attributes.code.filepath groups are reachable)
         exceptions = []
 
-        for observation in (_sdk_object_to_python(obs) for obs in observation_items):
-            metadata = observation.get("metadata", {}) if isinstance(observation, dict) else {}
-            if metadata.get("code.filepath") != filepath:
+        for observation in error_observations:
+            recorded_filepath = _metadata_value(observation, "code.filepath")
+            if recorded_filepath != filepath:
                 continue
 
-            events = observation.get("events", []) if isinstance(observation, dict) else []
-            if not events:
-                continue
+            exceptions.append(_error_record(observation))
 
-            for event in events:
-                event_dict = event if isinstance(event, dict) else _sdk_object_to_python(event)
-
-                # Check if this is an exception event
-                if not event_dict.get("attributes", {}).get("exception.type"):
-                    continue
-
-                exception_info = {
-                    "observation_id": observation.get("id", "unknown") if isinstance(observation, dict) else "unknown",
-                    "trace_id": observation.get("trace_id", "unknown") if isinstance(observation, dict) else "unknown",
-                    "timestamp": observation.get("start_time", "unknown") if isinstance(observation, dict) else "unknown",
-                    "exception_type": event_dict.get("attributes", {}).get("exception.type", "unknown"),
-                    "exception_message": event_dict.get("attributes", {}).get("exception.message", ""),
-                    "exception_stacktrace": event_dict.get("attributes", {}).get("exception.stacktrace", ""),
-                    "function": metadata.get("code.function", "unknown"),
-                    "line_number": metadata.get("code.lineno", "unknown"),
-                }
-
-                exceptions.append(exception_info)
-
-        # Sort exceptions by timestamp (newest first)
+        # Sort exceptions by timestamp (newest first); presentation limit applied after the full scan
         exceptions.sort(key=lambda x: _datetime_sort_key(x.get("timestamp")), reverse=True)
 
         # Only take the top 10 exceptions
@@ -2763,19 +2889,19 @@ async def get_exception_details(
         ),
     ),
 ) -> ResponseDict | str:
-    """Get detailed exception info for a trace/span.
+    """Get detailed error info for a trace/observation.
 
     Args:
         ctx: Context object containing lifespan context with Langfuse client
-        trace_id: The ID of the trace to analyze for exceptions (unique identifier string)
-        span_id: Optional span ID to filter by specific span (unique identifier string)
+        trace_id: The ID of the trace to analyze for errors (unique identifier string)
+        span_id: Optional observation ID to filter by (applies across all observation types)
         output_mode: Controls the output format and detail level
 
     Returns:
         Based on output_mode:
-        - compact: List of summarized exception details
+        - compact: List of summarized error records
         - full_json_string: String containing the full JSON response
-        - full_json_file: List of summarized exception details with file save info
+        - full_json_file: List of summarized error records with file save info
     """
     state = cast(MCPState, ctx.request_context.lifespan_context)
 
@@ -2794,23 +2920,16 @@ async def get_exception_details(
                 metadata_block.update(file_meta)
             return {"data": empty_payload, "metadata": metadata_block}
 
-        # Get all observations for this trace
-        observation_items, _ = _list_observations(
+        # Get all ERROR observations for this trace via the shared paginated scan
+        error_observations = _scan_error_observations(
             _resolve_client(state, ctx),
-            limit=100,
-            page=1,
             from_start_time=None,
             to_start_time=None,
-            obs_type=None,
-            name=None,
-            user_id=None,
             trace_id=trace_id,
-            parent_observation_id=None,
-            metadata=None,
         )
 
-        if not observation_items:
-            logger.warning(f"No observations found for trace: {trace_id}")
+        if not error_observations:
+            logger.warning(f"No ERROR observations found for trace: {trace_id}")
             empty_payload, file_meta = process_data_with_mode([], mode, f"exceptions_trace_{trace_id}", state)
             if mode == OutputMode.FULL_JSON_STRING:
                 return empty_payload
@@ -2819,47 +2938,14 @@ async def get_exception_details(
                 metadata_block.update(file_meta)
             return {"data": empty_payload, "metadata": metadata_block}
 
-        # Filter observations if span_id is provided
-        normalized_observations = [_sdk_object_to_python(obs) for obs in observation_items]
+        # Filter observations if span_id is provided (observation-ID filter, all types)
         if span_id:
-            filtered_observations = [obs for obs in normalized_observations if obs.get("id") == span_id]
+            filtered_observations = [obs for obs in error_observations if obs.get("id") == span_id]
         else:
-            filtered_observations = normalized_observations
+            filtered_observations = error_observations
 
-        # Process observations to find exceptions
-        exceptions = []
-
-        for observation in filtered_observations:
-            events = observation.get("events", []) if isinstance(observation, dict) else []
-            if not events:
-                continue
-
-            for event in events:
-                event_dict = event if isinstance(event, dict) else _sdk_object_to_python(event)
-
-                # Check if this is an exception event
-                if not event_dict.get("attributes", {}).get("exception.type"):
-                    continue
-
-                metadata = observation.get("metadata", {}) if isinstance(observation, dict) else {}
-
-                # Extract exception details
-                exception_info = {
-                    "observation_id": observation.get("id", "unknown"),
-                    "observation_name": observation.get("name", "unknown"),
-                    "observation_type": observation.get("type", "unknown"),
-                    "timestamp": observation.get("start_time", "unknown"),
-                    "exception_type": event_dict.get("attributes", {}).get("exception.type", "unknown"),
-                    "exception_message": event_dict.get("attributes", {}).get("exception.message", ""),
-                    "exception_stacktrace": event_dict.get("attributes", {}).get("exception.stacktrace", ""),
-                    "filepath": metadata.get("code.filepath", "unknown"),
-                    "function": metadata.get("code.function", "unknown"),
-                    "line_number": metadata.get("code.lineno", "unknown"),
-                    "event_id": event_dict.get("id", "unknown"),
-                    "event_name": event_dict.get("name", "unknown"),
-                }
-
-                exceptions.append(exception_info)
+        # Build normalized exception detail records (recorded fields only)
+        exceptions = [_error_record(observation, include_filepath=True) for observation in filtered_observations]
 
         # Sort exceptions by timestamp (newest first)
         exceptions.sort(key=lambda x: _datetime_sort_key(x.get("timestamp")), reverse=True)
@@ -2892,14 +2978,16 @@ async def get_error_count(
     ctx: Context,
     age: ValidatedAge = Field(..., description=AGE_LOOKBACK_DESCRIPTION, gt=0, le=MAX_AGE_MINUTES),
 ) -> ResponseDict:
-    """Get number of traces with exceptions in last N minutes.
+    """Get number of traces with error-level observations in last N minutes.
 
     Args:
         ctx: Context object containing lifespan context with Langfuse client
         age: Number of minutes to look back; capped by the configured maximum
 
     Returns:
-        Dictionary with error statistics including trace count, observation count, and exception count
+        Dictionary with error statistics: trace_count (distinct traces), observation_count
+        (error-level observations), and exception_count (always null — individual exception
+        events are not retrievable from the standard observation listing; see metadata.note).
     """
     state = cast(MCPState, ctx.request_context.lifespan_context)
 
@@ -2910,56 +2998,38 @@ async def get_error_count(
     to_timestamp = datetime.now(timezone.utc)
 
     try:
-        # Fetch all SPAN observations since they may contain exceptions
-        observation_items, _ = _list_observations(
+        error_observations = _scan_error_observations(
             _resolve_client(state, ctx),
-            limit=100,
-            page=1,
             from_start_time=from_timestamp,
             to_start_time=to_timestamp,
-            obs_type="SPAN",
-            name=None,
-            user_id=None,
-            trace_id=None,
-            parent_observation_id=None,
-            metadata=None,
         )
 
-        # Count traces and observations with exceptions
-        trace_ids_with_exceptions = set()
-        observations_with_exceptions = 0
-        total_exceptions = 0
-
-        for observation in (_sdk_object_to_python(obs) for obs in observation_items):
-            events = observation.get("events", []) if isinstance(observation, dict) else []
-            if not events:
-                continue
-
-            exception_count = sum(1 for event in events if _sdk_object_to_python(event).get("attributes", {}).get("exception.type"))
-            if exception_count == 0:
-                continue
-
-            observations_with_exceptions += 1
-            total_exceptions += exception_count
-
-            trace_id = observation.get("trace_id") if isinstance(observation, dict) else None
-            if trace_id:
-                trace_ids_with_exceptions.add(trace_id)
+        # Count distinct traces and error-level observations
+        trace_ids_with_errors = {obs.get("trace_id") for obs in error_observations if obs.get("trace_id")}
 
         result = {
             "age_minutes": age,
             "from_timestamp": from_timestamp.isoformat(),
             "to_timestamp": to_timestamp.isoformat(),
-            "trace_count": len(trace_ids_with_exceptions),
-            "observation_count": observations_with_exceptions,
-            "exception_count": total_exceptions,
+            "trace_count": len(trace_ids_with_errors),
+            "observation_count": len(error_observations),
+            "exception_count": None,
         }
 
-        logger.info(
-            f"Found {total_exceptions} exceptions in {observations_with_exceptions} observations across "
-            f"{len(trace_ids_with_exceptions)} traces"
-        )
-        return {"data": result, "metadata": {"file_path": None, "file_info": None}}
+        logger.info(f"Found {len(error_observations)} error-level observations across {len(trace_ids_with_errors)} traces")
+        return {
+            "data": result,
+            "metadata": {
+                "file_path": None,
+                "file_info": None,
+                "count_basis": "error_level_observations",
+                "note": (
+                    "exception_count is unavailable: individual exception events are not "
+                    "retrievable from the standard observation listing; observation_count "
+                    "counts error-level observations, not exception events"
+                ),
+            },
+        }
     except Exception:
         logger.exception(f"Error getting error count for the last {age} minutes")
         raise
