@@ -304,11 +304,11 @@ jobs:
 
       - name: Publish to PyPI with trusted publishing
         if: env.PYPI_TOKEN_PRESENT != 'true'
-        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1 (twine 7: metadata 2.5 support)
 
       - name: Publish to PyPI with API token fallback
         if: env.PYPI_TOKEN_PRESENT == 'true'
-        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1 (twine 7: metadata 2.5 support)
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
 
