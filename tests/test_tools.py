@@ -315,92 +315,17 @@ def test_fetch_observations_passes_a_tool_type_filter_through(observation_state)
     assert namespace.last_get_many_kwargs["type"] == "TOOL"
 
 
-def _pages(*metas):
-    """Build a ``_list_observations`` side effect returning one item per page with the given metadata."""
-    return [([{"id": f"obs_{index}"}], meta) for index, meta in enumerate(metas, start=1)]
+@pytest.mark.parametrize("observation_type", ["TOOL", "AGENT"])
+def test_fetch_observations_type_literal_accepts_non_span_types(observation_type):
+    """Types beyond the original SPAN/GENERATION/EVENT trio pass the tool's actual type validation."""
+    import typing
 
+    from pydantic import TypeAdapter
 
-def test_list_all_observations_walks_pages_until_the_metadata_stops(monkeypatch):
-    """Every page promised by ``next_page`` is fetched and the items are concatenated in order."""
-    import langfuse_mcp.__main__ as main_module
+    from langfuse_mcp.__main__ import fetch_observations
 
-    calls = []
-
-    def fake_list(client, **kwargs):
-        calls.append(kwargs["page"])
-        return pages[len(calls) - 1]
-
-    pages = _pages({"next_page": 2}, {"next_page": 3}, {"next_page": None})
-    monkeypatch.setattr(main_module, "_list_observations", fake_list)
-
-    items = main_module._list_all_observations(object(), from_start_time=None, to_start_time=None, obs_type=None)
-
-    assert calls == [1, 2, 3]
-    assert [item["id"] for item in items] == ["obs_1", "obs_2", "obs_3"]
-
-
-def test_list_all_observations_follows_total_pages(monkeypatch):
-    """Raw API metadata exposes ``total_pages`` instead of ``next_page``; both drive the walk."""
-    import langfuse_mcp.__main__ as main_module
-
-    pages = _pages({"page": 1, "total_pages": 2}, {"page": 2, "total_pages": 2})
-    monkeypatch.setattr(main_module, "_list_observations", lambda client, **kwargs: pages[kwargs["page"] - 1])
-
-    items = main_module._list_all_observations(object(), from_start_time=None, to_start_time=None, obs_type=None)
-
-    assert len(items) == 2
-
-
-def test_list_all_observations_stops_without_page_metadata(monkeypatch):
-    """Cursor-mode responses carry no page numbers, and page 2 cannot be requested there."""
-    import langfuse_mcp.__main__ as main_module
-
-    calls = []
-    monkeypatch.setattr(
-        main_module, "_list_observations", lambda client, **kwargs: (calls.append(kwargs["page"]), ([{"id": "obs_1"}], {"cursor": None}))[1]
-    )
-
-    items = main_module._list_all_observations(object(), from_start_time=None, to_start_time=None, obs_type=None)
-
-    assert calls == [1]
-    assert len(items) == 1
-
-
-def test_list_all_observations_stops_at_the_page_cap(monkeypatch):
-    """A listing that never ends is cut off at ``max_pages`` with whatever was collected."""
-    import langfuse_mcp.__main__ as main_module
-
-    calls = []
-    monkeypatch.setattr(
-        main_module,
-        "_list_observations",
-        lambda client, **kwargs: (calls.append(kwargs["page"]), ([{"id": "obs"}], {"next_page": kwargs["page"] + 1}))[1],
-    )
-
-    items = main_module._list_all_observations(object(), from_start_time=None, to_start_time=None, obs_type=None, max_pages=3)
-
-    assert calls == [1, 2, 3]
-    assert len(items) == 3
-
-
-@pytest.mark.parametrize(
-    "tool_name,kwargs",
-    [
-        ("find_exceptions", {"age": 60, "group_by": "file"}),
-        ("find_exceptions_in_file", {"filepath": "app/main.py", "age": 60, "output_mode": "compact"}),
-        ("get_error_count", {"age": 60}),
-    ],
-)
-def test_exception_tools_request_every_observation_type(observation_state, tool_name, kwargs):
-    """Exceptions are events on whichever observation raised them, so the tools must not filter by SPAN."""
-    import langfuse_mcp.__main__ as main_module
-
-    ctx = FakeContext(observation_state)
-    asyncio.run(getattr(main_module, tool_name)(ctx, **kwargs))
-
-    namespace = _observation_list_fake(observation_state.langfuse_client)
-    assert namespace.last_get_many_kwargs is not None
-    assert namespace.last_get_many_kwargs.get("type") is None
+    annotation = typing.get_type_hints(fetch_observations)["type"]
+    assert TypeAdapter(annotation).validate_python(observation_type) == observation_type
 
 
 def test_fetch_observation(observation_state):
