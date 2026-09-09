@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+- `fetch_observations` accepts every Langfuse observation type (`AGENT`, `TOOL`, `CHAIN`, `RETRIEVER`, `EVALUATOR`, `EMBEDDING`, `GUARDRAIL` as well as `SPAN`, `GENERATION`, `EVENT`).
+
 ### Changed
 - README first screen states the product, last-month PyPI downloads, and version. The native comparison is a local-debug vs hosted lane picker.
 - README lead now puts live GitHub stars and PyPI monthly-download badges next to each other, cites pypistats for last-month usage, answers why this vs native Langfuse MCP first, and documents the existing exception-tool path for a failing trace.

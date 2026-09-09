@@ -274,6 +274,60 @@ def test_fetch_observations(observation_state):
     assert namespace.last_get_many_kwargs["limit"] == 50
 
 
+def test_fetch_observations_type_filter_covers_every_langfuse_observation_type():
+    """The Literal on the ``type`` filter must list exactly what the Langfuse SDK's enum lists."""
+    import typing
+
+    from langfuse_mcp import _compat
+    from langfuse_mcp.__main__ import OBSERVATION_TYPE_LITERAL
+
+    # langfuse.api ObservationType, as of langfuse 4.15
+    expected = {"SPAN", "GENERATION", "EVENT", "AGENT", "TOOL", "CHAIN", "RETRIEVER", "EVALUATOR", "EMBEDDING", "GUARDRAIL"}
+    assert set(typing.get_args(OBSERVATION_TYPE_LITERAL)) == expected
+
+    observation_type = _compat.resolve_request_model("ingestion", "observation_type", "ObservationType")
+    if observation_type is not dict:  # the suite stubs langfuse; the real SDK is only present locally
+        assert {member.value for member in observation_type} == expected
+
+
+def test_fetch_observations_passes_a_tool_type_filter_through(observation_state):
+    """A TOOL filter reaches the observations endpoint unchanged."""
+    from langfuse_mcp.__main__ import fetch_observations
+
+    ctx = FakeContext(observation_state)
+    asyncio.run(
+        fetch_observations(
+            ctx,
+            type="TOOL",
+            age=10,
+            name=None,
+            user_id=None,
+            trace_id=None,
+            parent_observation_id=None,
+            page=1,
+            limit=50,
+            output_mode="compact",
+        )
+    )
+
+    namespace = _observation_list_fake(observation_state.langfuse_client)
+    assert namespace.last_get_many_kwargs is not None
+    assert namespace.last_get_many_kwargs["type"] == "TOOL"
+
+
+@pytest.mark.parametrize("observation_type", ["TOOL", "AGENT"])
+def test_fetch_observations_type_literal_accepts_non_span_types(observation_type):
+    """Types beyond the original SPAN/GENERATION/EVENT trio pass the tool's actual type validation."""
+    import typing
+
+    from pydantic import TypeAdapter
+
+    from langfuse_mcp.__main__ import fetch_observations
+
+    annotation = typing.get_type_hints(fetch_observations)["type"]
+    assert TypeAdapter(annotation).validate_python(observation_type) == observation_type
+
+
 def test_fetch_observation(observation_state):
     """fetch_observation should resolve via the v3 namespace or the v4 legacy_v1 fallback."""
     from langfuse_mcp.__main__ import fetch_observation

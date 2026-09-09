@@ -272,6 +272,9 @@ class OutputMode(str, Enum):
 
 
 OUTPUT_MODE_LITERAL = Literal["compact", "full_json_string", "full_json_file"]
+OBSERVATION_TYPE_LITERAL = Literal[
+    "SPAN", "GENERATION", "EVENT", "AGENT", "TOOL", "CHAIN", "RETRIEVER", "EVALUATOR", "EMBEDDING", "GUARDRAIL"
+]
 
 # Define a custom Dict type for our standardized response format
 ResponseDict = dict[str, Any]
@@ -1714,8 +1717,11 @@ async def fetch_trace(
 
 async def fetch_observations(
     ctx: Context,
-    type: Literal["SPAN", "GENERATION", "EVENT"] | None = Field(
-        None, description="The observation type to filter by ('SPAN', 'GENERATION', or 'EVENT')"
+    type: OBSERVATION_TYPE_LITERAL | None = Field(
+        None,
+        description=(
+            "The observation type to filter by (SPAN, GENERATION, EVENT, AGENT, TOOL, CHAIN, RETRIEVER, EVALUATOR, EMBEDDING or GUARDRAIL)"
+        ),
     ),
     age: ValidatedAge = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)", gt=0, le=MAX_AGE_MINUTES),
     name: str | None = Field(None, description="Optional name filter (string pattern to match)"),
@@ -1738,7 +1744,7 @@ async def fetch_observations(
 
     Args:
         ctx: Context object containing lifespan context with Langfuse client
-        type: The observation type to filter by (SPAN, GENERATION, or EVENT)
+        type: The observation type to filter by (SPAN, GENERATION, EVENT, AGENT, TOOL, CHAIN, RETRIEVER, EVALUATOR, EMBEDDING or GUARDRAIL)
         age: Minutes ago to start looking (e.g., 1440 for 24 hours)
         name: Optional name filter (string pattern to match)
         user_id: Optional user ID filter (exact match)
@@ -3010,7 +3016,7 @@ An observation can be a span, generation, or event within a trace.
   "name": "string",               // Name of the observation
   "start_time": "datetime",       // When the observation started
   "end_time": "datetime",         // When the observation ended (for spans/generations)
-  "type": "string",               // Type: SPAN, GENERATION, EVENT
+  "type": "string",               // Type: SPAN, GENERATION, EVENT, AGENT, TOOL, CHAIN, RETRIEVER, EVALUATOR, EMBEDDING, GUARDRAIL
   "level": "string",              // Log level: DEBUG, DEFAULT, WARNING, ERROR
   "status_message": "string",     // Optional status message
   "metadata": "object",           // Optional JSON metadata
