@@ -94,7 +94,7 @@ find_exceptions_in_file(filepath="src/ai/chat.py", age=1440)
 ```
 get_exception_details(trace_id="...")
 ```
-→ Full stacktrace and context.
+→ Recorded error details (exception type/message, status message, filepath/function/line when recorded); stacktrace only when actually recorded. For `unknown` file groups, drill down with the representative trace_id directly — do not pass filepath="unknown".
 
 ---
 

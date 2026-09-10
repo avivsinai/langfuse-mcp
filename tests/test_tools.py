@@ -622,8 +622,32 @@ def test_get_session_details(state):
     assert "from_timestamp" not in trace_kwargs
 
 
-def test_get_exception_details_omits_time_filters(state):
-    """get_exception_details scans by trace_id without epoch-zero time filters."""
+@pytest.mark.parametrize("observation_state", ["v4"], indirect=True)
+def test_get_exception_details_works_when_legacy_trace_read_404s(observation_state):
+    """B3: self-hosted server v4 removes legacy trace reads; the scan must run on observations alone."""
+    from langfuse_mcp.__main__ import get_exception_details
+
+    client = observation_state.langfuse_client
+    _seed_error_observation(client._store, obs_id="obs_trace404", metadata={"code.filepath": "sv4.py"})
+
+    class ServerV4Trace404(Exception):
+        status_code = 404
+
+    def trace_gone(*args, **kwargs):
+        raise ServerV4Trace404("legacy trace endpoint unavailable on server v4")
+
+    client.api.trace.get = trace_gone
+    if hasattr(client.api, "legacy") and hasattr(client.api.legacy, "traces"):
+        client.api.legacy.traces.get = trace_gone
+
+    ctx = FakeContext(observation_state)
+    result = asyncio.run(get_exception_details(ctx, trace_id="trace_1", span_id=None, output_mode="compact"))
+    assert result["metadata"]["item_count"] == 1
+    assert result["data"][0]["observation_id"] == "obs_trace404"
+
+
+def test_get_exception_details_freezes_upper_time_bound(state):
+    """get_exception_details scans by trace_id with one frozen to_start_time upper bound and no lower bound."""
     from langfuse_mcp.__main__ import get_exception_details
 
     ctx = FakeContext(state)
@@ -632,10 +656,13 @@ def test_get_exception_details_omits_time_filters(state):
     assert result["metadata"]["item_count"] == len(result["data"])
 
     obs_kwargs = state.langfuse_client.api.observations.last_get_many_kwargs
+    if obs_kwargs is None:
+        obs_kwargs = state.langfuse_client.api.observations_v_2.last_get_many_kwargs
     assert obs_kwargs is not None
     assert obs_kwargs["trace_id"] == "trace_1"
     assert "from_start_time" not in obs_kwargs
-    assert "to_start_time" not in obs_kwargs
+    assert "to_start_time" in obs_kwargs
+    assert obs_kwargs["to_start_time"] <= datetime.now(tz=timezone.utc)
 
 
 def test_fetch_traces_full_json_string(state):
@@ -760,7 +787,7 @@ def test_absent_metadata_yields_unknown_group_and_null_fields(observation_state)
 
 
 def test_metadata_attributes_fallback_and_top_level_precedence(observation_state):
-    """exception.type is read from metadata.attributes when absent top-level; top-level wins when present."""
+    """Key-presence precedence: top-level selected when present (invalid -> null, no resurrection); attributes only when key absent."""
     from langfuse_mcp.__main__ import _metadata_value
 
     obs = {"metadata": {"attributes": {"exception.type": "TimeoutError"}}}
@@ -768,6 +795,17 @@ def test_metadata_attributes_fallback_and_top_level_precedence(observation_state
 
     obs_precedence = {"metadata": {"exception.type": "ValueError", "attributes": {"exception.type": "TimeoutError"}}}
     assert _metadata_value(obs_precedence, "exception.type") == "ValueError"
+
+    # Cleared top-level value must NOT resurrect the copied attributes value (B5).
+    obs_cleared = {"metadata": {"exception.type": None, "attributes": {"exception.type": "TimeoutError"}}}
+    assert _metadata_value(obs_cleared, "exception.type") is None
+
+    obs_empty = {"metadata": {"exception.type": "", "attributes": {"exception.type": "TimeoutError"}}}
+    assert _metadata_value(obs_empty, "exception.type") is None
+
+    # Absent at both locations -> None.
+    assert _metadata_value({"metadata": {}}, "exception.type") is None
+    assert _metadata_value({}, "exception.type") is None
 
 
 def test_error_scan_cap_raises_no_partial_data(observation_state, monkeypatch):
@@ -778,24 +816,18 @@ def test_error_scan_cap_raises_no_partial_data(observation_state, monkeypatch):
 
     client = observation_state.langfuse_client
 
-    # Real-shaped pagination: V2 cursor meta carries only cursor; V1 meta carries total_pages.
-    # Both promise more data forever, so ordinary telemetry would exhaust the cap.
-    if hasattr(client.api.observations, "last_get_many_kwargs") and hasattr(client.api.observations.get_many, "__func__"):
-        pass  # bound method replaced below per surface
-
     calls = {"n": 0}
-
-    def endless_page(*, page=None, limit=None, level=None, **kwargs):
-        calls["n"] += 1
-        return FakePaginatedResponse(data=[], meta={"next_page": (page or 1) + 1, "total_pages": 999, "total": 0})
 
     def endless_cursor(*, cursor=None, limit=None, level=None, fields=None, expand_metadata=None, **kwargs):
         calls["n"] += 1
         return FakePaginatedResponse(data=[], meta={"cursor": f"cursor-{calls['n']}"})
 
+    # Both cursor surfaces get the endless stub; v3 also has observations_v_2, which is preferred.
     client.api.observations.get_many = endless_cursor
+    if hasattr(client.api, "observations_v_2"):
+        client.api.observations_v_2.get_many = endless_cursor
     if hasattr(client.api, "legacy") and hasattr(client.api.legacy, "observations_v1"):
-        client.api.legacy.observations_v1.get_many = endless_page
+        client.api.legacy.observations_v1.get_many = endless_cursor
 
     with pytest.raises(m.ErrorScanLimitError) as exc_info:
         asyncio.run(
@@ -807,11 +839,129 @@ def test_error_scan_cap_raises_no_partial_data(observation_state, monkeypatch):
     assert calls["n"] == 2
 
 
+@pytest.mark.parametrize("observation_state", ["v4"], indirect=True)
+def test_error_scan_normalizes_v3_alias_serialized_rows(observation_state):
+    """SDK v3 serializes observations by_alias=True (camelCase; V2 rows are raw dicts); the scan dedupes and builds details."""
+    from langfuse_mcp import __main__ as m
+
+    client = observation_state.langfuse_client
+    # v3.11.2 Observation.dict() returns by_alias=True keys; V2 data rows are raw dicts.
+    alias_row = {
+        "id": "obs_alias_1",
+        "traceId": "trace_alias_1",
+        "type": "TOOL",
+        "name": "tool_call",
+        "startTime": "2023-01-01T00:00:00Z",
+        "level": "ERROR",
+        "statusMessage": "boom",
+        "metadata": {"attributes": {"exception.message": "boom from attrs"}},
+    }
+    alias_row_same_id_diff_trace = {
+        "id": "obs_alias_1",
+        "traceId": "trace_alias_2",
+        "type": "TOOL",
+        "name": "tool_call",
+        "startTime": "2023-01-01T00:00:00Z",
+        "level": "ERROR",
+        "statusMessage": None,
+    }
+
+    def alias_cursor(*, cursor=None, limit=None, level=None, trace_id=None, fields=None, expand_metadata=None, **kwargs):
+        rows = [alias_row, alias_row_same_id_diff_trace]
+        if trace_id is not None:
+            rows = [r for r in rows if r.get("traceId") == trace_id]
+        return FakePaginatedResponse(data=rows, meta={"cursor": None})
+
+    client.api.observations.get_many = alias_cursor
+
+    # Dedupe identity is (trace_id, observation_id): same obs id in two traces -> both kept.
+    observations = m._scan_error_observations(
+        client,
+        from_start_time=datetime(2023, 1, 1, tzinfo=timezone.utc),
+        to_start_time=datetime(2023, 1, 2, tzinfo=timezone.utc),
+    )
+    assert len(observations) == 2
+    assert {obs["trace_id"] for obs in observations} == {"trace_alias_1", "trace_alias_2"}
+
+    # Detail fields read snake_case after normalization.
+    from langfuse_mcp.__main__ import get_exception_details
+
+    ctx = FakeContext(observation_state)
+    result = asyncio.run(get_exception_details(ctx, trace_id="trace_alias_1", span_id=None, output_mode="compact"))
+    assert result["metadata"]["item_count"] == 1
+    record = result["data"][0]
+    assert record["trace_id"] == "trace_alias_1"
+    assert record["timestamp"] == "2023-01-01T00:00:00Z"
+    assert record["status_message"] == "boom"
+
+
+@pytest.mark.parametrize("observation_state", ["v3"], indirect=True)
+def test_error_scan_prefers_v3_cursor_route_and_forwards_expand_metadata(observation_state):
+    """On v3 the scan prefers observations_v_2 (cursor) and forwards expandMetadata via request_options (3.11.2 lacks the param)."""
+    from langfuse_mcp import __main__ as m
+
+    client = observation_state.langfuse_client
+    _seed_error_observation(client._store, obs_id="obs_v3_cursor", metadata={"code.filepath": "v3.py"})
+
+    observations = m._scan_error_observations(
+        client,
+        from_start_time=datetime(2023, 1, 1, tzinfo=timezone.utc),
+        to_start_time=datetime(2023, 1, 2, tzinfo=timezone.utc),
+    )
+    assert [obs["id"] for obs in observations] == ["obs_v3_cursor"]
+
+    cursor_kwargs = client.api.observations_v_2.last_get_many_kwargs
+    assert cursor_kwargs is not None, "cursor route must be preferred over v3 page route"
+    assert client.api.observations.last_get_many_kwargs is None, "page route must not be called when cursor works"
+    assert cursor_kwargs["fields"] == "core,basic,metadata"
+    assert cursor_kwargs["request_options"]["additional_query_parameters"]["expandMetadata"] == (
+        "attributes,code.filepath,code.function,code.lineno,exception.type,exception.message,exception.stacktrace"
+    )
+
+
+@pytest.mark.parametrize("observation_state", ["v3"], indirect=True)
+def test_error_scan_v3_cursor_404_falls_back_to_v3_page_route(observation_state):
+    """v3: cursor route 404s -> scan falls back to v3's OWN page route (api.observations.get_many), not just v4 legacy."""
+    from langfuse_mcp import __main__ as m
+
+    client = observation_state.langfuse_client
+    _seed_error_observation(client._store, obs_id="obs_v3_page", metadata={"code.filepath": "page.py"})
+
+    class EndpointNotFound(Exception):
+        status_code = 404
+
+    calls = {"cursor": 0, "page": 0}
+
+    def cursor_404(*, cursor=None, limit=None, level=None, **kwargs):
+        calls["cursor"] += 1
+        raise EndpointNotFound("not found")
+
+    real_page_get_many = client.api.observations.get_many
+
+    def page_spy(*, page=None, limit=None, level=None, **kwargs):
+        calls["page"] += 1
+        return real_page_get_many(page=page, limit=limit, level=level, **kwargs)
+
+    client.api.observations_v_2.get_many = cursor_404
+    client.api.observations.get_many = page_spy
+
+    observations = m._scan_error_observations(
+        client,
+        from_start_time=datetime(2023, 1, 1, tzinfo=timezone.utc),
+        to_start_time=datetime(2023, 1, 2, tzinfo=timezone.utc),
+    )
+    assert [obs["id"] for obs in observations] == ["obs_v3_page"]
+    assert calls["cursor"] == 1 and calls["page"] == 1
+
+
 def test_error_scan_two_page_cursor_happy_path(observation_state):
     """V2 cursor scan: later-page ERROR found; same (trace_id, observation_id) on page 1 AND page 2 dedupes."""
     from langfuse_mcp import __main__ as m
 
     client = observation_state.langfuse_client
+    # Exercise the v4 cursor route directly; v3's preferred observations_v_2 would win otherwise.
+    if hasattr(client.api, "observations_v_2"):
+        del client.api.observations_v_2
     _seed_error_observation(client._store, obs_id="obs_page1_dupe", metadata={"code.filepath": "early.py"})
     _seed_error_observation(client._store, obs_id="obs_page2", metadata={"code.filepath": "late.py"})
     dupe_dict = client._store.observations["obs_page1_dupe"].__dict__
@@ -900,6 +1050,9 @@ def test_error_scan_page_mode_uses_total_pages_and_level_filter(observation_stat
     from langfuse_mcp import __main__ as m
 
     client = observation_state.langfuse_client
+    # Exercise the page route directly: remove the preferred cursor surface on v3.
+    if hasattr(client.api, "observations_v_2"):
+        del client.api.observations_v_2
     _seed_error_observation(client._store, obs_id="obs_v1_p2")
     obs_dict = client._store.observations["obs_v1_p2"].__dict__
 
@@ -908,8 +1061,10 @@ def test_error_scan_page_mode_uses_total_pages_and_level_filter(observation_stat
     def two_page_v1(*, page=None, limit=None, level=None, trace_id=None, **kwargs):
         requests.append({"page": page, "level": level})
         if page == 1:
-            return FakePaginatedResponse(data=[], meta={"next_page": 2, "total_pages": 2, "total": 1})
-        return FakePaginatedResponse(data=[obs_dict], meta={"next_page": None, "total_pages": 2, "total": 1})
+            # v1 MetaResponse carries only integer pagination fields (totalPages + page);
+            # no next_page. Continuation MUST come from total_pages.
+            return FakePaginatedResponse(data=[], meta={"total_pages": 2, "total": 1})
+        return FakePaginatedResponse(data=[obs_dict], meta={"total_pages": 2, "total": 1})
 
     client.api.observations.get_many = two_page_v1  # v3 surface: page-mode primary
     if hasattr(client.api, "legacy") and hasattr(client.api.legacy, "observations_v1"):

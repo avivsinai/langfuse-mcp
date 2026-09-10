@@ -969,6 +969,55 @@ class _MetricsV2API:
         return FakeMetricsResponse(data=list(self._store.metrics_rows))
 
 
+class _ObservationsV3CursorAPI:
+    """Fake v3 ``api.observations_v_2`` namespace: cursor-based ``get_many`` (SDK 3.11.2+).
+
+    Mirrors the real v3 signature: no first-class ``expand_metadata`` parameter; the scan
+    must forward it via ``request_options.additional_query_parameters``.
+    """
+
+    def __init__(self, store: FakeDataStore) -> None:
+        self._store = store
+        self.last_get_many_kwargs: dict[str, Any] | None = None
+
+    def get_many(
+        self,
+        *,
+        fields: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+        level: str | None = None,
+        from_start_time: Any = None,
+        to_start_time: Any = None,
+        trace_id: str | None = None,
+        request_options: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> FakePaginatedResponse:
+        self.last_get_many_kwargs = {
+            "cursor": cursor,
+            "limit": limit,
+            **{
+                k: v
+                for k, v in (
+                    ("level", level),
+                    ("fields", fields),
+                    ("trace_id", trace_id),
+                    ("from_start_time", from_start_time),
+                    ("to_start_time", to_start_time),
+                )
+                if v is not None
+            },
+            **({"request_options": request_options} if request_options is not None else {}),
+        }
+        observations = list(self._store.observations.values())
+        if level is not None:
+            observations = [obs for obs in observations if obs.level == level]
+        if trace_id is not None:
+            observations = [obs for obs in observations if obs.trace_id == trace_id]
+        data = [obs.__dict__ for obs in observations]
+        return FakePaginatedResponse(data=data, meta={"cursor": None})
+
+
 class FakeAPI:
     """Aggregate object exposed via FakeLangfuse.api."""
 
@@ -976,6 +1025,7 @@ class FakeAPI:
         """Wire the fake API resources to the shared backing store."""
         self.trace = _TraceAPI(store)
         self.observations = _ObservationsAPI(store)
+        self.observations_v_2 = _ObservationsV3CursorAPI(store)
         self.sessions = _SessionsAPI(store)
         self.prompts = _PromptsAPI(store)
         self.datasets = _DatasetsAPI(store)

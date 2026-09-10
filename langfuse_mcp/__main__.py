@@ -597,6 +597,32 @@ def _prompts_get_supports_resolve(prompts_client: Any) -> bool:
     return _compat.method_has_param(prompts_client.get, "resolve") is True
 
 
+_OBSERVATION_ALIAS_FIELDS: dict[str, str] = {
+    # Known observation-envelope camelCase aliases consumed by the error scan (Langfuse SDK
+    # v3 serializes models with by_alias=True; V2 rows are raw dicts). Normalized once at
+    # the scan boundary so dedupe and record building see snake_case. Arbitrary metadata
+    # keys are left untouched.
+    "traceId": "trace_id",
+    "startTime": "start_time",
+    "statusMessage": "status_message",
+}
+
+
+def _normalize_observation_envelope(obs: Any) -> Any:
+    """Copy known camelCase alias keys onto their snake_case names on a normalized dict.
+
+    A snake_case key present at any value — including None — wins over the alias; the
+    alias is copied only when the snake_case key is entirely absent. Returns non-dicts
+    unchanged.
+    """
+    if not isinstance(obs, dict):
+        return obs
+    for alias, canonical in _OBSERVATION_ALIAS_FIELDS.items():
+        if alias in obs and canonical not in obs:
+            obs[canonical] = obs[alias]
+    return obs
+
+
 def _extract_items_from_response(response: Any) -> tuple[list[Any], dict[str, Any]]:
     """Normalize Langfuse SDK list responses into items and pagination metadata."""
     if response is None:
@@ -746,6 +772,7 @@ def _get_observation(langfuse_client: Any, observation_id: str) -> Any:
 
 ERROR_SCAN_MAX_REQUESTS = 50
 ERROR_SCAN_PAGE_SIZE = 100
+_OBSERVATION_EXPAND_METADATA = "attributes,code.filepath,code.function,code.lineno,exception.type,exception.message,exception.stacktrace"
 ERR_ERROR_SCAN_LIMIT = "ERR_LANGFUSE_ERROR_SCAN_LIMIT"
 
 
@@ -756,12 +783,19 @@ class ErrorScanLimitError(RuntimeError):
 def _error_scan_list_method(langfuse_client: Any) -> tuple[Callable[..., Any], str]:
     """Select the listing callable for the internal error scan.
 
-    Prefers the cursor-based V2 endpoint; falls back to the page-based V1 route only
-    when no cursor capability exists (or the endpoint answers 404/405). Auth errors,
-    timeouts, and other failures propagate — never silently truncated.
+    Prefers the cursor-based V2 endpoint (v3 ``api.observations_v_2`` or v4
+    ``api.observations``); falls back to the page-based V1 route only when no cursor
+    capability exists (or the endpoint answers 404/405). Auth errors, timeouts, and other
+    failures propagate — never silently truncated.
     """
     api = getattr(langfuse_client, "api", None)
     if api is not None:
+        # v3-style cursor namespace first (absent on v4, where cursor lives on api.observations).
+        obs_v2 = getattr(api, "observations_v_2", None)
+        cursor_method_v2 = getattr(obs_v2, "get_many", None) if obs_v2 is not None else None
+        if cursor_method_v2 is not None and _compat.method_has_param(cursor_method_v2, "cursor") is True:
+            return cursor_method_v2, "cursor"
+
         observations = getattr(api, "observations", None)
         cursor_method = getattr(observations, "get_many", None) if observations is not None else None
         if cursor_method is not None and _compat.method_has_param(cursor_method, "cursor") is True:
@@ -777,6 +811,33 @@ def _error_scan_list_method(langfuse_client: Any) -> tuple[Callable[..., Any], s
     if page_shim is None:
         raise RuntimeError("Unsupported Langfuse client: no observation listing method available")
     return page_shim
+
+
+def _error_scan_page_fallback(langfuse_client: Any, cursor_method: Callable[..., Any]) -> Callable[..., Any] | None:
+    """Resolve a confirmed page-mode listing route for cursor->page fallback, or None.
+
+    The cursor method itself may BE the page-capable surface on some SDK shapes, so it is
+    excluded from the candidates. Order matches ``get_observations_list_method`` page
+    precedence: v3 ``api.observations.get_many`` (page), then v4 ``legacy.observations_v1``.
+    """
+    api = getattr(langfuse_client, "api", None)
+    candidates: list[Callable[..., Any]] = []
+    if api is not None:
+        observations = getattr(api, "observations", None)
+        get_many = getattr(observations, "get_many", None) if observations is not None else None
+        if get_many is not None:
+            candidates.append(get_many)
+        legacy = getattr(api, "legacy", None)
+        legacy_v1 = getattr(legacy, "observations_v1", None) if legacy is not None else None
+        legacy_get_many = getattr(legacy_v1, "get_many", None) if legacy_v1 is not None else None
+        if legacy_get_many is not None:
+            candidates.append(legacy_get_many)
+    for candidate in candidates:
+        if candidate == cursor_method:
+            continue
+        if _compat.method_has_param(candidate, "page") is True:
+            return candidate
+    return None
 
 
 def _error_scan_request(
@@ -807,9 +868,13 @@ def _error_scan_request(
         if _compat.method_has_param(method, "fields") is True:
             kwargs["fields"] = "core,basic,metadata"
         if _compat.method_has_param(method, "expand_metadata") is True:
-            kwargs["expand_metadata"] = (
-                "attributes,code.filepath,code.function,code.lineno,exception.type,exception.message,exception.stacktrace"
-            )
+            kwargs["expand_metadata"] = _OBSERVATION_EXPAND_METADATA
+        elif _compat.method_has_param(method, "request_options") is True:
+            # SDK 3.11.2's V2 cursor route has fields but no first-class expand_metadata
+            # parameter; its transport merges request_options.additional_query_parameters
+            # into the query string, so forward expandMetadata explicitly rather than
+            # silently scanning with truncated metadata.
+            kwargs["request_options"] = {"additional_query_parameters": {"expandMetadata": _OBSERVATION_EXPAND_METADATA}}
     else:
         kwargs["limit"] = ERROR_SCAN_PAGE_SIZE
         kwargs["page"] = cursor_or_page
@@ -877,21 +942,19 @@ def _scan_error_observations(
         except Exception as exc:
             status = getattr(exc, "status_code", None)
             if mode == "cursor" and status in (404, 405):
-                # Switch only to a CONFIRMED page-mode route (capability already validated by
-                # method_has_param on the legacy_v1 surface). If none exists, propagate the
+                # Switch only to a CONFIRMED page-mode route (signature-verified page
+                # candidate, resolved independently of the cursor choice so a v3 cursor
+                # client can fall back to v3's page route). If none exists, propagate the
                 # original error. No repeated cursor fallback.
-                api = getattr(langfuse_client, "api", None)
-                legacy = getattr(api, "legacy", None) if api is not None else None
-                legacy_v1 = getattr(legacy, "observations_v1", None) if legacy is not None else None
-                legacy_get_many = getattr(legacy_v1, "get_many", None) if legacy_v1 is not None else None
-                if legacy_get_many is not None and _compat.method_has_param(legacy_get_many, "page") is True:
-                    method, mode = legacy_get_many, "page"
+                page_fallback = _error_scan_page_fallback(langfuse_client, method)
+                if page_fallback is not None:
+                    method, mode = page_fallback, "page"
                     cursor_or_page = 1
                     continue
             raise
 
         for item in items:
-            obs = _sdk_object_to_python(item)
+            obs = _normalize_observation_envelope(_sdk_object_to_python(item))
             if not isinstance(obs, dict):
                 continue
             if obs.get("level") != "ERROR":
@@ -927,12 +990,15 @@ INTEGER_METADATA_KEYS = frozenset({"code.lineno"})
 
 
 def _metadata_value(observation: dict[str, Any], key: str) -> Any:
-    """Read a recorded metadata value, top-level keys taking precedence over copied span attributes.
+    """Read a recorded metadata value; TOP-LEVEL KEY PRESENCE takes precedence over copied span attributes.
 
-    String fields (code.filepath/function, exception.type/message/stacktrace) return recorded
-    strings only; code.lineno additionally accepts a recorded integer (bool excluded) or its
-    string form from the copied attributes. Both levels are dict-guarded; values are never
-    parsed or stringified. Returns None when absent at both allowed locations.
+    If ``key`` is present in the top-level metadata dict, that location is selected and its
+    value validated (a recorded null/empty/incorrectly-typed top-level value yields None —
+    it never falls through to attributes). Otherwise the value is read from
+    ``metadata.attributes``. String fields (code.filepath/function, exception.type/message/
+    stacktrace) accept recorded strings only; code.lineno additionally accepts a recorded
+    integer (bool excluded) or its string form. Values are never parsed or stringified.
+    Returns None when the selected location is absent or invalid.
     """
     metadata = observation.get("metadata")
     if not isinstance(metadata, dict):
@@ -943,15 +1009,14 @@ def _metadata_value(observation: dict[str, Any], key: str) -> Any:
             return True
         return key in INTEGER_METADATA_KEYS and isinstance(value, int) and not isinstance(value, bool)
 
-    value = metadata.get(key)
-    if key in STRING_METADATA_KEYS | INTEGER_METADATA_KEYS and _acceptable(value):
-        return value
+    if key in metadata:
+        value = metadata.get(key)
+        return value if _acceptable(value) else None
 
     attributes = metadata.get("attributes")
-    if isinstance(attributes, dict):
+    if isinstance(attributes, dict) and key in attributes:
         nested = attributes.get(key)
-        if _acceptable(nested):
-            return nested
+        return nested if _acceptable(nested) else None
     return None
 
 
@@ -2906,25 +2971,16 @@ async def get_exception_details(
     state = cast(MCPState, ctx.request_context.lifespan_context)
 
     try:
-        # First get the trace details
-        trace = _get_trace(_resolve_client(state, ctx), trace_id, include_observations=False)
-        trace_data = _sdk_object_to_python(trace)
         mode = _ensure_output_mode(output_mode)
-        if not trace_data:
-            logger.warning(f"Trace not found: {trace_id}")
-            empty_payload, file_meta = process_data_with_mode([], mode, f"exceptions_trace_{trace_id}", state)
-            if mode == OutputMode.FULL_JSON_STRING:
-                return empty_payload
-            metadata_block = {"item_count": 0, "file_path": None, "file_info": None}
-            if file_meta:
-                metadata_block.update(file_meta)
-            return {"data": empty_payload, "metadata": metadata_block}
 
-        # Get all ERROR observations for this trace via the shared paginated scan
+        # No trace preflight: legacy trace reads can 404 on self-hosted server v4 while the
+        # observations listing stays available. The scan itself proves which observations exist.
+        # Frozen upper bound per invocation; no lower bound (see README snapshot disclaimer).
+        to_start_time = datetime.now(tz=timezone.utc)
         error_observations = _scan_error_observations(
             _resolve_client(state, ctx),
             from_start_time=None,
-            to_start_time=None,
+            to_start_time=to_start_time,
             trace_id=trace_id,
         )
 
@@ -3097,32 +3153,20 @@ An observation can be a span, generation, or event within a trace.
   // Generation-specific fields
   "model": "string",              // LLM model name (for generations)
   "model_parameters": "object",   // Model parameters (for generations)
-  "usage": "object",              // Token usage (for generations)
-  
-  "events": [                     // Array of event objects
-    {
-      // Event fields (see below)
-    }
-  ]
+  "usage": "object"               // Token usage (for generations)
 }
 ```
 
-## Event Schema
-Events are contained within observations for tracking specific state changes.
+## EVENT observations
+There is no separate nested event object: an EVENT is itself an observation
+(see Observation Schema, `type: "EVENT"`). Observations may carry optional
+RECORDED error details — never invented by this server:
 
-```
-{
-  "id": "string",                 // Unique identifier
-  "name": "string",               // Name of the event
-  "start_time": "datetime",       // When the event occurred
-  "attributes": {                 // Event attributes
-    "exception.type": "string",       // Type of exception (for error events)
-    "exception.message": "string",    // Exception message (for error events)
-    "exception.stacktrace": "string", // Exception stack trace (for error events)
-    // ... other attributes
-  }
-}
-```
+- Top-level `metadata` keys take precedence over copies under
+  `metadata.attributes` for: `exception.type`, `exception.message`,
+  `exception.stacktrace`, `code.filepath`, `code.function`, `code.lineno`.
+- A value is reported only when actually recorded; absent fields are null
+  (no parsing of status_message or other text to infer them).
 
 ## Score Schema
 Scores are evaluations attached to traces or observations.
