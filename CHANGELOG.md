@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- Exception tools (`find_exceptions`, `find_exceptions_in_file`, `get_exception_details`, `get_error_count`) now detect errors by observation `level == "ERROR"` with a shared complete scan across all observation types (V2 cursor endpoint preferred, page fallback), deduplicated by `(trace_id, observation_id)`, capped at 50 requests × 100 — the cap raises an explicit error instead of returning partial data.
+- `find_exceptions` gains `group_by="name"` and `group_by="observation_type"`; groups carry representative `observation_id`/`trace_id`.
+- `get_error_count` returns `exception_count: null` with `count_basis: "error_level_observations"` — individual exception events are not retrievable from the standard observation listing.
+- Detail records gain `level`/`observation_type`/`status_message`; `event_id`/`event_name` are retained but always null; exception fields are null when not recorded in metadata (top-level keys take precedence over `metadata.attributes`).
 
 ## [0.10.2] - 2026-09-09
 ### Fixed
