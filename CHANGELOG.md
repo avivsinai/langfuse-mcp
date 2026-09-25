@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Upgrade notes
+- Langfuse Cloud removes the v1 trace, session, and observation routes, v2 score routes, and legacy dataset-run read routes on 2026-11-16. Version 0.12.0 uses their replacement APIs.
+- Install `langfuse>=4.13.1` (a fresh `uvx langfuse-mcp` install gets it by default). Older SDKs can fall back to routes that Cloud removes on that date; score and experiment reads then report `ERR_LANGFUSE_SCORES_V2_REMOVED` or `ERR_LANGFUSE_EXPERIMENTS_SDK_UPGRADE` when those SDK capabilities are absent.
+- This release changes trace, session, observation, score, and dataset-run output. See the **Breaking output change** entries below.
+- After the legacy run-delete route is removed, `delete_dataset_run` requires `delete_traces=True` and deletes the run's traces, observations, and related scores.
+
+### Added
+- Published the server to the official MCP Registry as `io.github.avivsinai/langfuse-mcp`.
+
 ### Changed
 - Trace, session and observation reads go through Observations API v2 (`GET /api/public/v2/observations`). Langfuse Cloud removes `GET /traces`, `/traces/{id}`, `/sessions` and the v1 `/observations` routes on 2026-11-16 ([deprecated API migration](https://langfuse.com/faq/all/deprecated-api-migration)). Covers `fetch_traces`, `fetch_trace`, `fetch_observations`, `fetch_observation`, `fetch_sessions`, `get_session_details`, `get_user_sessions` and the route-decision tools. v2 is used whenever the SDK exposes it with `filter` (v4, and v3 3.11.2+ via `observations_v_2`); a server that answers 404/405 (self-hosted Langfuse v3) falls back to the old routes, and any other error propagates.
 - **Breaking output change:** Traces are rebuilt from their root observation: `name`, `tags` and `release` from the trace context; `input`, `output`, `metadata` and `latency` from the root; `html_path` from the project id. `fetch_trace` also sums `total_cost` over the trace's observations and reads `scores` from Scores API v3 when the SDK has it (4.8.1+). `fetch_traces` loses total cost, scores and observation ids; observations still come with `include_observations=True`.
