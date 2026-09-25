@@ -13,7 +13,6 @@ import logging
 import os
 import re
 import sys
-import types
 from collections import Counter
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -331,13 +330,17 @@ def _bind_default_output_mode(fn: Any, default_output_mode: "OutputMode") -> Any
         new_field = Field(default=default_output_mode.value)
 
     new_param = old_param.replace(default=new_field)
-    new_params = [new_param if p.name == "output_mode" else p for p in params.values()]
+    new_sig = sig.replace(parameters=[new_param if p.name == "output_mode" else p for p in params.values()])
 
-    # Copy the function object so the module-level original is not mutated
-    wrapped = types.FunctionType(fn.__code__, fn.__globals__, fn.__name__, fn.__defaults__, fn.__closure__)
-    functools.update_wrapper(wrapped, fn)
-    wrapped.__signature__ = sig.replace(parameters=new_params)
-    return wrapped
+    # A wrapper, not a copy, so that direct calls which omit output_mode also get the configured default.
+    @functools.wraps(fn)
+    async def bound(*args: Any, **kwargs: Any) -> Any:
+        if "output_mode" not in new_sig.bind_partial(*args, **kwargs).arguments:
+            kwargs["output_mode"] = default_output_mode.value
+        return await fn(*args, **kwargs)
+
+    bound.__signature__ = new_sig  # pyright: ignore[reportAttributeAccessIssue]
+    return bound
 
 
 def _read_default_output_mode() -> OutputMode:
@@ -569,10 +572,11 @@ def _normalize_field_default(value: Any) -> Any:
     ``FieldInfo`` object via Python's own default-argument mechanism, and ``FieldInfo`` is
     truthy, so an unguarded check treats it as a real value. This mirrors what Pydantic
     would have done: ``Field(1, ...)`` normalizes to ``1``, ``Field(None, ...)`` to
-    ``None``, and a required ``Field(...)`` (no default to fall back to) to ``None``.
+    ``None``, ``Field(default_factory=list)`` to ``[]``, and a required ``Field(...)`` (no default to
+    fall back to) to ``None``.
     """
     if FieldInfo is not None and isinstance(value, FieldInfo):
-        return None if value.is_required() else value.default
+        return None if value.is_required() else value.get_default(call_default_factory=True, validated_data={})
     return value
 
 
