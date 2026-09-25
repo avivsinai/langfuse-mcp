@@ -51,35 +51,9 @@ def patch_dependencies(monkeypatch: pytest.MonkeyPatch):
     # plain-dict stub here would silently disable maxsize enforcement and break the
     # _BoundedClientCache tests.  The real library is always available in the dev env.
 
-    # Provide a minimal stub of the `pydantic` module with BaseModel and Field
-    # used only for type hints within `langfuse_mcp`.
-    pydantic_mod = types.ModuleType("pydantic")
-
-    class BaseModel:
-        def __init__(self, **kwargs):
-            for key, value in kwargs.items():
-                setattr(self, key, value)
-
-        def model_dump(self):
-            return dict(self.__dict__)
-
-        def dict(self):
-            return dict(self.__dict__)
-
-    def Field(default=None, **kwargs):
-        return default
-
-    class AfterValidator:
-        def __init__(self, fn):
-            self.fn = fn
-
-        def __call__(self, value):
-            return self.fn(value)
-
-    pydantic_mod.BaseModel = BaseModel
-    pydantic_mod.Field = Field
-    pydantic_mod.AfterValidator = AfterValidator
-    sys.modules.setdefault("pydantic", pydantic_mod)
+    # `pydantic` is not stubbed: the real package is a transitive dependency (via mcp), and a
+    # stub whose Field() returns the bare default would hide the FieldInfo defaults a direct tool
+    # call really receives.
 
     yield
 

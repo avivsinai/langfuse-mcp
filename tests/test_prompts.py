@@ -92,22 +92,8 @@ def test_list_prompts_called_directly_never_leaks_fieldinfo(state):
     real filter value. This must fail on unfixed code (the FieldInfo objects show up as filter
     values in ``last_list_kwargs``) and pass once the call boundary normalizes Field defaults.
 
-    ``langfuse_mcp.__main__.FieldInfo`` binds to the real ``pydantic.fields.FieldInfo`` only
-    when the real ``pydantic`` package won the import race against ``conftest.py``'s stub (the
-    stub's bare ``Field(default=None, **kwargs)`` returns the plain default directly, so this
-    bug cannot reproduce against it). Running the full ``tests/`` suite guarantees that --
-    ``tests/test_mcp_integration.py`` imports the real ``mcp`` package (and therefore real
-    pydantic) at collection time, before any test body runs. A narrower target such as
-    ``pytest tests/test_prompts.py`` alone may collect only the stub; skip rather than pass
-    vacuously in that case.
     """
-    from langfuse_mcp.__main__ import FieldInfo, list_prompts
-
-    if FieldInfo is None:
-        pytest.skip(
-            "real pydantic.fields.FieldInfo is not bound in langfuse_mcp.__main__ for this run "
-            "(the conftest.py pydantic stub won the import race); run the full tests/ suite"
-        )
+    from langfuse_mcp.__main__ import list_prompts
 
     ctx = FakeContext(state)
     asyncio.run(list_prompts(ctx))
