@@ -409,6 +409,11 @@ def test_score_reads_use_scores_v3_only_live(tmp_path, monkeypatch):
     if first.get("trace_id"):
         by_trace = asyncio.run(list_scores_v2(ctx, page=1, limit=5, trace_id=first["trace_id"]))
         assert all(score.get("trace_id") == first["trace_id"] for score in by_trace["data"])
+    if first["data_type"] == "NUMERIC":
+        exact = asyncio.run(list_scores_v2(ctx, page=1, limit=5, name=first["name"], value=first["value"]))
+        assert all(score["value"] == first["value"] for score in exact["data"]) and exact["data"]
+        bounded = asyncio.run(list_scores_v2(ctx, page=1, limit=5, name=first["name"], value=first["value"], operator=">="))
+        assert all(score["value"] >= first["value"] for score in bounded["data"]) and bounded["data"]
 
 
 def test_list_annotation_queues_live(tmp_path):
