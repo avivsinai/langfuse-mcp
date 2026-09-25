@@ -1462,15 +1462,12 @@ def _trace_scores_v3(scores_method: Callable[..., Any], trace_id: str) -> list[A
     cursor: str | None = None
     try:
         for _ in range(V2_SCAN_MAX_REQUESTS):
-            kwargs: dict[str, Any] = {"trace_id": trace_id, "limit": SCORES_V3_MAX_LIMIT, "fields": "details,subject"}
-            if cursor:
-                kwargs["cursor"] = cursor
-            items, pagination = _extract_items_from_response(scores_method(**kwargs))
-            scores.extend(_normalize_v2_row(item) for item in items)
-            next_cursor = pagination.get("cursor")
-            if not (isinstance(next_cursor, str) and next_cursor):
+            rows, cursor = _scores_v3_request(
+                scores_method, cursor=cursor, limit=SCORES_V3_MAX_LIMIT, fields=SCORES_V3_FIELDS, trace_id=trace_id
+            )
+            scores.extend(rows)
+            if cursor is None:
                 return scores
-            cursor = next_cursor
     except Exception as exc:  # the trace is already assembled; scores are an addition
         logger.warning(f"Could not read scores for trace {trace_id} via Scores API v3: {exc}")
         return None
@@ -5100,28 +5097,129 @@ async def delete_annotation_queue_assignment(
 # Score V2 Tools
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Langfuse Cloud removes GET /v2/scores (and /v2/scores/{id}) on 2026-11-16; the score tools read
+# GET /v3/scores through ``scores_v3.get_many_v3`` (SDK 4.8.1+) and keep the v2 route only where
+# v3 is not served or for the filters v3 dropped (user_id, trace_tags).
+SCORES_V3_FIELDS = "details,subject,annotation"
+ERR_SCORES_V2_ONLY_FILTER = "ERR_LANGFUSE_SCORES_V2_ONLY_FILTER"
+
+
+def _score_v3_row(item: Any) -> Any:
+    """Return a Scores API v3 row in the v2 score shape.
+
+    v3 replaces the flat trace/observation/session ids with a ``subject`` object and folds
+    ``string_value`` into one ``value`` typed by ``data_type``. The ids are copied back out of
+    ``subject`` (which is kept), and string values are also returned as ``string_value``.
+    """
+    row = _normalize_v2_row(item)
+    if not isinstance(row, dict):
+        return row
+    subject = row.get("subject")
+    if isinstance(subject, dict):
+        subject_id = subject.get("id")
+        kind = subject.get("kind")
+        if kind == "trace":
+            row.setdefault("trace_id", subject_id)
+        elif kind == "observation":
+            row.setdefault("observation_id", subject_id)
+            row.setdefault("trace_id", subject.get("trace_id", subject.get("traceId")))
+        elif kind == "session":
+            row.setdefault("session_id", subject_id)
+        elif kind == "experiment":
+            row.setdefault("experiment_id", subject_id)
+    if isinstance(row.get("value"), str):
+        row.setdefault("string_value", row["value"])
+    return row
+
+
+def _scores_v3_request(
+    method: Callable[..., Any], *, cursor: str | None, limit: int, fields: str | None, **filters: Any
+) -> tuple[list[Any], str | None]:
+    """Issue one Scores API v3 request and return ``(rows in the v2 shape, next cursor)``."""
+    kwargs: dict[str, Any] = {key: value for key, value in filters.items() if value is not None}
+    kwargs["limit"] = limit
+    if cursor:
+        kwargs["cursor"] = cursor
+    if fields:
+        kwargs["fields"] = fields
+    items, pagination = _extract_items_from_response(method(**kwargs))
+    next_cursor = pagination.get("cursor")
+    return [_score_v3_row(item) for item in items], next_cursor if isinstance(next_cursor, str) and next_cursor else None
+
+
+def _scores_v3_value_filter(
+    operator: str | None, value: float, data_type: str | None
+) -> tuple[dict[str, Any], Callable[[Any], bool] | None]:
+    """Map the v2 ``operator``/``value`` pair to Scores API v3 filters and an optional row filter.
+
+    v3 has exact ``value`` matches and inclusive ``value_min``/``value_max`` bounds, each needing
+    one ``data_type`` (bounds only NUMERIC). Strict ``>``/``<`` use the inclusive bound and drop
+    the boundary value client-side; ``!=`` has no v3 form.
+    """
+    op = (operator or "=").strip()
+    if op == "=":
+        dtype = data_type or "NUMERIC"
+        text = ("true" if value else "false") if dtype.upper() == "BOOLEAN" else str(value)
+        return {"value": text, "data_type": dtype}, None
+    if op in (">=", ">", "<=", "<"):
+        if data_type and data_type.upper() != "NUMERIC":
+            raise ValueError(f"operator {op!r} needs data_type NUMERIC on Scores API v3, got {data_type!r}")
+        bound = "value_min" if op.startswith(">") else "value_max"
+        keep: Callable[[Any], bool] | None = (lambda row: _as_number(row.get("value")) != value) if op in (">", "<") else None
+        return {bound: value, "data_type": "NUMERIC"}, keep
+    raise ValueError(f"operator {op!r} has no Scores API v3 equivalent; use =, >, >=, < or <=")
+
+
+def _list_scores_v3(
+    method: Callable[..., Any], *, page: int, limit: int, filters: dict[str, Any], keep: Callable[[Any], bool] | None
+) -> tuple[list[Any], str | None]:
+    """Return one 1-based page of scores, walking the v3 cursor (skipped pages carry core fields only)."""
+    if page > V2_PAGE_WALK_MAX:
+        raise RuntimeError(
+            f"{ERR_V2_PAGE_LIMIT}: page {page} is past the cursor-walk cap of {V2_PAGE_WALK_MAX}. Narrow the filters and retry."
+        )
+    cursor: str | None = None
+    for _ in range(page - 1):
+        _, cursor = _scores_v3_request(method, cursor=cursor, limit=limit, fields=None, **filters)
+        if cursor is None:
+            return [], None
+    rows, cursor = _scores_v3_request(method, cursor=cursor, limit=limit, fields=SCORES_V3_FIELDS, **filters)
+    return ([row for row in rows if keep(row)] if keep else rows), cursor
+
 
 async def list_scores_v2(
     ctx: Context,
     page: int = Field(1, ge=1, description="Page number for pagination (starts at 1)"),
     limit: int = Field(50, ge=1, le=100, description="Items per page (max 100)"),
-    user_id: str | None = Field(None, description="Optional user ID filter"),
+    user_id: str | None = Field(
+        None,
+        description="Optional user ID filter (Scores API v3 has none: uses GET /v2/scores, which Langfuse Cloud removes on 2026-11-16)",
+    ),
     name: str | None = Field(None, description="Optional score name filter"),
     from_timestamp: str | None = Field(None, description="Optional ISO8601 timestamp lower bound"),
     to_timestamp: str | None = Field(None, description="Optional ISO8601 timestamp upper bound"),
     environment: str | None = Field(None, description="Optional environment filter"),
     source: str | None = Field(None, description="Optional score source filter"),
-    operator: str | None = Field(None, description="Optional operator filter"),
+    operator: str | None = Field(None, description="Optional comparison for value: =, >, >=, < or <= (default =)"),
     value: float | None = Field(None, description="Optional numeric score value filter"),
     score_ids: str | None = Field(None, description="Optional comma-separated score IDs"),
     config_id: str | None = Field(None, description="Optional score config ID"),
-    session_id: str | None = Field(None, description="Optional session ID"),
+    session_id: str | None = Field(None, description="Optional session ID (not together with trace_id)"),
     trace_id: str | None = Field(None, description="Optional trace ID"),
     queue_id: str | None = Field(None, description="Optional annotation queue ID"),
     data_type: str | None = Field(None, description="Optional score data type"),
-    trace_tags: str | None = Field(None, description="Optional comma-separated trace tags"),
+    trace_tags: str | None = Field(
+        None,
+        description=(
+            "Optional comma-separated trace tags (Scores API v3 has none: uses GET /v2/scores, which Langfuse Cloud removes on 2026-11-16)"
+        ),
+    ),
 ) -> ResponseDict:
-    """List scores from the score v2 API with optional filters."""
+    """List scores via Scores API v3 with optional filters (GET /v2/scores where v3 is not served).
+
+    With operator ``=`` and a value, v3 defaults an omitted data_type to NUMERIC; pass BOOLEAN for boolean scores.
+    Strict ``>``/``<`` can return fewer than limit rows on a page after boundary rows are dropped; next_page shows whether more rows exist.
+    """
     state = cast(MCPState, ctx.request_context.lifespan_context)
     try:
         page = _normalize_field_default(page) or 1
@@ -5143,6 +5241,52 @@ async def list_scores_v2(
         queue_id = _normalize_field_default(queue_id)
         data_type = _normalize_field_default(data_type)
         trace_tags = _normalize_field_default(trace_tags)
+        client = _resolve_client(state, ctx)
+
+        v3_method = _compat.get_scores_v3_method(client)
+        if v3_method is not None and not (user_id or trace_tags):
+            if trace_id and session_id:
+                raise ValueError("Scores API v3 cannot combine trace_id and session_id; pass one of them")
+            v3_filters: dict[str, Any] = {
+                "id": score_ids,
+                "name": name,
+                "source": source,
+                "environment": environment,
+                "config_id": config_id,
+                "queue_id": queue_id,
+                "data_type": data_type,
+                "trace_id": trace_id,
+                "session_id": session_id,
+                "from_timestamp": from_dt,
+                "to_timestamp": to_dt,
+            }
+            keep = None
+            defaulted_data_type = value is not None and data_type is None and (operator or "=").strip() == "="
+            if value is not None:
+                value_filters, keep = _scores_v3_value_filter(operator, value, data_type)
+                v3_filters.update(value_filters)
+            try:
+                scores, next_cursor = _list_scores_v3(v3_method, page=page, limit=limit, filters=v3_filters, keep=keep)
+            except Exception as exc:
+                if not _route_missing(exc):
+                    raise
+                logger.info(f"Scores API v3 not served (HTTP {getattr(exc, 'status_code', None)}); listing scores via GET /v2/scores")
+            else:
+                logger.info(f"Listed {len(scores)} scores via Scores API v3 (page={page}, limit={limit})")
+                metadata_block: dict[str, Any] = {
+                    "page": page,
+                    "limit": limit,
+                    "item_count": len(scores),
+                    "total": None,
+                    "next_page": page + 1 if next_cursor else None,
+                }
+                if defaulted_data_type:
+                    metadata_block["data_type"] = v3_filters["data_type"]
+                    metadata_block["data_type_hint"] = "Defaulted to NUMERIC; pass data_type=BOOLEAN for boolean scores."
+                return {
+                    "data": scores,
+                    "metadata": metadata_block,
+                }
 
         api_kwargs: dict[str, Any] = {
             "page": page,
@@ -5165,14 +5309,22 @@ async def list_scores_v2(
         }
         api_kwargs = {k: v for k, v in api_kwargs.items() if v is not None}
 
-        scores_namespace = _compat.get_score_namespace(_resolve_client(state, ctx))
+        scores_namespace = _compat.get_score_namespace(client)
         if scores_namespace is None:
             raise RuntimeError("Unsupported Langfuse client: no scores namespace exposed")
         list_method = _compat.get_score_list_method(scores_namespace)
         if list_method is None:
             raise RuntimeError("Unsupported Langfuse client: scores namespace exposes no list method")
 
-        response = list_method(**api_kwargs)
+        try:
+            response = list_method(**api_kwargs)
+        except Exception as exc:
+            if (user_id or trace_tags) and _route_missing(exc):
+                raise RuntimeError(
+                    f"{ERR_SCORES_V2_ONLY_FILTER}: user_id and trace_tags need GET /v2/scores, which this Langfuse server "
+                    "no longer serves (Langfuse Cloud removed it on 2026-11-16). Filter by trace_id or session_id instead."
+                ) from exc
+            raise
         items, pagination = _extract_items_from_response(response)
         scores = [_sdk_object_to_python(item) for item in items]
         logger.info(f"Listed {len(scores)} scores (page={page}, limit={limit})")
@@ -5194,10 +5346,27 @@ async def get_score_v2(
     ctx: Context,
     score_id: str = Field(..., description="Score ID"),
 ) -> ResponseDict:
-    """Get a score by ID from the scores API (v3 ``score_v_2`` or v4 ``scores``)."""
+    """Get a score by ID from Scores API v3 (the v2 route where v3 is not served)."""
     state = cast(MCPState, ctx.request_context.lifespan_context)
     try:
-        scores_namespace = _compat.get_score_namespace(_resolve_client(state, ctx))
+        client = _resolve_client(state, ctx)
+        v3_method = _compat.get_scores_v3_method(client)
+        if v3_method is not None:
+            try:
+                rows, _ = _scores_v3_request(v3_method, cursor=None, limit=1, fields=SCORES_V3_FIELDS, id=score_id)
+            except Exception as exc:
+                if not _route_missing(exc):
+                    raise
+                logger.info(
+                    f"Scores API v3 not served (HTTP {getattr(exc, 'status_code', None)}); fetching the score via GET /v2/scores/{{id}}"
+                )
+            else:
+                if not rows:
+                    raise LookupError(f"Score '{score_id}' not found")
+                logger.info(f"Fetched score '{score_id}' via Scores API v3")
+                return {"data": rows[0], "metadata": {"score_id": score_id}}
+
+        scores_namespace = _compat.get_score_namespace(client)
         if scores_namespace is None or not hasattr(scores_namespace, "get_by_id"):
             raise RuntimeError("Unsupported Langfuse client: no get_by_id method on scores namespace")
         score = scores_namespace.get_by_id(score_id=score_id)

@@ -1075,6 +1075,8 @@ def _v2_condition_matches(row: dict[str, Any], condition: dict[str, Any]) -> boo
     kind, operator, value = condition["type"], condition["operator"], condition.get("value")
     actual = row.get(_V2_FILTER_COLUMN_ALIASES.get(condition["column"], condition["column"]))
     if kind == "datetime":
+        if operator not in (">=", ">", "<=", "<"):
+            raise ValueError(f"fake v2 datetime filter does not support {condition!r}")
         if actual is None:
             return False
         actual_time, bound = _v2_parse_time(actual), _v2_parse_time(value)
@@ -1246,8 +1248,23 @@ class _ObservationsV4API:
         return FakePaginatedResponse(data=data, meta={"cursor": next_cursor})
 
 
+class FakeHTTPError(Exception):
+    """Stand-in for the SDK's ApiError: carries ``status_code`` like the real one."""
+
+    def __init__(self, status_code: int, message: str) -> None:
+        """Record the HTTP status the fake server answered with."""
+        super().__init__(f"HTTP {status_code}: {message}")
+        self.status_code = status_code
+
+
 class _ScoresV3API:
-    """Fake v4 ``api.scores_v3`` namespace (SDK 4.8.1+): cursor-based ``get_many_v3``."""
+    """Fake v4 ``api.scores_v3`` namespace (SDK 4.8.1+): Scores API v3 ``get_many_v3``.
+
+    Mirrors the real endpoint where production code depends on it: the documented 400 rules,
+    comma-separated list filters, cursor pages by ``limit``, and rows shaped like the SDK
+    models' ``model_dump()`` (snake_case, typed ``value``, a ``subject`` object). Time bounds
+    are recorded but not applied, as in the other fakes.
+    """
 
     def __init__(self, store: FakeDataStore) -> None:
         """Bind the fake Scores v3 namespace to the shared store."""
@@ -1260,17 +1277,112 @@ class _ScoresV3API:
         limit: int | None = None,
         cursor: str | None = None,
         fields: str | None = None,
+        id: str | None = None,
+        name: str | None = None,
+        source: str | None = None,
+        data_type: str | None = None,
+        environment: str | None = None,
+        config_id: str | None = None,
+        queue_id: str | None = None,
+        author_user_id: str | None = None,
+        value: str | None = None,
+        value_min: float | None = None,
+        value_max: float | None = None,
         trace_id: str | None = None,
-        **kwargs: Any,
+        session_id: str | None = None,
+        observation_id: str | None = None,
+        experiment_id: str | None = None,
+        from_timestamp: Any = None,
+        to_timestamp: Any = None,
+        request_options: dict[str, Any] | None = None,
     ) -> FakePaginatedResponse:
-        """Return a trace's scores as v3 camelCase rows."""
-        self.calls.append({"limit": limit, "cursor": cursor, "fields": fields, "trace_id": trace_id, **kwargs})
-        scores = [s for s in self._store.scores.values() if trace_id is None or s.trace_id == trace_id]
-        data = [
-            {"id": s.id, "name": s.name, "value": s.value, "dataType": s.data_type, "subject": {"kind": "trace", "id": s.trace_id}}
-            for s in scores
-        ]
-        return FakePaginatedResponse(data=data, meta={"cursor": None})
+        """Return scores as v3 rows, applying the filters the fixtures can express."""
+        recorded = {
+            "limit": limit,
+            "cursor": cursor,
+            "fields": fields,
+            "id": id,
+            "name": name,
+            "source": source,
+            "data_type": data_type,
+            "environment": environment,
+            "config_id": config_id,
+            "queue_id": queue_id,
+            "value": value,
+            "value_min": value_min,
+            "value_max": value_max,
+            "trace_id": trace_id,
+            "session_id": session_id,
+            "from_timestamp": from_timestamp,
+            "to_timestamp": to_timestamp,
+        }
+        self.calls.append({k: v for k, v in recorded.items() if v is not None or k in ("limit", "cursor")})
+
+        if limit is not None and limit > 100:
+            raise FakeHTTPError(400, "limit must be at most 100")
+        if sum(x is not None for x in (trace_id, session_id, experiment_id)) > 1:
+            raise FakeHTTPError(400, "traceId, sessionId and experimentId are mutually exclusive")
+        if value is not None and (data_type is None or "," in data_type or data_type.upper() not in ("NUMERIC", "BOOLEAN", "CATEGORICAL")):
+            raise FakeHTTPError(400, "value needs a single dataType of NUMERIC, BOOLEAN or CATEGORICAL")
+        if (value_min is not None or value_max is not None) and (data_type or "").upper() != "NUMERIC":
+            raise FakeHTTPError(400, "valueMin/valueMax need dataType=NUMERIC")
+
+        def listed(filter_value: str | None) -> set[str] | None:
+            return None if filter_value is None else {part.strip() for part in filter_value.split(",")}
+
+        scores = list(self._store.scores.values())
+        for attribute, wanted in (
+            ("id", listed(id)),
+            ("name", listed(name)),
+            ("trace_id", listed(trace_id)),
+            ("queue_id", listed(queue_id)),
+        ):
+            if wanted is not None:
+                scores = [s for s in scores if getattr(s, attribute) in wanted]
+        if data_type is not None:
+            scores = [s for s in scores if s.data_type.upper() in {t.strip().upper() for t in data_type.split(",")}]
+        if session_id is not None:
+            scores = []  # the seeded scores are trace scores
+        if value is not None:
+            wanted_values = {v.strip() for v in value.split(",")}
+            scores = [
+                s
+                for s in scores
+                if str(s.value).lower() in wanted_values
+                or (s.data_type == "NUMERIC" and float(s.value) in {float(v) for v in wanted_values})
+            ]
+        if value_min is not None:
+            scores = [s for s in scores if float(s.value) >= value_min]
+        if value_max is not None:
+            scores = [s for s in scores if float(s.value) <= value_max]
+
+        page_size = limit or 50
+        offset = int(cursor) if cursor else 0
+        page = scores[offset : offset + page_size]
+        next_cursor = str(offset + page_size) if offset + page_size < len(scores) else None
+        groups = set((fields or "").split(",")) - {""}
+        data = []
+        for s in page:
+            row: dict[str, Any] = {
+                "id": s.id,
+                "project_id": "project_1",
+                "name": s.name,
+                "value": s.value,
+                "data_type": s.data_type,
+                "source": "API",
+                "timestamp": s.created_at,
+                "environment": "default",
+                "created_at": s.created_at,
+                "updated_at": s.created_at,
+            }
+            if "details" in groups:
+                row.update({"comment": None, "config_id": None, "metadata": None})
+            if "subject" in groups:
+                row["subject"] = {"kind": "trace", "id": s.trace_id}
+            if "annotation" in groups:
+                row.update({"author_user_id": None, "queue_id": s.queue_id})
+            data.append(row)
+        return FakePaginatedResponse(data=data, meta={"limit": page_size, "cursor": next_cursor})
 
 
 class _LegacyObservationsV1API:

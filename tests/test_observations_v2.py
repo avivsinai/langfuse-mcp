@@ -101,6 +101,14 @@ def test_v2_datetime_filter_compares_start_time(operator: str, expected: bool):
     assert _v2_condition_matches(row, condition) is expected
 
 
+def test_v2_datetime_filter_rejects_unknown_operator():
+    """An invalid datetime operator fails even when the row lacks that column."""
+    condition = {"type": "datetime", "column": "startTime", "operator": "<>", "value": T0.isoformat()}
+
+    with pytest.raises(ValueError, match="datetime filter does not support"):
+        _v2_condition_matches({}, condition)
+
+
 class _Status(Exception):
     def __init__(self, status_code: int) -> None:
         super().__init__(f"HTTP {status_code}")
