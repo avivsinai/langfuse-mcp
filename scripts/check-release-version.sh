@@ -38,6 +38,19 @@ for path in [".claude-plugin/plugin.json", ".codex-plugin/plugin.json"]:
     if actual != version:
         mismatches.append((path, actual))
 
+server_json = pathlib.Path("server.json")
+if not server_json.exists():
+    mismatches.append(("server.json", "<missing>"))
+else:
+    data = json.loads(server_json.read_text())
+    actual = data.get("version")
+    if actual != version:
+        mismatches.append(("server.json#version", actual))
+    for i, pkg in enumerate(data.get("packages", [])):
+        actual = pkg.get("version")
+        if actual != version:
+            mismatches.append((f"server.json#packages[{i}].version", actual))
+
 changelog = pathlib.Path("CHANGELOG.md")
 if not changelog.exists():
     mismatches.append(("CHANGELOG.md", "<missing>"))

@@ -28,10 +28,6 @@ ENV LANGFUSE_LOG_LEVEL=INFO \
     LANGFUSE_LOG_TO_CONSOLE=false \
     PYTHONUNBUFFERED=1
 
-# Optional default dump directory inside container
-# Mount a host volume to /dumps to persist files (e.g., -v $(pwd)/dumps:/dumps)
-ENV MCP_DUMP_DIR=/dumps
-
 # Expose no ports (stdio-based MCP)
 # ENTRYPOINT runs the MCP server over stdio. Do not add --log-to-console.
 ENTRYPOINT ["python", "-m", "langfuse_mcp"]
