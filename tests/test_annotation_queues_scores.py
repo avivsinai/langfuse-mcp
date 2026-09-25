@@ -40,8 +40,15 @@ def _scores_namespace(client):
     return getattr(client.api, "scores", None) or client.api.score_v_2
 
 
+def _uses_scores_v3(client) -> bool:
+    """Report whether the client reads scores through Scores API v3 (``api.scores_v3``, SDK 4.8.1+)."""
+    return hasattr(client.api, "scores_v3")
+
+
 def _last_list_score_kwargs(client) -> dict | None:
-    """Return whichever fake recorded the last list call (v3 ``last_get_kwargs`` or v4 ``last_get_many_kwargs``)."""
+    """Return the kwargs of the last score list call: Scores API v3, else v3 ``last_get_kwargs`` or v4 ``last_get_many_kwargs``."""
+    if _uses_scores_v3(client):
+        return client.api.scores_v3.calls[-1] if client.api.scores_v3.calls else None
     namespace = _scores_namespace(client)
     return getattr(namespace, "last_get_many_kwargs", None) or getattr(namespace, "last_get_kwargs", None)
 
@@ -197,7 +204,12 @@ def test_list_scores_v2_coerces_iso_timestamps_and_float_value(score_state):
     assert isinstance(passed_kwargs.get("to_timestamp"), datetime)
     assert passed_kwargs["from_timestamp"].tzinfo is not None
     assert passed_kwargs["to_timestamp"].tzinfo is not None
-    assert isinstance(passed_kwargs.get("value"), float)
+    if _uses_scores_v3(score_state.langfuse_client):
+        # Scores API v3 takes exact values as text and needs one data type with them.
+        assert passed_kwargs["value"] == "0.91"
+        assert passed_kwargs["data_type"] == "NUMERIC"
+    else:
+        assert isinstance(passed_kwargs.get("value"), float)
 
 
 def test_list_scores_v2_rejects_invalid_timestamp(tmp_path):
@@ -237,7 +249,7 @@ def test_list_scores_v2_keeps_zero_float_filter(score_state):
     passed_kwargs = _last_list_score_kwargs(score_state.langfuse_client)
     assert passed_kwargs is not None
     assert "value" in passed_kwargs
-    assert passed_kwargs["value"] == 0.0
+    assert passed_kwargs["value"] == ("0.0" if _uses_scores_v3(score_state.langfuse_client) else 0.0)
 
 
 def test_list_scores_v2_supports_trace_id_filter(score_state):

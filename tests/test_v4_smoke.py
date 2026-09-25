@@ -379,6 +379,38 @@ def test_list_scores_v2_live(tmp_path):
     assert isinstance(result["data"], list)
 
 
+def test_score_reads_use_scores_v3_only_live(tmp_path, monkeypatch):
+    """``list_scores_v2`` and ``get_score_v2`` are served by Scores API v3 alone (SDK 4.8.1+)."""
+    from langfuse_mcp.__main__ import get_score_v2, list_scores_v2
+
+    _require_v4_sdk()
+    state = _make_state(tmp_path)
+    api = state.langfuse_client.api
+    if not hasattr(api, "scores_v3"):
+        pytest.skip("This langfuse SDK has no api.scores_v3 (needs 4.8.1+)")
+    for method in ("get_many", "get_by_id"):
+
+        def removed(*args: Any, _name: str = f"{type(api.scores).__name__}.{method}", **kwargs: Any) -> Any:
+            raise AssertionError(f"{_name} calls GET /v2/scores, removed on 2026-11-16")
+
+        monkeypatch.setattr(type(api.scores), method, removed)
+    ctx = _ctx(state)
+
+    listed = asyncio.run(list_scores_v2(ctx, page=1, limit=5))
+    if not listed["data"]:
+        pytest.skip("No scores in the project; skipping the per-score reads")
+    first = listed["data"][0]
+    assert first["id"] and "data_type" in first
+
+    by_id = asyncio.run(list_scores_v2(ctx, page=1, limit=5, score_ids=first["id"]))
+    assert [score["id"] for score in by_id["data"]] == [first["id"]]
+    fetched = asyncio.run(get_score_v2(ctx, score_id=first["id"]))
+    assert fetched["data"]["id"] == first["id"]
+    if first.get("trace_id"):
+        by_trace = asyncio.run(list_scores_v2(ctx, page=1, limit=5, trace_id=first["trace_id"]))
+        assert all(score.get("trace_id") == first["trace_id"] for score in by_trace["data"])
+
+
 def test_list_annotation_queues_live(tmp_path):
     """``list_annotation_queues`` should round-trip on both SDK majors."""
     from langfuse_mcp.__main__ import list_annotation_queues
