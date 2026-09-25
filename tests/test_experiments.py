@@ -115,6 +115,16 @@ def test_get_run_rebuilds_items_and_excludes_old_items(state):
     assert client.api.datasets.last_get_run_kwargs is None
 
 
+def test_run_lookup_filters_plain_name_on_server(state):
+    """An ordinary name keeps the server filter to avoid scanning every run."""
+    from langfuse_mcp.__main__ import get_dataset_run
+
+    client = state.langfuse_client
+    _call(get_dataset_run, state, dataset_name="eval", run_name="baseline")
+
+    assert client.api.experiments.list_calls[-1]["name"] == "baseline"
+
+
 def test_list_run_items_walks_cursor_and_filters_time(state):
     """A page sees only matching items and carries the next cursor through the tool."""
     from langfuse_mcp.__main__ import list_dataset_run_items
@@ -137,6 +147,138 @@ def test_list_run_items_walks_cursor_and_filters_time(state):
     assert "next_page" not in second["metadata"]
     assert client.api.dataset_run_items.last_list_kwargs is None
     assert client.api.experiments.item_calls[-1]["from_start_time"] == client._store.datasets["eval"].created_at
+
+
+@pytest.mark.parametrize("tool_name", ["get_dataset_run", "list_dataset_run_items"])
+def test_run_reads_resolve_comma_name_to_exact_experiment(state, monkeypatch, tool_name):
+    """A comma in a run name cannot select the two names on either side of it."""
+    from langfuse_mcp import __main__ as server
+
+    client = state.langfuse_client
+    run = client._store.dataset_runs.pop(("dataset_eval", "baseline"))
+    run.name = "a,b"
+    client._store.dataset_runs[("dataset_eval", "a,b")] = run
+    for item in client._store.dataset_run_items.values():
+        item.run_name = "a,b"
+    other = FakeDatasetRun(
+        id="experiment_other",
+        dataset_id="dataset_eval",
+        dataset_name="eval",
+        name="a",
+        created_at=client._store.datasets["eval"].created_at + timedelta(minutes=1),
+    )
+    client._store.dataset_runs[("dataset_eval", "a")] = other
+    client._store.dataset_run_items["other_item"] = FakeDatasetRunItem(
+        id="other_item",
+        dataset_id="dataset_eval",
+        dataset_item_id="item_1",
+        run_name="a",
+        trace_id="other_trace",
+        created_at=other.created_at,
+    )
+    original_list = client.api.experiments.list
+    original_items = client.api.experiments.list_items
+
+    def comma_run_list(**kwargs: Any) -> Any:
+        if kwargs.get("name") == "a,b":
+            kwargs["name"] = "a"  # The server parses comma-separated names, not one literal name.
+        return original_list(**kwargs)
+
+    def comma_list(**kwargs: Any) -> Any:
+        if kwargs.get("experiment_name") == "a,b":
+            kwargs.pop("experiment_name")
+            kwargs.pop("experiment_id", None)
+        return original_items(**kwargs)
+
+    monkeypatch.setattr(client.api.experiments, "list", comma_run_list)
+    monkeypatch.setattr(client.api.experiments, "list_items", comma_list)
+    args = {
+        "get_dataset_run": {"dataset_name": "eval", "run_name": "a,b"},
+        "list_dataset_run_items": {"dataset_id": "dataset_eval", "run_name": "a,b"},
+    }
+    result = _call(getattr(server, tool_name), state, **args[tool_name])
+
+    rows = result["data"]["items"] if tool_name == "get_dataset_run" else result["data"]
+    assert {item["id"] for item in rows} == {"run_item_1", "run_item_2"}
+    assert client.api.experiments.list_calls[-1]["name"] is None
+    assert client.api.experiments.item_calls[-1]["experiment_id"] == "experiment_1"
+
+
+@pytest.mark.parametrize("tool_name", ["get_dataset_run", "list_dataset_run_items"])
+def test_read_rejects_items_from_another_experiment(state, monkeypatch, tool_name):
+    """An ignored item filter cannot mix run data in either read tool."""
+    from langfuse_mcp import __main__ as server
+
+    client = state.langfuse_client
+    original = client.api.experiments.list_items
+
+    def mixed(**kwargs: Any) -> Any:
+        response = original(**kwargs)
+        response.data.append({"id": "foreign", "experiment_id": "other", "trace_id": "foreign_trace"})
+        return response
+
+    monkeypatch.setattr(client.api.experiments, "list_items", mixed)
+    args = {
+        "get_dataset_run": {"dataset_name": "eval", "run_name": "baseline"},
+        "list_dataset_run_items": {"dataset_id": "dataset_eval", "run_name": "baseline"},
+    }
+    with pytest.raises(RuntimeError, match="ERR_LANGFUSE_EXPERIMENT_ITEM_SCOPE"):
+        _call(getattr(server, tool_name), state, **args[tool_name])
+
+
+@pytest.mark.parametrize("bad_id", [None, "other"])
+def test_delete_rejects_mixed_experiment_items_before_any_trace_delete(state, monkeypatch, bad_id):
+    """A broken server filter cannot delete traces from another experiment."""
+    from langfuse_mcp.__main__ import delete_dataset_run
+
+    client = state.langfuse_client
+    created = client._store.datasets["eval"].created_at + timedelta(minutes=1)
+    client._store.dataset_runs[("dataset_eval", "other")] = FakeDatasetRun(
+        id="other", dataset_id="dataset_eval", dataset_name="eval", name="other", created_at=created
+    )
+    client._store.dataset_run_items["foreign"] = FakeDatasetRunItem(
+        id="foreign", dataset_id="dataset_eval", dataset_item_id="item_1", run_name="other", trace_id="foreign_trace", created_at=created
+    )
+    original = client.api.experiments.list_items
+
+    def missing(*args: Any, **kwargs: Any) -> Any:
+        raise FakeHTTPError(404, "gone")
+
+    def mixed(**kwargs: Any) -> Any:
+        kwargs.pop("experiment_id")  # Simulate a server that silently ignores this filter.
+        response = original(**kwargs)
+        if bad_id is None:
+            next(row for row in response.data if row["id"] == "foreign").pop("experiment_id")
+        return response
+
+    monkeypatch.setattr(client.api.datasets, "delete_run", missing)
+    monkeypatch.setattr(client.api.experiments, "list_items", mixed)
+    with pytest.raises(RuntimeError, match="ERR_LANGFUSE_EXPERIMENT_ITEM_SCOPE"):
+        _call(delete_dataset_run, state, dataset_name="eval", run_name="baseline", delete_traces=True)
+    assert client.api.trace.delete_multiple_calls == []
+    assert "trace_1" in client._store.traces
+
+
+def test_delete_rejects_wrong_dataset_on_matching_experiment(state, monkeypatch):
+    """A matching experiment ID does not allow an item from another dataset."""
+    from langfuse_mcp.__main__ import delete_dataset_run
+
+    client = state.langfuse_client
+    original = client.api.experiments.list_items
+
+    def missing(*args: Any, **kwargs: Any) -> Any:
+        raise FakeHTTPError(404, "gone")
+
+    def wrong_dataset(**kwargs: Any) -> Any:
+        response = original(**kwargs)
+        response.data[0]["experiment_dataset_id"] = "dataset_other"
+        return response
+
+    monkeypatch.setattr(client.api.datasets, "delete_run", missing)
+    monkeypatch.setattr(client.api.experiments, "list_items", wrong_dataset)
+    with pytest.raises(RuntimeError, match="ERR_LANGFUSE_EXPERIMENT_ITEM_SCOPE"):
+        _call(delete_dataset_run, state, dataset_name="eval", run_name="baseline", delete_traces=True)
+    assert client.api.trace.delete_multiple_calls == []
 
 
 @pytest.mark.parametrize("status", [404, 405])

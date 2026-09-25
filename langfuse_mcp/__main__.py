@@ -4605,6 +4605,7 @@ ERR_EXPERIMENTS_SDK_UPGRADE = "ERR_LANGFUSE_EXPERIMENTS_SDK_UPGRADE"
 ERR_EXPERIMENTS_READ_UNAVAILABLE = "ERR_LANGFUSE_EXPERIMENTS_READ_UNAVAILABLE"
 ERR_RUN_ITEM_CREATE_REMOVED = "ERR_LANGFUSE_RUN_ITEM_CREATE_REMOVED"
 ERR_RUN_DELETE_REQUIRES_TRACES = "ERR_LANGFUSE_RUN_DELETE_REQUIRES_TRACES"
+ERR_EXPERIMENT_ITEM_SCOPE = "ERR_LANGFUSE_EXPERIMENT_ITEM_SCOPE"
 
 
 def _experiment_start(dataset: Any) -> datetime:
@@ -4642,7 +4643,7 @@ def _experiment_by_name(
         limit=EXPERIMENTS_PAGE_LIMIT,
         fields=fields,
         dataset_id=dataset_id,
-        name=run_name,
+        name=run_name if "," not in run_name else None,
         from_start_time=from_start_time,
     )
     matches = [row for row in rows if isinstance(row, dict) and row.get("dataset_id") == dataset_id and row.get("name") == run_name]
@@ -4666,6 +4667,17 @@ def _experiment_item_as_run_item(row: dict[str, Any]) -> dict[str, Any]:
         if new in row:
             item[old] = row[new]
     return item
+
+
+def _check_experiment_item_scope(items: list[Any], *, experiment_id: str, dataset_id: str) -> None:
+    """Reject missing or foreign item ownership before using a server-filtered result."""
+    for item in items:
+        if (
+            not isinstance(item, dict)
+            or item.get("experiment_id") != experiment_id
+            or (item.get("experiment_dataset_id") is not None and item["experiment_dataset_id"] != dataset_id)
+        ):
+            raise RuntimeError(f"{ERR_EXPERIMENT_ITEM_SCOPE}: experiment item does not belong to the requested run and dataset")
 
 
 def _legacy_experiment_read_error(exc: Exception, *, has_probe: bool) -> None:
@@ -4781,6 +4793,7 @@ async def get_dataset_run(
                         experiment_id=run["id"],
                         from_start_time=start,
                     )
+                    _check_experiment_item_scope(items, experiment_id=run["id"], dataset_id=dataset_row["id"])
                     run_items = [_experiment_item_as_run_item(item) for item in items]
                     result = {**run, "dataset_name": dataset_name, "dataset_run_items": run_items, "items": run_items}
             except Exception as exc:
@@ -4837,15 +4850,20 @@ async def list_dataset_run_items(
         if methods is not None:
             dataset = _dataset_for_id(client, dataset_id)
             try:
-                rows, cursor = _v2_page(
-                    methods[1],
-                    page=page,
-                    limit=limit,
-                    fields="core,dataset,io,metadata,itemMetadata,experimentMetadata,scores",
-                    dataset_id=dataset_id,
-                    experiment_name=run_name,
-                    from_start_time=_experiment_start(dataset),
-                )
+                start = _experiment_start(dataset)
+                run = _experiment_by_name(methods[0], dataset_id=dataset_id, run_name=run_name, from_start_time=start, fields="core")
+                if run is None:
+                    rows, cursor = [], None
+                else:
+                    rows, cursor = _v2_page(
+                        methods[1],
+                        page=page,
+                        limit=limit,
+                        fields="core,dataset,io,metadata,itemMetadata,experimentMetadata,scores",
+                        experiment_id=run["id"],
+                        from_start_time=start,
+                    )
+                    _check_experiment_item_scope(rows, experiment_id=run["id"], dataset_id=dataset_id)
             except Exception as exc:
                 if not _route_missing(exc):
                     raise
@@ -5019,6 +5037,7 @@ async def delete_dataset_run(
         if run is None:
             raise LookupError(f"Dataset run '{run_name}' not found in dataset '{dataset_name}'")
         items = _v2_collect(methods[1], limit=EXPERIMENTS_PAGE_LIMIT, fields="core", experiment_id=run["id"], from_start_time=start)
+        _check_experiment_item_scope(items, experiment_id=run["id"], dataset_id=dataset_row["id"])
         trace_ids = list(dict.fromkeys(row["trace_id"] for row in items if isinstance(row, dict) and row.get("trace_id")))
         deleted_count = 0
         for offset in range(0, len(trace_ids), TRACE_DELETE_BATCH_LIMIT):
