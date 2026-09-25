@@ -78,7 +78,7 @@ Search and filter traces with pagination.
 | `tags` | string | No | null | Tag or comma-separated list of tags |
 | `page` | int | No | 1 | Page number for pagination (starts at 1) |
 | `limit` | int | No | 50 | Maximum traces per page |
-| `include_observations` | bool | No | false | Include full observation objects instead of just IDs |
+| `include_observations` | bool | No | false | Add the full observation objects (omitted entirely when false) |
 | `output_mode` | string | No | "compact" | Output format |
 
 **Returns:** List of trace objects with metadata including pagination info.
@@ -178,7 +178,7 @@ Get detailed session info by ID.
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `session_id` | string | Yes | - | The session ID to fetch |
-| `include_observations` | bool | No | false | Include full observation objects instead of just IDs |
+| `include_observations` | bool | No | false | Add the full observation objects (omitted entirely when false) |
 | `output_mode` | string | No | "compact" | Output format |
 
 **Returns:** Session object with all traces.
@@ -194,7 +194,7 @@ Get all sessions for a user.
 |------|------|----------|---------|-------------|
 | `user_id` | string | Yes | - | The user ID to look up |
 | `age` | int | Yes | - | Look back window in minutes from now. Max 10080 (7 days). |
-| `include_observations` | bool | No | false | Include full observation objects instead of just IDs |
+| `include_observations` | bool | No | false | Add the full observation objects (omitted entirely when false) |
 | `output_mode` | string | No | "compact" | Output format |
 
 **Returns:** List of sessions for the user.
@@ -654,20 +654,23 @@ Returns a **string** containing serialized JSON (not an object). Parse it if you
       "id": "trace-abc-123",
       "name": "chat-completion",
       "user_id": "user-456",
-      "timestamp": "2024-01-15T10:30:00Z",
-      "observations": ["obs-1", "obs-2"]
+      "timestamp": "2024-01-15T10:30:00Z"
     }
   ],
   "metadata": {
     "item_count": 1,
-    "page": 1,
-    "total": 47,
     "next_page": 2,
     "file_path": null,
     "file_info": null
   }
 }
 ```
+
+On Observations API v2, `fetch_traces` no longer returns `total_cost`, `scores`, or an
+`observations` field by default — pass `include_observations=true` to add an `observations`
+field with the full observation objects (not just IDs), and use `query_metrics` for cost and
+score aggregates. Pagination is cursor-based, so `metadata` carries `next_page` but no `total`
+or `page` count.
 
 ## Example Response (full_json_file)
 
