@@ -1175,6 +1175,38 @@ def test_truncate_large_strings_case_insensitive():
     assert len(value) <= MAX_FIELD_LENGTH + len("...")
 
 
+def test_parity_nested_strings_use_one_base_limit_and_nonessential_strings_truncate():
+    """Nesting does not compound the level limit, while nonessential text remains bounded."""
+    from langfuse_mcp.__main__ import truncate_large_strings
+
+    nested, _ = truncate_large_strings([{"custom": {"note": "x" * 150}}], max_length=500, truncation_level=1)
+    oversized, _ = truncate_large_strings({"custom": "y" * 600}, max_length=500)
+    essential, _ = truncate_large_strings([{"id": "i" * 36, "custom": "z" * 600}], max_length=500, truncation_level=2)
+
+    assert nested[0]["custom"]["note"] == "x" * 150
+    assert oversized["custom"].endswith("...") and len(oversized["custom"]) < 600
+    assert essential[0]["id"] == "i" * 36
+    assert "custom" not in essential[0]
+
+
+def test_parity_long_essential_text_keeps_base_limit():
+    """Long names and status messages stay bounded without shortening normal IDs."""
+    from langfuse_mcp.__main__ import MAX_FIELD_LENGTH, truncate_large_strings
+
+    payload = {"id": "x" * 36, "status_message": "E" * 20000, "input": {"messages": [{"name": "N" * 20000, "content": "c"}]}}
+    compact, size = truncate_large_strings(payload, truncation_level=0)
+    aggressive, _ = truncate_large_strings({"id": "x" * 36}, truncation_level=2)
+    oversized, _ = truncate_large_strings({"id": "x" * 600, "status_message": "E" * 600}, truncation_level=2)
+
+    assert compact["id"] == "x" * 36
+    assert compact["status_message"] == "E" * MAX_FIELD_LENGTH + "..."
+    assert compact["input"]["messages"][0]["name"] == "N" * MAX_FIELD_LENGTH + "..."
+    assert aggressive["id"] == "x" * 36
+    assert oversized["id"] == "x" * MAX_FIELD_LENGTH + "..."
+    assert oversized["status_message"] == "E" * MAX_FIELD_LENGTH + "..."
+    assert size < 2000
+
+
 def test_app_factory_accepts_default_output_mode():
     """app_factory should accept and store the configured default_output_mode."""
     from langfuse_mcp.__main__ import OutputMode, app_factory
