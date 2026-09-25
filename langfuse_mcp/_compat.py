@@ -225,6 +225,17 @@ def get_scores_v3_method(client: Any) -> Callable[..., Any] | None:
     return getattr(scores_v3, "get_many_v3", None) if scores_v3 is not None else None
 
 
+def get_experiments_methods(client: Any) -> tuple[Callable[..., Any], Callable[..., Any]] | None:
+    """Return the experiment and experiment-item list methods when both are exposed."""
+    api = getattr(client, "api", None)
+    experiments = getattr(api, "experiments", None) if api is not None else None
+    list_runs = getattr(experiments, "list", None)
+    list_items = getattr(experiments, "list_items", None)
+    if callable(list_runs) and callable(list_items):
+        return list_runs, list_items
+    return None
+
+
 def call_with_request_or_kwargs(
     method: Callable[..., Any],
     build_v3_request: Callable[[], Any],

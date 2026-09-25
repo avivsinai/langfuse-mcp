@@ -203,6 +203,19 @@ class _TraceAPI:
         self._store = store
         self.last_list_kwargs: dict[str, Any] | None = None
         self.last_get_kwargs: dict[str, Any] | None = None
+        self.delete_multiple_calls: list[list[str]] = []
+
+    def delete_multiple(self, *, trace_ids: list[str]) -> dict[str, str]:
+        """Delete trace data as the v4 batch endpoint does."""
+        if len(trace_ids) > 1000:
+            raise FakeHTTPError(400, "at most 1000 trace IDs per request")
+        self.delete_multiple_calls.append(list(trace_ids))
+        for trace_id in trace_ids:
+            self._store.traces.pop(trace_id, None)
+        self._store.observations = {key: row for key, row in self._store.observations.items() if row.trace_id not in trace_ids}
+        self._store.scores = {key: row for key, row in self._store.scores.items() if row.trace_id not in trace_ids}
+        self._store.dataset_run_items = {key: row for key, row in self._store.dataset_run_items.items() if row.trace_id not in trace_ids}
+        return {"message": "Traces deleted"}
 
     def list(self, **kwargs: Any) -> FakePaginatedResponse:
         self.last_list_kwargs = kwargs
@@ -1385,6 +1398,166 @@ class _ScoresV3API:
         return FakePaginatedResponse(data=data, meta={"limit": page_size, "cursor": next_cursor})
 
 
+class _ExperimentsAPI:
+    """Fake v4 experiment reads with required time bounds and cursor pagination."""
+
+    def __init__(self, store: FakeDataStore) -> None:
+        self._store = store
+        self.list_calls: list[dict[str, Any]] = []
+        self.item_calls: list[dict[str, Any]] = []
+
+    @staticmethod
+    def _page(rows: list[dict[str, Any]], limit: int | None, cursor: str | None) -> FakePaginatedResponse:
+        size = limit or 50
+        if size > 100:
+            raise FakeHTTPError(400, "limit must be at most 100")
+        offset = int(cursor) if cursor else 0
+        next_cursor = str(offset + size) if offset + size < len(rows) else None
+        return FakePaginatedResponse(data=rows[offset : offset + size], meta={"cursor": next_cursor})
+
+    def list(
+        self,
+        *,
+        from_start_time: Any = None,
+        fields: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+        to_start_time: Any = None,
+        id: str | None = None,
+        name: str | None = None,
+        dataset_id: str | None = None,
+    ) -> FakePaginatedResponse:
+        """List experiments filtered by dataset, name, ID, and start time."""
+        self.list_calls.append(
+            {
+                "from_start_time": from_start_time,
+                "fields": fields,
+                "limit": limit,
+                "cursor": cursor,
+                "to_start_time": to_start_time,
+                "id": id,
+                "name": name,
+                "dataset_id": dataset_id,
+            }
+        )
+        if from_start_time is None:
+            raise FakeHTTPError(400, "fromStartTime is required")
+        rows = []
+        for run in self._store.dataset_runs.values():
+            start = run.created_at
+            if start is None or start < _v2_parse_time(from_start_time):
+                continue
+            if to_start_time is not None and start >= _v2_parse_time(to_start_time):
+                continue
+            if (id is not None and run.id != id) or (name is not None and run.name != name):
+                continue
+            if dataset_id is not None and run.dataset_id != dataset_id:
+                continue
+            items = [
+                item for item in self._store.dataset_run_items.values() if item.dataset_id == run.dataset_id and item.run_name == run.name
+            ]
+            row = {
+                "id": run.id,
+                "name": run.name,
+                "description": run.description,
+                "start_time": start,
+                "end_time": run.updated_at,
+                "item_count": len(items),
+                "dataset_id": run.dataset_id,
+            }
+            groups = set((fields or "core").split(","))
+            if "metadata" in groups:
+                row["metadata"] = run.metadata
+            if "scores" in groups:
+                row["scores"] = []
+            rows.append(row)
+        rows.sort(key=lambda row: row["start_time"], reverse=True)
+        return self._page(rows, limit, cursor)
+
+    def list_items(
+        self,
+        *,
+        from_start_time: Any = None,
+        fields: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+        to_start_time: Any = None,
+        experiment_id: str | None = None,
+        experiment_name: str | None = None,
+        experiment_item_id: str | None = None,
+        dataset_id: str | None = None,
+    ) -> FakePaginatedResponse:
+        """List experiment items with the v4 field groups and filters."""
+        self.item_calls.append(
+            {
+                "from_start_time": from_start_time,
+                "fields": fields,
+                "limit": limit,
+                "cursor": cursor,
+                "to_start_time": to_start_time,
+                "experiment_id": experiment_id,
+                "experiment_name": experiment_name,
+                "experiment_item_id": experiment_item_id,
+                "dataset_id": dataset_id,
+            }
+        )
+        if from_start_time is None:
+            raise FakeHTTPError(400, "fromStartTime is required")
+        rows = []
+        groups = set((fields or "core,dataset").split(","))
+        for item in self._store.dataset_run_items.values():
+            run = self._store.dataset_runs.get((item.dataset_id, item.run_name))
+            start = item.created_at
+            if run is None or start is None or start < _v2_parse_time(from_start_time):
+                continue
+            if to_start_time is not None and start >= _v2_parse_time(to_start_time):
+                continue
+            if (experiment_id is not None and run.id != experiment_id) or (experiment_name is not None and run.name != experiment_name):
+                continue
+            if (experiment_item_id is not None and item.dataset_item_id != experiment_item_id) or (
+                dataset_id is not None and item.dataset_id != dataset_id
+            ):
+                continue
+            row: dict[str, Any] = {
+                "id": item.id,
+                "trace_id": item.trace_id,
+                "start_time": start,
+                "end_time": start,
+                "level": "DEFAULT",
+                "environment": "default",
+                "experiment_id": run.id,
+                "experiment_name": run.name,
+            }
+            dataset_item = self._store.dataset_items.get(item.dataset_item_id)
+            if "dataset" in groups:
+                row.update(
+                    {
+                        "experiment_item_id": item.dataset_item_id,
+                        "experiment_dataset_id": item.dataset_id,
+                        "experiment_item_version": item.dataset_version,
+                    }
+                )
+            if "io" in groups:
+                row.update(
+                    {
+                        "input": dataset_item.input if dataset_item else None,
+                        "output": None,
+                        "expected_output": dataset_item.expected_output if dataset_item else None,
+                    }
+                )
+            if "metadata" in groups:
+                row["metadata"] = item.metadata
+            if "itemMetadata" in groups:
+                row["experiment_item_metadata"] = dataset_item.metadata if dataset_item else None
+            if "experimentMetadata" in groups:
+                row.update({"experiment_metadata": run.metadata, "experiment_description": run.description})
+            if "scores" in groups:
+                row["scores"] = []
+            rows.append(row)
+        rows.sort(key=lambda row: row["start_time"], reverse=True)
+        return self._page(rows, limit, cursor)
+
+
 class _LegacyObservationsV1API:
     """Fake v4 ``api.legacy.observations_v1`` namespace exposing the page-based v1 surface."""
 
@@ -1462,10 +1635,12 @@ class FakeAPIV4:
         self.prompts = _PromptsAPI(store)
         self.scores = _ScoresV4API(store)
         self.scores_v3 = _ScoresV3API(store)
+        self.datasets = _DatasetsAPI(store)
+        self.experiments = _ExperimentsAPI(store)
         self.annotation_queues = _AnnotationQueuesV4API(store)
         self.metrics_v_2 = _MetricsV2API(store)
         self.dataset_run_items = _DatasetRunItemsV4API(store)
-        # datasets/dataset_items are filled in by S4.
+        # dataset_items is filled in by S4.
         self.legacy = _LegacyAPI(store)
 
 
