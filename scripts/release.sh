@@ -203,6 +203,21 @@ for path in [".claude-plugin/plugin.json", ".codex-plugin/plugin.json"]:
         pp.write_text(json.dumps(data, indent=2) + "\n")
         changed.append(path)
 
+server_json = pathlib.Path("server.json")
+if server_json.exists():
+    data = json.loads(server_json.read_text())
+    server_changed = False
+    if data.get("version") != version:
+        data["version"] = version
+        server_changed = True
+    for pkg in data.get("packages", []):
+        if pkg.get("version") != version:
+            pkg["version"] = version
+            server_changed = True
+    if server_changed:
+        server_json.write_text(json.dumps(data, indent=2) + "\n")
+        changed.append("server.json")
+
 print("prepared release files:")
 for path in changed:
     print(f"  - {path}")
@@ -242,6 +257,7 @@ fi
 
 git add CHANGELOG.md skills/*/SKILL.md .claude-plugin/plugin.json
 [ -f .codex-plugin/plugin.json ] && git add .codex-plugin/plugin.json
+[ -f server.json ] && git add server.json
 
 git diff --cached --quiet && {
   echo "error: release prep produced no staged changes" >&2
