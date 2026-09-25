@@ -14,9 +14,9 @@ from typing import Any
 
 import pytest
 
-from tests.fakes import FakeContext, FakeLangfuse, FakeLangfuseV4, FakeObservation, FakeTrace, _ObservationsV4API
+from tests.fakes import FakeContext, FakeLangfuse, FakeLangfuseV4, FakeObservation, FakeTrace, _ObservationsV4API, _v2_condition_matches
 
-T0 = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+T0 = datetime.now(timezone.utc) - timedelta(minutes=10)
 
 
 @pytest.fixture()
@@ -89,6 +89,18 @@ def _fetch_traces(state: Any, **overrides: Any) -> Any:
     return asyncio.run(fetch_traces(FakeContext(state), **kwargs))
 
 
+@pytest.mark.parametrize(
+    ("operator", "expected"),
+    [("<", True), ("<=", True), (">", False), (">=", False)],
+)
+def test_v2_datetime_filter_compares_start_time(operator: str, expected: bool):
+    """The fake applies all four ordered datetime operators."""
+    row = {"startTime": T0.isoformat()}
+    condition = {"type": "datetime", "column": "startTime", "operator": operator, "value": (T0 + timedelta(seconds=1)).isoformat()}
+
+    assert _v2_condition_matches(row, condition) is expected
+
+
 class _Status(Exception):
     def __init__(self, status_code: int) -> None:
         super().__init__(f"HTTP {status_code}")
@@ -123,6 +135,17 @@ def test_fetch_traces_lists_root_observations_with_every_condition_in_the_filter
     assert trace["tags"] == ["prod", "eu"]
     assert trace["input"] == {"question": "where is my order?"}
     assert trace["html_path"] == "/project/project_1/traces/t_1"
+
+
+def test_fetch_traces_excludes_roots_older_than_age(v4_state):
+    """The startTime lower bound removes a root just beyond the requested age."""
+    client = v4_state.langfuse_client
+    _add_trace(client, "inside", minutes=-49)
+    _add_trace(client, "outside", minutes=-51)
+
+    result = _fetch_traces(v4_state, age=60)
+
+    assert [trace["id"] for trace in result["data"]] == ["inside"]
 
 
 def test_fetch_traces_include_observations_hydrates_from_v2(v4_state):
@@ -234,6 +257,32 @@ def test_fetch_observations_page_two_works_on_v2(v4_state):
     assert client.api.legacy.observations_v1.last_get_many_kwargs is None
 
 
+def test_fetch_observations_excludes_rows_older_than_age(v4_state):
+    """The startTime lower bound excludes observations just outside the window."""
+    from langfuse_mcp.__main__ import fetch_observations
+
+    client = v4_state.langfuse_client
+    _add_trace(client, "inside", minutes=-49)
+    _add_trace(client, "outside", minutes=-51)
+
+    result = asyncio.run(
+        fetch_observations(
+            FakeContext(v4_state),
+            type=None,
+            age=60,
+            name=None,
+            user_id=None,
+            trace_id=None,
+            parent_observation_id=None,
+            page=1,
+            limit=50,
+            output_mode="compact",
+        )
+    )
+
+    assert {obs["id"] for obs in result["data"]} == {"inside_root", "inside_gen"}
+
+
 def test_fetch_sessions_groups_root_observations_by_session(v4_state):
     """Sessions come from root observations grouped by sessionId, newest activity first."""
     from langfuse_mcp.__main__ import fetch_sessions
@@ -246,12 +295,25 @@ def test_fetch_sessions_groups_root_observations_by_session(v4_state):
 
     result = asyncio.run(fetch_sessions(FakeContext(v4_state), age=60, page=1, limit=2, output_mode="compact"))
 
-    # Newest activity first; t_4 has no session, and the seeded 2023 session_1 lands on page 2.
+    # Newest activity first; t_4 has no session, and the seeded 2023 session_1 is outside the window.
     assert [session["id"] for session in result["data"]] == ["s_old", "s_new"]
     assert result["data"][0]["last_trace_at"] == (T0 + timedelta(minutes=3)).isoformat()
-    assert result["metadata"]["next_page"] == 2
+    assert "next_page" not in result["metadata"]
     assert {"column": "sessionId", "operator": "is not null", "type": "null", "value": ""} in _filters(client.api.observations.calls[-1])
     assert client.api.sessions.last_list_kwargs is None
+
+
+def test_fetch_sessions_excludes_sessions_older_than_age(v4_state):
+    """A session whose root is just outside the window does not appear."""
+    from langfuse_mcp.__main__ import fetch_sessions
+
+    client = v4_state.langfuse_client
+    _add_trace(client, "inside", minutes=-49, session_id="inside_session")
+    _add_trace(client, "outside", minutes=-51, session_id="outside_session")
+
+    result = asyncio.run(fetch_sessions(FakeContext(v4_state), age=60, page=1, limit=50, output_mode="compact"))
+
+    assert [session["id"] for session in result["data"]] == ["inside_session"]
 
 
 def test_get_session_details_filters_by_session_without_a_time_bound(v4_state):
@@ -313,11 +375,12 @@ def test_sdk_v3_cursor_route_with_filter_is_used(tmp_path):
 
     client = FakeLangfuse()
     client.api.observations_v_2 = _ObservationsV4API(client._store)
+    _add_trace(client, "fresh", minutes=1)
     state = MCPState(langfuse_client=client, dump_dir=str(tmp_path))
 
     result = _fetch_traces(state)
 
-    assert [trace["id"] for trace in result["data"]] == ["trace_1"]
+    assert [trace["id"] for trace in result["data"]] == ["fresh"]
     assert client.api.observations_v_2.calls
     assert client.api.trace.last_list_kwargs is None
 
