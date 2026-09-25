@@ -2238,7 +2238,10 @@ async def fetch_traces(
         ),
     ),
 ) -> ResponseDict | str:
-    """Find traces based on filters. All filter parameters are optional."""
+    """Find traces based on filters. All filter parameters are optional.
+
+    On Observations API v2, each trace is built from its root observation; traces without a root observation do not appear.
+    """
     age = validate_age(age)
 
     state = cast(MCPState, ctx.request_context.lifespan_context)
@@ -2331,6 +2334,8 @@ async def fetch_trace(
     ),
 ) -> ResponseDict | str:
     """Get a single trace by ID with full details.
+
+    On Observations API v2, a trace is built from its root observation; a trace with no observations is not found.
 
     Args:
         ctx: Context object containing lifespan context with Langfuse client

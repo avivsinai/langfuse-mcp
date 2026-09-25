@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -32,6 +32,10 @@ def observation_state(request, tmp_path):
     from langfuse_mcp.__main__ import MCPState
 
     client = FakeLangfuse() if request.param == "v3" else FakeLangfuseV4()
+    if request.param == "v4":
+        recent = datetime.now(timezone.utc) - timedelta(minutes=1)
+        client._store.observations["obs_1"].start_time = recent
+        client._store.observations["obs_1"].end_time = recent
     return MCPState(langfuse_client=client, dump_dir=str(tmp_path))
 
 
@@ -45,7 +49,7 @@ def _observation_list_fake(client):
 
 def _seed_route_decision_observations(client):
     """Add router-neutral route-decision observations to a fake Langfuse client."""
-    now = datetime(2026, 5, 19, 11, 6, 34, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc) - timedelta(minutes=1)
     client._store.observations["route_ok"] = FakeObservation(
         id="route_ok",
         trace_id="trace_route",
@@ -106,8 +110,8 @@ def _seed_emitted_failed_route_decision(client):
     ``feedback_expected``), and null selected-decision fields for the no-match case.
     It exercises metadata fields the synthetic seeds never set.
     """
-    start = datetime(2026, 5, 29, 10, 45, 0, tzinfo=timezone.utc)
-    end = datetime(2026, 5, 29, 10, 45, 5, 78000, tzinfo=timezone.utc)
+    start = datetime.now(timezone.utc) - timedelta(minutes=1)
+    end = start + timedelta(seconds=5, milliseconds=78)
     client._store.observations["obs_failed_route_19c5fa4"] = FakeObservation(
         id="obs_failed_route_19c5fa4",
         trace_id="trace_wisepick_eval_002",
@@ -702,13 +706,14 @@ def _seed_error_observation(
     store, *, obs_id, trace_id="trace_1", type="TOOL", level="ERROR", metadata=None, status_message=None, name="tool_call"
 ):
     """Seed one realistic observation (no invented events) into a fake store."""
+    start = datetime.now(timezone.utc) - timedelta(minutes=1)
     store.observations[obs_id] = FakeObservation(
         id=obs_id,
         type=type,
         name=name,
         status="ERROR" if level == "ERROR" else "SUCCEEDED",
-        start_time=datetime(2023, 1, 1, tzinfo=timezone.utc),
-        end_time=datetime(2023, 1, 1, tzinfo=timezone.utc),
+        start_time=start,
+        end_time=start,
         trace_id=trace_id,
         metadata=metadata or {},
         level=level,

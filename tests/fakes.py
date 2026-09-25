@@ -1070,12 +1070,22 @@ def _v2_parse_time(value: Any) -> datetime:
     return value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
 
 
-def _v2_condition_matches(row: dict[str, Any], condition: dict[str, Any]) -> bool | None:
-    """Evaluate one v2 ``filter`` condition against a full row; None means "not applied" (time bounds)."""
+def _v2_condition_matches(row: dict[str, Any], condition: dict[str, Any]) -> bool:
+    """Evaluate one v2 ``filter`` condition against a full row."""
     kind, operator, value = condition["type"], condition["operator"], condition.get("value")
     actual = row.get(_V2_FILTER_COLUMN_ALIASES.get(condition["column"], condition["column"]))
     if kind == "datetime":
-        return None
+        if actual is None:
+            return False
+        actual_time, bound = _v2_parse_time(actual), _v2_parse_time(value)
+        if operator == ">=":
+            return actual_time >= bound
+        if operator == ">":
+            return actual_time > bound
+        if operator == "<=":
+            return actual_time <= bound
+        if operator == "<":
+            return actual_time < bound
     if kind == "null":
         if value != "":
             # Langfuse answers 400 "expected \"\"" on filter[i].value when it is missing.
@@ -1100,8 +1110,7 @@ class _ObservationsV4API:
 
     Mirrors the real endpoint where production code depends on it: camelCase rows, field
     groups (``core,basic`` by default), cursor pagination by ``limit``, and a structured
-    ``filter`` that — like the server — overrides every query-parameter filter. Time bounds
-    are recorded but not applied: fixtures are dated 2023 while tools filter by age in minutes.
+    ``filter`` that — like the server — overrides every query-parameter filter.
     """
 
     def __init__(self, store: FakeDataStore) -> None:
@@ -1208,9 +1217,21 @@ class _ObservationsV4API:
         rows = [self._row(obs) for obs in self._store.observations.values()]
         if filter is not None:
             conditions = json.loads(filter)
-            rows = [row for row in rows if all(_v2_condition_matches(row, c) is not False for c in conditions)]
+            rows = [row for row in rows if all(_v2_condition_matches(row, c) for c in conditions)]
         else:
             rows = [row for row in rows if all(value is None or row.get(column) == value for column, value in query_filters.items())]
+            if from_start_time is not None:
+                rows = [
+                    row
+                    for row in rows
+                    if _v2_condition_matches(row, {"type": "datetime", "column": "startTime", "operator": ">=", "value": from_start_time})
+                ]
+            if to_start_time is not None:
+                rows = [
+                    row
+                    for row in rows
+                    if _v2_condition_matches(row, {"type": "datetime", "column": "startTime", "operator": "<=", "value": to_start_time})
+                ]
         rows.sort(key=lambda row: _v2_parse_time(row["startTime"]), reverse=True)
 
         page_size = limit or 50
