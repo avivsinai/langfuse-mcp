@@ -146,6 +146,8 @@ The MCP server provides the tools; the skill provides the agent-facing workflow.
 
 On Observations API v2, traces are built from root observations. `fetch_traces` omits traces without a root observation, and `fetch_trace` cannot find traces with no observations.
 
+Dataset-run reads use the experiments API when the installed Langfuse SDK exposes it (Python SDK 4.13.1+). The older routes remain a fallback for self-hosted servers that do not serve experiments. `delete_dataset_run` uses the legacy delete route while it works; after that route is removed, it deletes the run's traces only when you pass `delete_traces=True`. Trace deletion also removes observations and related scores. `create_dataset_run_item` still uses the legacy link API; when that API is gone, create experiment data through the SDK experiment runner or OTel ingestion.
+
 ## Dataset Item Updates (Upsert)
 
 Langfuse uses upsert for dataset items. To edit an existing item, call `create_dataset_item` with `item_id`. If the ID exists, it updates; otherwise it creates a new item.

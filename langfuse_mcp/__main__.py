@@ -797,7 +797,7 @@ def _v2_collect(method: Callable[..., Any], **request: Any) -> list[Any]:
         if cursor is None:
             return rows
     raise RuntimeError(
-        f"{ERR_V2_SCAN_LIMIT}: stopped after {V2_SCAN_MAX_REQUESTS} requests with more observations remaining. Narrow the query and retry."
+        f"{ERR_V2_SCAN_LIMIT}: stopped after {V2_SCAN_MAX_REQUESTS} requests with more rows remaining. Narrow the query and retry."
     )
 
 
@@ -4598,6 +4598,87 @@ async def delete_dataset_item(
         raise
 
 
+EXPERIMENTS_EARLIEST_START = datetime(2000, 1, 1, tzinfo=timezone.utc)
+EXPERIMENTS_PAGE_LIMIT = 100
+TRACE_DELETE_BATCH_LIMIT = 1000
+ERR_EXPERIMENTS_SDK_UPGRADE = "ERR_LANGFUSE_EXPERIMENTS_SDK_UPGRADE"
+ERR_EXPERIMENTS_READ_UNAVAILABLE = "ERR_LANGFUSE_EXPERIMENTS_READ_UNAVAILABLE"
+ERR_RUN_ITEM_CREATE_REMOVED = "ERR_LANGFUSE_RUN_ITEM_CREATE_REMOVED"
+ERR_RUN_DELETE_REQUIRES_TRACES = "ERR_LANGFUSE_RUN_DELETE_REQUIRES_TRACES"
+
+
+def _experiment_start(dataset: Any) -> datetime:
+    """Use the dataset creation time, or 2000-01-01 UTC when it is unavailable."""
+    row = _sdk_object_to_python(dataset)
+    created_at = row.get("created_at") if isinstance(row, dict) else None
+    return _coerce_optional_datetime(created_at, "dataset.created_at") or EXPERIMENTS_EARLIEST_START
+
+
+def _dataset_for_id(client: Any, dataset_id: str) -> Any | None:
+    """Find dataset metadata by ID through the SDK's page-based dataset listing."""
+    for page in range(1, V2_SCAN_MAX_REQUESTS + 1):
+        response = client.api.datasets.list(page=page, limit=EXPERIMENTS_PAGE_LIMIT)
+        rows, _ = _extract_items_from_response(response)
+        for row in rows:
+            item = _sdk_object_to_python(row)
+            if isinstance(item, dict) and item.get("id") == dataset_id:
+                return item
+        if len(rows) < EXPERIMENTS_PAGE_LIMIT:
+            return None
+    raise RuntimeError(f"{ERR_V2_SCAN_LIMIT}: dataset lookup exceeded {V2_SCAN_MAX_REQUESTS} pages")
+
+
+def _experiment_by_name(
+    method: Callable[..., Any],
+    *,
+    dataset_id: str,
+    run_name: str,
+    from_start_time: datetime,
+    fields: str = "core,metadata,scores",
+) -> dict[str, Any] | None:
+    """Find one experiment within a dataset without accepting an ambiguous name."""
+    rows = _v2_collect(
+        method,
+        limit=EXPERIMENTS_PAGE_LIMIT,
+        fields=fields,
+        dataset_id=dataset_id,
+        name=run_name,
+        from_start_time=from_start_time,
+    )
+    matches = [row for row in rows if isinstance(row, dict) and row.get("dataset_id") == dataset_id and row.get("name") == run_name]
+    if len(matches) > 1:
+        raise RuntimeError(f"Multiple experiments named '{run_name}' exist in dataset '{dataset_id}'")
+    return matches[0] if matches else None
+
+
+def _experiment_item_as_run_item(row: dict[str, Any]) -> dict[str, Any]:
+    """Keep new experiment-item fields and add equivalent legacy run-item keys."""
+    item = dict(row)
+    for old, new in (
+        ("dataset_id", "experiment_dataset_id"),
+        ("dataset_item_id", "experiment_item_id"),
+        ("dataset_run_id", "experiment_id"),
+        ("dataset_run_name", "experiment_name"),
+        ("run_name", "experiment_name"),
+        ("run_description", "experiment_description"),
+        ("dataset_version", "experiment_item_version"),
+    ):
+        if new in row:
+            item[old] = row[new]
+    return item
+
+
+def _legacy_experiment_read_error(exc: Exception, *, has_probe: bool) -> None:
+    """Explain a missing legacy read route without claiming it succeeded."""
+    if _route_missing(exc):
+        if has_probe:
+            raise RuntimeError(
+                f"{ERR_EXPERIMENTS_READ_UNAVAILABLE}: server serves neither experiments nor legacy dataset-run reads"
+            ) from exc
+        raise RuntimeError(f"{ERR_EXPERIMENTS_SDK_UPGRADE}: upgrade langfuse to >=4.13.1 for experiment reads") from exc
+    raise exc
+
+
 async def list_dataset_runs(
     ctx: Context,
     dataset_name: str = Field(..., description="The name of the dataset to list runs from"),
@@ -4611,7 +4692,42 @@ async def list_dataset_runs(
         page = _normalize_field_default(page) or 1
         limit = _normalize_field_default(limit) or 50
 
-        response = _resolve_client(state, ctx).api.datasets.get_runs(dataset_name, page=page, limit=limit)
+        client = _resolve_client(state, ctx)
+        methods = _compat.get_experiments_methods(client)
+        if methods is not None:
+            dataset = client.api.datasets.get(dataset_name)
+            if not dataset:
+                raise LookupError(f"Dataset '{dataset_name}' not found")
+            dataset_row = _sdk_object_to_python(dataset)
+            try:
+                runs, cursor = _v2_page(
+                    methods[0],
+                    page=page,
+                    limit=limit,
+                    fields="core,metadata,scores",
+                    dataset_id=dataset_row["id"],
+                    from_start_time=_experiment_start(dataset_row),
+                )
+            except Exception as exc:
+                if not _route_missing(exc):
+                    raise
+            else:
+                return {
+                    "data": [{**row, "dataset_name": dataset_name} for row in runs],
+                    "metadata": {
+                        "dataset_name": dataset_name,
+                        "page": page,
+                        "limit": limit,
+                        "item_count": len(runs),
+                        "total": None,
+                        "next_page": page + 1 if cursor else None,
+                    },
+                }
+
+        try:
+            response = client.api.datasets.get_runs(dataset_name, page=page, limit=limit)
+        except Exception as exc:
+            _legacy_experiment_read_error(exc, has_probe=methods is not None)
         items, pagination = _extract_items_from_response(response)
         runs = [_sdk_object_to_python(item) for item in items]
 
@@ -4645,8 +4761,37 @@ async def get_dataset_run(
     state = cast(MCPState, ctx.request_context.lifespan_context)
 
     try:
-        run = _resolve_client(state, ctx).api.datasets.get_run(dataset_name, run_name)
-        result = _sdk_object_to_python(run)
+        client = _resolve_client(state, ctx)
+        methods = _compat.get_experiments_methods(client)
+        result: Any = None
+        legacy_needed = methods is None
+        if methods is not None:
+            dataset = client.api.datasets.get(dataset_name)
+            if not dataset:
+                raise LookupError(f"Dataset '{dataset_name}' not found")
+            dataset_row = _sdk_object_to_python(dataset)
+            start = _experiment_start(dataset_row)
+            try:
+                run = _experiment_by_name(methods[0], dataset_id=dataset_row["id"], run_name=run_name, from_start_time=start)
+                if run is not None:
+                    items = _v2_collect(
+                        methods[1],
+                        limit=EXPERIMENTS_PAGE_LIMIT,
+                        fields="core,dataset,io,metadata,itemMetadata,experimentMetadata,scores",
+                        experiment_id=run["id"],
+                        from_start_time=start,
+                    )
+                    run_items = [_experiment_item_as_run_item(item) for item in items]
+                    result = {**run, "dataset_name": dataset_name, "dataset_run_items": run_items, "items": run_items}
+            except Exception as exc:
+                if not _route_missing(exc):
+                    raise
+                legacy_needed = True
+        if legacy_needed:
+            try:
+                result = _sdk_object_to_python(client.api.datasets.get_run(dataset_name, run_name))
+            except Exception as exc:
+                _legacy_experiment_read_error(exc, has_probe=methods is not None)
         if not result:
             raise LookupError(f"Dataset run '{run_name}' not found in dataset '{dataset_name}'")
 
@@ -4686,14 +4831,35 @@ async def list_dataset_run_items(
         page = _normalize_field_default(page) or 1
         limit = _normalize_field_default(limit) or 50
 
-        response = _resolve_client(state, ctx).api.dataset_run_items.list(
-            dataset_id=dataset_id,
-            run_name=run_name,
-            page=page,
-            limit=limit,
-        )
-        items, pagination = _extract_items_from_response(response)
-        raw_items = [_sdk_object_to_python(item) for item in items]
+        client = _resolve_client(state, ctx)
+        methods = _compat.get_experiments_methods(client)
+        legacy_needed = methods is None
+        if methods is not None:
+            dataset = _dataset_for_id(client, dataset_id)
+            try:
+                rows, cursor = _v2_page(
+                    methods[1],
+                    page=page,
+                    limit=limit,
+                    fields="core,dataset,io,metadata,itemMetadata,experimentMetadata,scores",
+                    dataset_id=dataset_id,
+                    experiment_name=run_name,
+                    from_start_time=_experiment_start(dataset),
+                )
+            except Exception as exc:
+                if not _route_missing(exc):
+                    raise
+                legacy_needed = True
+            else:
+                raw_items = [_experiment_item_as_run_item(row) for row in rows]
+                pagination = {"total": None, "next_page": page + 1 if cursor else None}
+        if legacy_needed:
+            try:
+                response = client.api.dataset_run_items.list(dataset_id=dataset_id, run_name=run_name, page=page, limit=limit)
+            except Exception as exc:
+                _legacy_experiment_read_error(exc, has_probe=methods is not None)
+            items, pagination = _extract_items_from_response(response)
+            raw_items = [_sdk_object_to_python(item) for item in items]
 
         mode = _ensure_output_mode(output_mode)
         processed_items, file_meta = process_data_with_mode(raw_items, mode, f"dataset_run_items_{dataset_id}_{run_name}", state)
@@ -4712,6 +4878,8 @@ async def list_dataset_run_items(
             "total": pagination.get("total"),
             "output_mode": mode.value,
         }
+        if pagination.get("next_page") is not None:
+            metadata_block["next_page"] = pagination["next_page"]
         if file_meta:
             metadata_block.update(file_meta)
 
@@ -4730,7 +4898,10 @@ async def create_dataset_run_item(
     observation_id: str | None = Field(None, description="Optional observation ID linked to this run item"),
     trace_id: str | None = Field(None, description="Optional trace ID linked to this run item"),
 ) -> ResponseDict:
-    """Create a dataset run item and flush the ingestion write."""
+    """Create a dataset run item and flush the ingestion write.
+
+    If this legacy API is gone, use the SDK experiment runner or OTel ingestion; neither can link an existing trace through this API.
+    """
     state = cast(MCPState, ctx.request_context.lifespan_context)
 
     try:
@@ -4753,11 +4924,19 @@ async def create_dataset_run_item(
             body_kwargs["trace_id"] = trace_id
 
         client = _resolve_client(state, ctx)
-        response = _compat.call_with_request_or_kwargs(
-            client.api.dataset_run_items.create,
-            lambda: _build_create_dataset_run_item_request(**body_kwargs),
-            **body_kwargs,
-        )
+        try:
+            response = _compat.call_with_request_or_kwargs(
+                client.api.dataset_run_items.create,
+                lambda: _build_create_dataset_run_item_request(**body_kwargs),
+                **body_kwargs,
+            )
+        except Exception as exc:
+            if _route_missing(exc):
+                raise RuntimeError(
+                    f"{ERR_RUN_ITEM_CREATE_REMOVED}: Langfuse removed the API that links an existing trace to a run; "
+                    "use the SDK experiment runner or OTel ingestion"
+                ) from exc
+            raise
         if hasattr(client, "flush"):
             client.flush()
 
@@ -4792,19 +4971,71 @@ async def delete_dataset_run(
     ctx: Context,
     dataset_name: str = Field(..., description="The name of the dataset that owns the run"),
     run_name: str = Field(..., description="The dataset run name to delete"),
+    delete_traces: bool = Field(False, description="Allow trace deletion when the legacy run-delete route is unavailable"),
 ) -> ResponseDict:
-    """Delete a dataset run by dataset name and run name."""
+    """Delete a run through the legacy route, or explicitly delete its traces after removal.
+
+    Trace deletion also removes observations and related scores. Set delete_traces=True to allow this broader replacement.
+    """
     state = cast(MCPState, ctx.request_context.lifespan_context)
 
     try:
-        response = _resolve_client(state, ctx).api.datasets.delete_run(dataset_name, run_name)
-        result = _sdk_object_to_python(response) if response else {}
+        client = _resolve_client(state, ctx)
+        delete_traces = _normalize_field_default(delete_traces)
+        if delete_traces is None:
+            delete_traces = False
+        if not isinstance(delete_traces, bool):
+            raise TypeError("delete_traces must be a boolean")
+        try:
+            response = client.api.datasets.delete_run(dataset_name, run_name)
+        except Exception as exc:
+            if not _route_missing(exc):
+                raise
+        else:
+            logger.info(f"Deleted dataset run '{run_name}' from '{dataset_name}' through the legacy route")
+            return {
+                "data": _sdk_object_to_python(response) if response else {},
+                "metadata": {"deleted": True, "dataset_name": dataset_name, "run_name": run_name},
+            }
 
-        logger.info(f"Deleted dataset run '{run_name}' from '{dataset_name}'")
+        if not delete_traces:
+            raise RuntimeError(
+                f"{ERR_RUN_DELETE_REQUIRES_TRACES}: the replacement deletes the run's traces, observations and scores; "
+                "pass delete_traces=True to allow it"
+            )
+        methods = _compat.get_experiments_methods(client)
+        if methods is None:
+            raise RuntimeError(f"{ERR_EXPERIMENTS_SDK_UPGRADE}: upgrade langfuse to >=4.13.1 for experiment reads")
+        delete_multiple = getattr(client.api.trace, "delete_multiple", None)
+        if not callable(delete_multiple):
+            raise RuntimeError("Langfuse SDK has no trace.delete_multiple method")
 
+        dataset = client.api.datasets.get(dataset_name)
+        if not dataset:
+            raise LookupError(f"Dataset '{dataset_name}' not found")
+        dataset_row = _sdk_object_to_python(dataset)
+        start = _experiment_start(dataset_row)
+        run = _experiment_by_name(methods[0], dataset_id=dataset_row["id"], run_name=run_name, from_start_time=start, fields="core")
+        if run is None:
+            raise LookupError(f"Dataset run '{run_name}' not found in dataset '{dataset_name}'")
+        items = _v2_collect(methods[1], limit=EXPERIMENTS_PAGE_LIMIT, fields="core", experiment_id=run["id"], from_start_time=start)
+        trace_ids = list(dict.fromkeys(row["trace_id"] for row in items if isinstance(row, dict) and row.get("trace_id")))
+        deleted_count = 0
+        for offset in range(0, len(trace_ids), TRACE_DELETE_BATCH_LIMIT):
+            batch = trace_ids[offset : offset + TRACE_DELETE_BATCH_LIMIT]
+            try:
+                delete_multiple(trace_ids=batch)
+            except Exception as exc:
+                raise RuntimeError(f"Trace deletion stopped after {deleted_count} of {len(trace_ids)} trace IDs") from exc
+            deleted_count += len(batch)
         return {
-            "data": result,
-            "metadata": {"deleted": True, "dataset_name": dataset_name, "run_name": run_name},
+            "data": {"success": bool(trace_ids)},
+            "metadata": {
+                "deleted": bool(trace_ids),
+                "dataset_name": dataset_name,
+                "run_name": run_name,
+                "deleted_trace_count": deleted_count,
+            },
         }
     except Exception as e:
         logger.error(f"Error deleting dataset run '{run_name}' from '{dataset_name}': {e}")
