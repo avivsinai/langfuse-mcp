@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.12.0] - 2026-09-25
 ### Upgrade notes
 - Langfuse Cloud removes the v1 trace, session, and observation routes, v2 score routes, and legacy dataset-run read routes on 2026-11-16. Version 0.12.0 uses their replacement APIs.
 - Install `langfuse>=4.13.1` (a fresh `uvx langfuse-mcp` install gets it by default). Older SDKs can fall back to routes that Cloud removes on that date; score and experiment reads then report `ERR_LANGFUSE_SCORES_V2_REMOVED` or `ERR_LANGFUSE_EXPERIMENTS_SDK_UPGRADE` when those SDK capabilities are absent.
@@ -31,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `query_metrics` routed metrics through the wrong endpoint on Langfuse SDK 4: the v2/legacy split moved namespaces between SDK 3 and SDK 4 (v2 is `client.api.metrics_v_2` on SDK 3 but the plain `client.api.metrics` on SDK 4; legacy is the plain `client.api.metrics` on SDK 3 but `client.api.legacy.metrics_v1` on SDK 4), and the old code labeled SDK 4's v2-serving `api.metrics` as "legacy". Its 404 fallback then re-resolved to that same v2 callable, so a self-hosted Langfuse server without v2 metrics on SDK 4 would 404 forever instead of falling back to the real legacy route. `_compat.get_metrics_method`/`get_legacy_metrics_method` now detect the SDK 3 vs. SDK 4 layout by attribute presence.
 - `list_scores_v2` and `get_score_v2` now raise a clear `ERR_LANGFUSE_SCORES_V2_REMOVED` error naming the required `langfuse>=4.8.1` upgrade when the installed SDK has no Scores API v3 client (`api.scores_v3`) and `GET /v2/scores` also answers 404/405 (Langfuse Cloud removes it on 2026-11-16). Previously the bare 404 propagated with no hint that upgrading the SDK package, not the tool's filters, is the fix.
 - Tool functions declare optional parameters as `Field(None, ...)`; a caller that awaits a tool coroutine directly (a test, an embedder) instead of going through MCP's Pydantic validation got the literal `FieldInfo` object back for any omitted parameter. `FieldInfo` is truthy, so `list_prompts` (and other tools) forwarded it to the Langfuse SDK as a real filter value. Every tool now runs through a `_normalize_tool_fields` decorator that resolves an unresolved `FieldInfo` default to the value Pydantic would have bound, at the call boundary.
+
 
 ## [0.11.0] - 2026-09-10
 ### Changed

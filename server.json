@@ -9,15 +9,17 @@
     "source": "github",
     "id": "952361536"
   },
-  "version": "0.10.1",
+  "version": "0.12.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "langfuse-mcp",
-      "version": "0.10.1",
+      "version": "0.12.0",
       "runtimeHint": "uvx",
-      "transport": { "type": "stdio" },
+      "transport": {
+        "type": "stdio"
+      },
       "environmentVariables": [
         {
           "name": "LANGFUSE_PUBLIC_KEY",
