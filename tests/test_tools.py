@@ -43,14 +43,6 @@ def _observation_list_fake(client):
     return client.api.observations
 
 
-def _observation_get_fake(client):
-    """Return whichever fake namespace recorded the last single-fetch call (v3 vs v4 legacy)."""
-    legacy = getattr(getattr(client.api, "legacy", None), "observations_v1", None)
-    if legacy is not None and legacy.last_get_kwargs is not None:
-        return legacy
-    return client.api.observations
-
-
 def _seed_route_decision_observations(client):
     """Add router-neutral route-decision observations to a fake Langfuse client."""
     now = datetime(2026, 5, 19, 11, 6, 34, tzinfo=timezone.utc)
@@ -329,17 +321,22 @@ def test_fetch_observations_type_literal_accepts_non_span_types(observation_type
 
 
 def test_fetch_observation(observation_state):
-    """fetch_observation should resolve via the v3 namespace or the v4 legacy_v1 fallback."""
+    """fetch_observation resolves via the v3 getter, or on v4 via an ``id`` filter on Observations API v2."""
     from langfuse_mcp.__main__ import fetch_observation
 
     ctx = FakeContext(observation_state)
     result = asyncio.run(fetch_observation(ctx, observation_id="obs_1", output_mode="compact"))
     assert result["data"]["id"] == "obs_1"
 
-    namespace = _observation_get_fake(observation_state.langfuse_client)
-    last = namespace.last_get_kwargs
-    assert last is not None
-    assert last["observation_id"] == "obs_1"
+    client = observation_state.langfuse_client
+    legacy = getattr(getattr(client.api, "legacy", None), "observations_v1", None)
+    if legacy is None:
+        assert client.api.observations.last_get_kwargs["observation_id"] == "obs_1"
+    else:
+        assert legacy.last_get_kwargs is None
+        assert json.loads(client.api.observations.last_get_many_kwargs["filter"]) == [
+            {"type": "string", "column": "id", "operator": "=", "value": "obs_1"}
+        ]
 
 
 def test_find_route_decisions_filters_on_metadata_contract(observation_state):

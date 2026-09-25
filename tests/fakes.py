@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -39,6 +40,9 @@ class FakeObservation:
     metadata: dict[str, Any] = field(default_factory=dict)
     level: str = "DEFAULT"
     status_message: str | None = None
+    input: Any = None
+    output: Any = None
+    total_cost: float | None = None
 
 
 @dataclass
@@ -1036,45 +1040,215 @@ class FakeAPI:
         self.metrics_v_2 = _MetricsV2API(store)
 
 
+_V2_FIELD_GROUPS: dict[str, tuple[str, ...]] = {
+    "core": ("id", "traceId", "startTime", "endTime", "projectId", "parentObservationId", "type"),
+    "basic": (
+        "name",
+        "level",
+        "statusMessage",
+        "version",
+        "environment",
+        "bookmarked",
+        "public",
+        "userId",
+        "sessionId",
+        "isRootObservation",
+    ),
+    "time": ("completionStartTime", "createdAt", "updatedAt"),
+    "io": ("input", "output"),
+    "metadata": ("metadata",),
+    "model": ("model", "internalModelId", "modelParameters"),
+    "usage": ("usageDetails", "costDetails", "totalCost", "usagePricingTierName"),
+    "prompt": ("promptId", "promptName", "promptVersion"),
+    "metrics": ("latency", "timeToFirstToken"),
+    "trace_context": ("tags", "release", "traceName"),
+}
+_V2_FILTER_COLUMN_ALIASES = {"traceTags": "tags"}
+
+
+def _v2_parse_time(value: Any) -> datetime:
+    return value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
+def _v2_condition_matches(row: dict[str, Any], condition: dict[str, Any]) -> bool | None:
+    """Evaluate one v2 ``filter`` condition against a full row; None means "not applied" (time bounds)."""
+    kind, operator, value = condition["type"], condition["operator"], condition.get("value")
+    actual = row.get(_V2_FILTER_COLUMN_ALIASES.get(condition["column"], condition["column"]))
+    if kind == "datetime":
+        return None
+    if kind == "null":
+        if value != "":
+            # Langfuse answers 400 "expected \"\"" on filter[i].value when it is missing.
+            raise ValueError(f'null-type condition needs value "": {condition!r}')
+        return actual is None if operator == "is null" else actual is not None
+    if kind in ("string", "boolean") and operator in ("=", "<>"):
+        return (actual == value) if operator == "=" else (actual != value)
+    if kind == "arrayOptions":
+        present = set(actual or [])
+        wanted = set(value or [])
+        if operator == "all of":
+            return wanted <= present
+        if operator == "any of":
+            return bool(wanted & present)
+        if operator == "none of":
+            return not (wanted & present)
+    raise ValueError(f"fake v2 filter does not support {condition!r}")
+
+
 class _ObservationsV4API:
-    """Fake v4 observations namespace: ``get_many`` is cursor-only and ``get`` is absent."""
+    """Fake v4 observations namespace: Observations API v2 ``get_many`` (cursor-only); ``get`` is absent.
+
+    Mirrors the real endpoint where production code depends on it: camelCase rows, field
+    groups (``core,basic`` by default), cursor pagination by ``limit``, and a structured
+    ``filter`` that — like the server — overrides every query-parameter filter. Time bounds
+    are recorded but not applied: fixtures are dated 2023 while tools filter by age in minutes.
+    """
 
     def __init__(self, store: FakeDataStore) -> None:
         """Bind the fake v4 observations namespace to the shared store."""
         self._store = store
         self.last_get_many_kwargs: dict[str, Any] | None = None
+        self.calls: list[dict[str, Any]] = []
+
+    def _row(self, obs: FakeObservation) -> dict[str, Any]:
+        trace = next((t for t in self._store.traces.values() if obs.id in t.observations or t.id == obs.trace_id), None)
+        return {
+            "id": obs.id,
+            "traceId": obs.trace_id or (trace.id if trace else None),
+            "startTime": obs.start_time.isoformat(),
+            "endTime": obs.end_time.isoformat(),
+            "projectId": "project_1",
+            "parentObservationId": obs.parent_observation_id,
+            "type": obs.type,
+            "name": obs.name,
+            "level": obs.level,
+            "statusMessage": obs.status_message,
+            "version": None,
+            "environment": "default",
+            "bookmarked": False,
+            "public": False,
+            "userId": trace.user_id if trace else None,
+            "sessionId": trace.session_id if trace else None,
+            "isRootObservation": obs.parent_observation_id is None,
+            "completionStartTime": None,
+            "createdAt": obs.start_time.isoformat(),
+            "updatedAt": obs.end_time.isoformat(),
+            # v2 returns IO as raw strings, never parsed JSON.
+            "input": obs.input if obs.input is None or isinstance(obs.input, str) else json.dumps(obs.input),
+            "output": obs.output if obs.output is None or isinstance(obs.output, str) else json.dumps(obs.output),
+            "metadata": obs.metadata,
+            "model": None,
+            "internalModelId": None,
+            "modelParameters": None,
+            "usageDetails": {},
+            "costDetails": {},
+            "totalCost": obs.total_cost,
+            "usagePricingTierName": None,
+            "promptId": None,
+            "promptName": None,
+            "promptVersion": None,
+            "latency": (obs.end_time - obs.start_time).total_seconds(),
+            "timeToFirstToken": None,
+            "tags": list(trace.tags) if trace else [],
+            "release": None,
+            "traceName": trace.name if trace else None,
+        }
 
     def get_many(
         self,
         *,
-        cursor: str | None = None,
-        limit: int | None = None,
-        level: str | None = None,
         fields: str | None = None,
         expand_metadata: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+        name: str | None = None,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        type: str | None = None,
+        trace_id: str | None = None,
+        level: str | None = None,
+        parent_observation_id: str | None = None,
+        is_root_observation: bool | None = None,
         from_start_time: Any = None,
         to_start_time: Any = None,
-        trace_id: str | None = None,
+        filter: str | None = None,
+        request_options: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> FakePaginatedResponse:
         """Return observations using cursor-based pagination (v4 ObservationsV2)."""
-        self.last_get_many_kwargs = {
-            "cursor": cursor,
-            "limit": limit,
-            **{
-                k: v
-                for k, v in (("level", level), ("fields", fields), ("expand_metadata", expand_metadata), ("trace_id", trace_id))
-                if v is not None
-            },
-            **kwargs,
+        query_filters = {
+            "name": name,
+            "userId": user_id,
+            "sessionId": session_id,
+            "type": type,
+            "traceId": trace_id,
+            "level": level,
+            "parentObservationId": parent_observation_id,
+            "isRootObservation": is_root_observation,
         }
-        observations = list(self._store.observations.values())
-        if level is not None:
-            observations = [obs for obs in observations if obs.level == level]
-        if trace_id is not None:
-            observations = [obs for obs in observations if obs.trace_id == trace_id]
-        data = [obs.__dict__ for obs in observations]
+        recorded = {
+            "fields": fields,
+            "expand_metadata": expand_metadata,
+            "name": name,
+            "user_id": user_id,
+            "session_id": session_id,
+            "type": type,
+            "trace_id": trace_id,
+            "level": level,
+            "parent_observation_id": parent_observation_id,
+            "is_root_observation": is_root_observation,
+            "from_start_time": from_start_time,
+            "to_start_time": to_start_time,
+            "filter": filter,
+            "request_options": request_options,
+        }
+        self.last_get_many_kwargs = {"cursor": cursor, "limit": limit, **{k: v for k, v in recorded.items() if v is not None}, **kwargs}
+        self.calls.append(self.last_get_many_kwargs)
+
+        rows = [self._row(obs) for obs in self._store.observations.values()]
+        if filter is not None:
+            conditions = json.loads(filter)
+            rows = [row for row in rows if all(_v2_condition_matches(row, c) is not False for c in conditions)]
+        else:
+            rows = [row for row in rows if all(value is None or row.get(column) == value for column, value in query_filters.items())]
+        rows.sort(key=lambda row: _v2_parse_time(row["startTime"]), reverse=True)
+
+        page_size = limit or 50
+        offset = int(cursor) if cursor else 0
+        page_rows = rows[offset : offset + page_size]
+        next_cursor = str(offset + page_size) if offset + page_size < len(rows) else None
+
+        groups = (fields or "core,basic").split(",")
+        keep = {key for group in groups for key in _V2_FIELD_GROUPS[group]}
+        data = [{key: value for key, value in row.items() if key in keep} for row in page_rows]
         # v4 ObservationsV2Meta carries only ``cursor``; ``None`` means no further pages.
+        return FakePaginatedResponse(data=data, meta={"cursor": next_cursor})
+
+
+class _ScoresV3API:
+    """Fake v4 ``api.scores_v3`` namespace (SDK 4.8.1+): cursor-based ``get_many_v3``."""
+
+    def __init__(self, store: FakeDataStore) -> None:
+        """Bind the fake Scores v3 namespace to the shared store."""
+        self._store = store
+        self.calls: list[dict[str, Any]] = []
+
+    def get_many_v3(
+        self,
+        *,
+        limit: int | None = None,
+        cursor: str | None = None,
+        fields: str | None = None,
+        trace_id: str | None = None,
+        **kwargs: Any,
+    ) -> FakePaginatedResponse:
+        """Return a trace's scores as v3 camelCase rows."""
+        self.calls.append({"limit": limit, "cursor": cursor, "fields": fields, "trace_id": trace_id, **kwargs})
+        scores = [s for s in self._store.scores.values() if trace_id is None or s.trace_id == trace_id]
+        data = [
+            {"id": s.id, "name": s.name, "value": s.value, "dataType": s.data_type, "subject": {"kind": "trace", "id": s.trace_id}}
+            for s in scores
+        ]
         return FakePaginatedResponse(data=data, meta={"cursor": None})
 
 
@@ -1154,6 +1328,7 @@ class FakeAPIV4:
         self.sessions = _SessionsAPI(store)
         self.prompts = _PromptsAPI(store)
         self.scores = _ScoresV4API(store)
+        self.scores_v3 = _ScoresV3API(store)
         self.annotation_queues = _AnnotationQueuesV4API(store)
         self.metrics_v_2 = _MetricsV2API(store)
         self.dataset_run_items = _DatasetRunItemsV4API(store)
