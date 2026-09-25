@@ -74,6 +74,36 @@ def test_boolean_values_are_sent_as_true_or_false(v4_state):
     assert v4_state.langfuse_client.api.scores_v3.calls[-1]["value"] == "true"
 
 
+def test_exact_value_without_data_type_reports_numeric_default(v4_state):
+    """An omitted type excludes boolean scores and tells the caller how to request them."""
+    client = v4_state.langfuse_client
+    client._store.scores["boolean_score"] = FakeScore(
+        id="boolean_score", name="approved", value=True, data_type="BOOLEAN", trace_id="trace_1"
+    )
+
+    defaulted = _list(v4_state, value=1)
+    explicit = _list(v4_state, value=1, data_type="BOOLEAN")
+
+    assert defaulted["data"] == []
+    assert defaulted["metadata"]["data_type"] == "NUMERIC"
+    assert "data_type=BOOLEAN" in defaulted["metadata"]["data_type_hint"]
+    assert [score["id"] for score in explicit["data"]] == ["boolean_score"]
+    assert "data_type_hint" not in explicit["metadata"]
+
+
+def test_strict_boundary_can_leave_a_short_page_with_next_page(v4_state):
+    """Dropping a boundary score does not erase the cursor for the next page."""
+    client = v4_state.langfuse_client
+    client._store.scores["higher"] = FakeScore(id="higher", name="quality", value=0.92, trace_id="trace_2")
+
+    first = _list(v4_state, value=0.91, operator=">", limit=1)
+    second = _list(v4_state, value=0.91, operator=">", page=2, limit=1)
+
+    assert first["data"] == []
+    assert first["metadata"]["next_page"] == 2
+    assert [score["id"] for score in second["data"]] == ["higher"]
+
+
 @pytest.mark.parametrize(
     ("filters", "message"),
     [

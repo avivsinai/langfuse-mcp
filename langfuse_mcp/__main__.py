@@ -5215,7 +5215,11 @@ async def list_scores_v2(
         ),
     ),
 ) -> ResponseDict:
-    """List scores via Scores API v3 with optional filters (GET /v2/scores where v3 is not served)."""
+    """List scores via Scores API v3 with optional filters (GET /v2/scores where v3 is not served).
+
+    With operator ``=`` and a value, v3 defaults an omitted data_type to NUMERIC; pass BOOLEAN for boolean scores.
+    Strict ``>``/``<`` can return fewer than limit rows on a page after boundary rows are dropped; next_page shows whether more rows exist.
+    """
     state = cast(MCPState, ctx.request_context.lifespan_context)
     try:
         page = _normalize_field_default(page) or 1
@@ -5257,6 +5261,7 @@ async def list_scores_v2(
                 "to_timestamp": to_dt,
             }
             keep = None
+            defaulted_data_type = value is not None and data_type is None and (operator or "=").strip() == "="
             if value is not None:
                 value_filters, keep = _scores_v3_value_filter(operator, value, data_type)
                 v3_filters.update(value_filters)
@@ -5268,15 +5273,19 @@ async def list_scores_v2(
                 logger.info(f"Scores API v3 not served (HTTP {getattr(exc, 'status_code', None)}); listing scores via GET /v2/scores")
             else:
                 logger.info(f"Listed {len(scores)} scores via Scores API v3 (page={page}, limit={limit})")
+                metadata_block: dict[str, Any] = {
+                    "page": page,
+                    "limit": limit,
+                    "item_count": len(scores),
+                    "total": None,
+                    "next_page": page + 1 if next_cursor else None,
+                }
+                if defaulted_data_type:
+                    metadata_block["data_type"] = v3_filters["data_type"]
+                    metadata_block["data_type_hint"] = "Defaulted to NUMERIC; pass data_type=BOOLEAN for boolean scores."
                 return {
                     "data": scores,
-                    "metadata": {
-                        "page": page,
-                        "limit": limit,
-                        "item_count": len(scores),
-                        "total": None,
-                        "next_page": page + 1 if next_cursor else None,
-                    },
+                    "metadata": metadata_block,
                 }
 
         api_kwargs: dict[str, Any] = {

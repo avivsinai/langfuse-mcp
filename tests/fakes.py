@@ -1075,6 +1075,8 @@ def _v2_condition_matches(row: dict[str, Any], condition: dict[str, Any]) -> boo
     kind, operator, value = condition["type"], condition["operator"], condition.get("value")
     actual = row.get(_V2_FILTER_COLUMN_ALIASES.get(condition["column"], condition["column"]))
     if kind == "datetime":
+        if operator not in (">=", ">", "<=", "<"):
+            raise ValueError(f"fake v2 datetime filter does not support {condition!r}")
         if actual is None:
             return False
         actual_time, bound = _v2_parse_time(actual), _v2_parse_time(value)
