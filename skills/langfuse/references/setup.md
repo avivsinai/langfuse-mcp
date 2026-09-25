@@ -128,12 +128,14 @@ langfuse-mcp --tools traces,prompts
 |-------|-------|
 | `traces` | fetch_traces, fetch_trace |
 | `observations` | fetch_observations, fetch_observation |
+| `routing` | find_route_decisions, get_route_decision, summarize_route_decisions, find_low_confidence_route_decisions |
 | `sessions` | fetch_sessions, get_session_details, get_user_sessions |
 | `exceptions` | find_exceptions, find_exceptions_in_file, get_exception_details, get_error_count |
 | `prompts` | list_prompts, get_prompt, get_prompt_unresolved, create_text_prompt, create_chat_prompt, update_prompt_labels |
-| `datasets` | list_datasets, get_dataset, list_dataset_items, get_dataset_item, create_dataset, create_dataset_item, delete_dataset_item |
+| `datasets` | list_datasets, get_dataset, list_dataset_items, get_dataset_item, create_dataset, create_dataset_item, delete_dataset_item, list_dataset_runs, get_dataset_run, list_dataset_run_items, create_dataset_run_item, delete_dataset_run |
 | `annotation_queues` | list_annotation_queues, create_annotation_queue, get_annotation_queue, list_annotation_queue_items, get_annotation_queue_item, create_annotation_queue_item, update_annotation_queue_item, delete_annotation_queue_item, create_annotation_queue_assignment, delete_annotation_queue_assignment |
 | `scores` | list_scores_v2, get_score_v2 |
+| `metrics` | query_metrics, get_metrics_schema |
 | `schema` | get_data_schema |
 
 ---

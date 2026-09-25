@@ -1,6 +1,6 @@
 # Langfuse MCP Tool Reference
 
-Reference documentation for the Langfuse MCP tools. The top-level README lists the current full tool inventory; this reference focuses on the most common debugging and management workflows.
+Reference documentation for all Langfuse MCP tools. The top-level README also lists the current tool inventory.
 
 ## Tools by Category
 
@@ -8,12 +8,14 @@ Reference documentation for the Langfuse MCP tools. The top-level README lists t
 |----------|-------|
 | Traces | fetch_traces, fetch_trace |
 | Observations | fetch_observations, fetch_observation |
+| Routing | find_route_decisions, get_route_decision, summarize_route_decisions, find_low_confidence_route_decisions |
 | Sessions | fetch_sessions, get_session_details, get_user_sessions |
 | Exceptions | find_exceptions, find_exceptions_in_file, get_exception_details, get_error_count |
 | Prompts | list_prompts, get_prompt, get_prompt_unresolved, create_text_prompt*, create_chat_prompt*, update_prompt_labels* |
-| Datasets | list_datasets, get_dataset, list_dataset_items, get_dataset_item, create_dataset*, create_dataset_item*, delete_dataset_item* |
-| Annotation Queues | list_annotation_queues, create_annotation_queue, get_annotation_queue, list_annotation_queue_items, get_annotation_queue_item, create_annotation_queue_item, update_annotation_queue_item, delete_annotation_queue_item, create_annotation_queue_assignment, delete_annotation_queue_assignment |
+| Datasets | list_datasets, get_dataset, list_dataset_items, get_dataset_item, create_dataset*, create_dataset_item*, delete_dataset_item*, list_dataset_runs, get_dataset_run, list_dataset_run_items, create_dataset_run_item*, delete_dataset_run* |
+| Annotation Queues | list_annotation_queues, create_annotation_queue*, get_annotation_queue, list_annotation_queue_items, get_annotation_queue_item, create_annotation_queue_item*, update_annotation_queue_item*, delete_annotation_queue_item*, create_annotation_queue_assignment*, delete_annotation_queue_assignment* |
 | Scores | list_scores_v2, get_score_v2 |
+| Metrics | query_metrics, get_metrics_schema |
 | Schema | get_data_schema |
 
 *\*Tools marked with \* are disabled in read-only mode (`--read-only` or `LANGFUSE_MCP_READ_ONLY=true`).*
@@ -28,9 +30,9 @@ Some tools support output modes via the `output_mode` parameter:
 | `full_json_string` | Complete data as JSON string (returns string, not object) |
 | `full_json_file` | Save to file, return summary with path |
 
-**Tools with output_mode:** `fetch_traces`, `fetch_trace`, `fetch_observations`, `fetch_observation`, `fetch_sessions`, `get_session_details`, `get_user_sessions`, `find_exceptions_in_file`, `get_exception_details`, `list_dataset_items`, `get_dataset_item`
+**Tools with output_mode:** `fetch_traces`, `fetch_trace`, `fetch_observations`, `fetch_observation`, `find_route_decisions`, `get_route_decision`, `find_low_confidence_route_decisions`, `fetch_sessions`, `get_session_details`, `get_user_sessions`, `find_exceptions_in_file`, `get_exception_details`, `list_dataset_items`, `get_dataset_item`, `get_dataset_run`, `list_dataset_run_items`, `query_metrics`
 
-**Tools without output_mode:** `find_exceptions`, `get_error_count`, `list_prompts`, `get_prompt`, `get_prompt_unresolved`, `create_text_prompt`, `create_chat_prompt`, `update_prompt_labels`, `list_datasets`, `get_dataset`, `create_dataset`, `create_dataset_item`, `delete_dataset_item`, `get_data_schema`
+Other tools do not accept `output_mode`.
 
 ## Filter Semantics
 
@@ -53,9 +55,9 @@ Sort order depends on the Langfuse API. Traces and observations are typically so
 
 Some tools support pagination via `page` and `limit` parameters. Check individual tool docs.
 
-**Tools with pagination:** `fetch_traces`, `fetch_observations`, `fetch_sessions`, `list_prompts`, `list_datasets`, `list_dataset_items`
+**Tools with pagination:** `fetch_traces`, `fetch_observations`, `find_route_decisions`, `summarize_route_decisions`, `find_low_confidence_route_decisions`, `fetch_sessions`, `list_prompts`, `list_datasets`, `list_dataset_items`, `list_dataset_runs`, `list_dataset_run_items`, `list_annotation_queues`, `list_annotation_queue_items`, `list_scores_v2`
 
-**Tools without pagination:** `find_exceptions`, `find_exceptions_in_file`, `get_exception_details`, `get_user_sessions`
+Other tools do not accept `page` and `limit`.
 
 **Tip:** For large results, use `output_mode="full_json_file"` to avoid context overflow.
 
@@ -149,6 +151,19 @@ Fetch a specific observation by ID.
 | `output_mode` | string | No | "compact" | Output format |
 
 **Returns:** Single observation object with full details.
+
+---
+
+## Routing
+
+These tools read SPAN observations whose metadata has `schema_version="mcp.route_decision.v1"`. The optional `trace_id`, `session_id`, `router_name`, `provider`, and `capability_id` filters narrow route decisions; `age` defaults to 10080 minutes.
+
+| Tool | Use and key parameters |
+|------|------------------------|
+| `find_route_decisions` | List decisions; also accepts `decision_id`, `page=1`, `limit=50`, and `output_mode="compact"`. |
+| `get_route_decision` | Fetch one decision by required `decision_id`; accepts `age` and `output_mode`. |
+| `summarize_route_decisions` | Count decisions by router, provider, capability, and callable state; report confidence. Accepts `max_confidence=0.5`, `page=1`, and `limit=200`. |
+| `find_low_confidence_route_decisions` | Find decisions at or below `max_confidence=0.5`; `include_uncallable=True` also includes uncallable decisions. Accepts `page=1`, `limit=50`, and `output_mode`. |
 
 ---
 
@@ -604,6 +619,67 @@ Delete a dataset item.
 ```
 delete_dataset_item(item_id="item-abc-123")
 ```
+
+---
+
+### Dataset runs and experiments
+
+Dataset-run reads use the experiments API with `langfuse>=4.13.1`; older servers can use the legacy read routes. An older SDK whose legacy read route is gone raises `ERR_LANGFUSE_EXPERIMENTS_SDK_UPGRADE`.
+
+| Tool | Use and key parameters |
+|------|------------------------|
+| `list_dataset_runs` | List a required `dataset_name`; accepts `page=1` and `limit=50`. |
+| `get_dataset_run` | Fetch `dataset_name` and `run_name`, including items; accepts `output_mode="compact"`. |
+| `list_dataset_run_items` | List items by required `dataset_id` and `run_name`; accepts `page=1`, `limit=50`, and `output_mode="compact"`. |
+| `create_dataset_run_item` | Link an existing `dataset_item_id` to `run_name`; optional `run_description`, `metadata`, `observation_id`, and `trace_id`. |
+| `delete_dataset_run` | Delete by `dataset_name` and `run_name`; `delete_traces=False` by default. |
+
+`create_dataset_run_item` uses a legacy link route. After Langfuse Cloud removes it on 2026-11-16, the tool raises `ERR_LANGFUSE_RUN_ITEM_CREATE_REMOVED`; use the SDK experiment runner or OTel ingestion to create new experiment data.
+
+`delete_dataset_run` uses the legacy delete route while it works. After removal, `delete_traces=True` is required; it deletes the run's traces, observations, and related scores. Without opt-in, no traces are deleted.
+
+---
+
+## Annotation Queues
+
+Queue writes are disabled in read-only mode.
+
+| Tool | Use and key parameters |
+|------|------------------------|
+| `list_annotation_queues` | List queues with `page=1` and `limit=50`. |
+| `create_annotation_queue` | Create a queue with required `name`; optional `description` and `score_config_ids`. |
+| `get_annotation_queue` | Fetch a queue by `queue_id`. |
+| `list_annotation_queue_items` | List items by `queue_id`, `page=1`, and `limit=50`. |
+| `get_annotation_queue_item` | Fetch an item by `queue_id` and `item_id`. |
+| `create_annotation_queue_item` | Add `object_id` and `object_type` to `queue_id`; optional `status`. |
+| `update_annotation_queue_item` | Set an item's `status` by `queue_id` and `item_id`. |
+| `delete_annotation_queue_item` | Remove an item by `queue_id` and `item_id`. |
+| `create_annotation_queue_assignment` | Assign `user_id` to `queue_id`. |
+| `delete_annotation_queue_assignment` | Unassign `user_id` from `queue_id`. |
+
+---
+
+## Scores
+
+Score reads use Scores API v3 with `langfuse>=4.8.1`; if an older SDK cannot use v3 and the old route is gone, they raise `ERR_LANGFUSE_SCORES_V2_REMOVED`.
+
+| Tool | Use and key parameters |
+|------|------------------------|
+| `list_scores_v2` | List scores with `page=1`, `limit=50`, and optional `name`, `from_timestamp`, `to_timestamp`, `environment`, `source`, `score_ids`, `config_id`, `session_id`, `trace_id`, `queue_id`, `user_id`, `trace_tags`, `operator`, `value`, and `data_type` filters. |
+| `get_score_v2` | Fetch a score by required `score_id`. |
+
+With `operator="="` and `value`, an omitted `data_type` defaults to `NUMERIC`; pass `data_type="BOOLEAN"` for boolean scores. The response metadata includes `data_type_hint` when this default applies. `user_id` and `trace_tags` need the old v2 route, which Langfuse Cloud removes on 2026-11-16.
+
+---
+
+## Metrics
+
+| Tool | Use and key parameters |
+|------|------------------------|
+| `query_metrics` | Aggregate a required `view` (`observations`, `scores-numeric`, or `scores-categorical`) and required `metrics` list. Optional `dimensions`, `filters`, `age`, `from_timestamp`, `to_timestamp`, `time_granularity`, `order_by`, and `output_mode="compact"`. |
+| `get_metrics_schema` | Read the supported views, measures, dimensions, filter operators, and query shape. |
+
+Use `get_metrics_schema` before building a new query. `query_metrics` defaults to a 24-hour window when no time range is given. The v2 metrics endpoint is Cloud-only; a server that returns 404 can use the legacy metrics route.
 
 ---
 
