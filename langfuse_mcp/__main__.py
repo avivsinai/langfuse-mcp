@@ -13,7 +13,6 @@ import logging
 import os
 import re
 import sys
-import types
 from collections import Counter
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -331,13 +330,17 @@ def _bind_default_output_mode(fn: Any, default_output_mode: "OutputMode") -> Any
         new_field = Field(default=default_output_mode.value)
 
     new_param = old_param.replace(default=new_field)
-    new_params = [new_param if p.name == "output_mode" else p for p in params.values()]
+    new_sig = sig.replace(parameters=[new_param if p.name == "output_mode" else p for p in params.values()])
 
-    # Copy the function object so the module-level original is not mutated
-    wrapped = types.FunctionType(fn.__code__, fn.__globals__, fn.__name__, fn.__defaults__, fn.__closure__)
-    functools.update_wrapper(wrapped, fn)
-    wrapped.__signature__ = sig.replace(parameters=new_params)
-    return wrapped
+    # A wrapper, not a copy, so that direct calls which omit output_mode also get the configured default.
+    @functools.wraps(fn)
+    async def bound(*args: Any, **kwargs: Any) -> Any:
+        if "output_mode" not in new_sig.bind_partial(*args, **kwargs).arguments:
+            kwargs["output_mode"] = default_output_mode.value
+        return await fn(*args, **kwargs)
+
+    bound.__signature__ = new_sig  # pyright: ignore[reportAttributeAccessIssue]
+    return bound
 
 
 def _read_default_output_mode() -> OutputMode:
@@ -560,10 +563,49 @@ def _datetime_sort_key(value: Any) -> datetime:
 
 
 def _normalize_field_default(value: Any) -> Any:
-    """Treat pydantic FieldInfo defaults as unset values for direct function calls."""
+    """Resolve a pydantic FieldInfo default to the plain value Pydantic would have bound.
+
+    MCP tool calls resolve ``Field(...)`` defaults through Pydantic before the tool body
+    runs, so a registered call always sees a plain value (``1``, ``None``, ``"compact"``,
+    ...). A caller that awaits the coroutine directly -- a test, an embedder, another tool
+    -- skips that resolution: an omitted Field-default parameter binds to the literal
+    ``FieldInfo`` object via Python's own default-argument mechanism, and ``FieldInfo`` is
+    truthy, so an unguarded check treats it as a real value. This mirrors what Pydantic
+    would have done: ``Field(1, ...)`` normalizes to ``1``, ``Field(None, ...)`` to
+    ``None``, ``Field(default_factory=list)`` to ``[]``, and a required ``Field(...)`` (no default to
+    fall back to) to ``None``.
+    """
     if FieldInfo is not None and isinstance(value, FieldInfo):
-        return None
+        return None if value.is_required() else value.get_default(call_default_factory=True, validated_data={})
     return value
+
+
+def _normalize_tool_fields(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap a tool coroutine so an unresolved ``Field(...)`` default never reaches its body.
+
+    MCP tool calls validate arguments through Pydantic before the tool function runs, so a
+    registered call always sees plain values. A caller that awaits the coroutine directly --
+    a test, an embedder, another tool -- skips that validation: any omitted Field-default
+    parameter binds to the literal ``FieldInfo`` object via Python's own default-argument
+    mechanism. ``FieldInfo`` is truthy, so an unguarded ``if name:`` (or a bare pass-through
+    into an SDK kwargs dict) treats it as a real filter value.
+
+    This applies ``_normalize_field_default`` to every bound argument at the call boundary,
+    once, instead of hand-normalizing each parameter inside every tool body.
+    """
+    sig = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        bound = sig.bind_partial(*args, **kwargs)
+        bound.apply_defaults()
+        for param_name, value in bound.arguments.items():
+            if FieldInfo is not None and isinstance(value, FieldInfo):
+                bound.arguments[param_name] = _normalize_field_default(value)
+        return await fn(*bound.args, **bound.kwargs)
+
+    wrapper.__signature__ = sig  # pyright: ignore[reportAttributeAccessIssue]
+    return wrapper
 
 
 def _coerce_optional_datetime(value: Any, field_name: str) -> datetime | None:
@@ -2208,6 +2250,7 @@ async def _embed_observations_in_traces(langfuse_client: Langfuse, traces: list[
         logger.debug(f"Embedded {len(full_observations)} observations in trace {trace.get('id', 'unknown')}")
 
 
+@_normalize_tool_fields
 async def fetch_traces(
     ctx: Context,
     age: ValidatedAge = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)", gt=0, le=MAX_AGE_MINUTES),
@@ -2306,6 +2349,7 @@ async def fetch_traces(
         raise
 
 
+@_normalize_tool_fields
 async def fetch_trace(
     ctx: Context,
     trace_id: str = Field(..., description="The ID of the trace to fetch (unique identifier string)"),
@@ -2404,6 +2448,7 @@ async def fetch_trace(
         raise
 
 
+@_normalize_tool_fields
 async def fetch_observations(
     ctx: Context,
     type: OBSERVATION_TYPE_LITERAL | None = Field(
@@ -2504,6 +2549,7 @@ async def fetch_observations(
         raise
 
 
+@_normalize_tool_fields
 async def fetch_observation(
     ctx: Context,
     observation_id: str = Field(..., description="The ID of the observation to fetch (unique identifier string)"),
@@ -2607,6 +2653,7 @@ def _list_route_decision_records(
     return [_route_decision_from_observation(obs) for obs in observation_items], pagination, metadata_filter
 
 
+@_normalize_tool_fields
 async def find_route_decisions(
     ctx: Context,
     age: ValidatedAge = Field(MAX_AGE_MINUTES, description=AGE_LOOKBACK_DESCRIPTION, gt=0, le=MAX_AGE_MINUTES),
@@ -2681,6 +2728,7 @@ async def find_route_decisions(
         raise
 
 
+@_normalize_tool_fields
 async def get_route_decision(
     ctx: Context,
     decision_id: str = Field(..., description="Route-decision metadata decision_id to fetch"),
@@ -2738,6 +2786,7 @@ async def get_route_decision(
         raise
 
 
+@_normalize_tool_fields
 async def summarize_route_decisions(
     ctx: Context,
     age: ValidatedAge = Field(MAX_AGE_MINUTES, description=AGE_LOOKBACK_DESCRIPTION, gt=0, le=MAX_AGE_MINUTES),
@@ -2826,6 +2875,7 @@ async def summarize_route_decisions(
         raise
 
 
+@_normalize_tool_fields
 async def find_low_confidence_route_decisions(
     ctx: Context,
     age: ValidatedAge = Field(MAX_AGE_MINUTES, description=AGE_LOOKBACK_DESCRIPTION, gt=0, le=MAX_AGE_MINUTES),
@@ -2908,6 +2958,7 @@ async def find_low_confidence_route_decisions(
         raise
 
 
+@_normalize_tool_fields
 async def fetch_sessions(
     ctx: Context,
     age: ValidatedAge = Field(..., description="Minutes ago to start looking (e.g., 1440 for 24 hours)", gt=0, le=MAX_AGE_MINUTES),
@@ -2980,6 +3031,7 @@ async def fetch_sessions(
         raise
 
 
+@_normalize_tool_fields
 async def get_session_details(
     ctx: Context,
     session_id: str = Field(..., description="The ID of the session to retrieve (unique identifier string)"),
@@ -3096,6 +3148,7 @@ async def get_session_details(
         raise
 
 
+@_normalize_tool_fields
 async def get_user_sessions(
     ctx: Context,
     user_id: str = Field(..., description="The ID of the user to retrieve sessions for"),
@@ -3238,6 +3291,7 @@ async def get_user_sessions(
         raise
 
 
+@_normalize_tool_fields
 async def find_exceptions(
     ctx: Context,
     age: ValidatedAge = Field(..., description=AGE_LOOKBACK_DESCRIPTION, gt=0, le=MAX_AGE_MINUTES),
@@ -3328,6 +3382,7 @@ async def find_exceptions(
         raise
 
 
+@_normalize_tool_fields
 async def find_exceptions_in_file(
     ctx: Context,
     filepath: str = Field(..., description="Path to the file to search for exceptions (full path including extension)"),
@@ -3411,6 +3466,7 @@ async def find_exceptions_in_file(
         raise
 
 
+@_normalize_tool_fields
 async def get_exception_details(
     ctx: Context,
     trace_id: str = Field(..., description="The ID of the trace to analyze for exceptions (unique identifier string)"),
@@ -3501,6 +3557,7 @@ async def get_exception_details(
         raise
 
 
+@_normalize_tool_fields
 async def get_error_count(
     ctx: Context,
     age: ValidatedAge = Field(..., description=AGE_LOOKBACK_DESCRIPTION, gt=0, le=MAX_AGE_MINUTES),
@@ -3562,6 +3619,7 @@ async def get_error_count(
         raise
 
 
+@_normalize_tool_fields
 async def get_data_schema(ctx: Context, dummy: str = "") -> str:
     """Get schema of trace, span and event objects.
 
@@ -3664,6 +3722,7 @@ Scores are evaluations attached to traces or observations.
 # =============================================================================
 
 
+@_normalize_tool_fields
 async def get_prompt(
     ctx: Context,
     name: str = Field(..., description="The name of the prompt to fetch"),
@@ -3766,6 +3825,7 @@ async def get_prompt(
         raise
 
 
+@_normalize_tool_fields
 async def get_prompt_unresolved(
     ctx: Context,
     name: str = Field(..., description="The name of the prompt to fetch"),
@@ -3848,6 +3908,7 @@ async def get_prompt_unresolved(
         raise
 
 
+@_normalize_tool_fields
 async def list_prompts(
     ctx: Context,
     name: str | None = Field(None, description="Filter by exact prompt name"),
@@ -3927,6 +3988,7 @@ async def list_prompts(
         raise
 
 
+@_normalize_tool_fields
 async def create_text_prompt(
     ctx: Context,
     name: str = Field(..., description="The name of the prompt to create"),
@@ -3999,6 +4061,7 @@ async def create_text_prompt(
         raise
 
 
+@_normalize_tool_fields
 async def create_chat_prompt(
     ctx: Context,
     name: str = Field(..., description="The name of the prompt to create"),
@@ -4077,6 +4140,7 @@ async def create_chat_prompt(
         raise
 
 
+@_normalize_tool_fields
 async def update_prompt_labels(
     ctx: Context,
     name: str = Field(..., description="The name of the prompt to update"),
@@ -4179,6 +4243,7 @@ async def update_prompt_labels(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@_normalize_tool_fields
 async def list_datasets(
     ctx: Context,
     page: int = Field(1, ge=1, description="Page number for pagination (starts at 1)"),
@@ -4241,6 +4306,7 @@ async def list_datasets(
         raise
 
 
+@_normalize_tool_fields
 async def get_dataset(
     ctx: Context,
     name: str = Field(..., description="The name of the dataset to fetch"),
@@ -4284,6 +4350,7 @@ async def get_dataset(
         raise
 
 
+@_normalize_tool_fields
 async def list_dataset_items(
     ctx: Context,
     dataset_name: str = Field(..., description="The name of the dataset to list items from"),
@@ -4367,6 +4434,7 @@ async def list_dataset_items(
         raise
 
 
+@_normalize_tool_fields
 async def get_dataset_item(
     ctx: Context,
     item_id: str = Field(..., description="The ID of the dataset item to fetch"),
@@ -4427,6 +4495,7 @@ async def get_dataset_item(
         raise
 
 
+@_normalize_tool_fields
 async def create_dataset(
     ctx: Context,
     name: str = Field(..., description="Name for the new dataset (must be unique in project)"),
@@ -4485,6 +4554,7 @@ async def create_dataset(
         raise
 
 
+@_normalize_tool_fields
 async def create_dataset_item(
     ctx: Context,
     dataset_name: str = Field(..., description="Name of the dataset to add the item to"),
@@ -4564,6 +4634,7 @@ async def create_dataset_item(
         raise
 
 
+@_normalize_tool_fields
 async def delete_dataset_item(
     ctx: Context,
     item_id: str = Field(..., description="The ID of the dataset item to delete"),
@@ -4691,6 +4762,7 @@ def _legacy_experiment_read_error(exc: Exception, *, has_probe: bool) -> None:
     raise exc
 
 
+@_normalize_tool_fields
 async def list_dataset_runs(
     ctx: Context,
     dataset_name: str = Field(..., description="The name of the dataset to list runs from"),
@@ -4760,6 +4832,7 @@ async def list_dataset_runs(
         raise
 
 
+@_normalize_tool_fields
 async def get_dataset_run(
     ctx: Context,
     dataset_name: str = Field(..., description="The name of the dataset that owns the run"),
@@ -4826,6 +4899,7 @@ async def get_dataset_run(
         raise
 
 
+@_normalize_tool_fields
 async def list_dataset_run_items(
     ctx: Context,
     dataset_id: str = Field(..., description="Dataset ID that owns the run items"),
@@ -4907,6 +4981,7 @@ async def list_dataset_run_items(
         raise
 
 
+@_normalize_tool_fields
 async def create_dataset_run_item(
     ctx: Context,
     run_name: str = Field(..., description="Dataset run name to append this item to"),
@@ -4985,6 +5060,7 @@ def _build_create_dataset_run_item_request(**kwargs: Any) -> Any:
     )(**kwargs)
 
 
+@_normalize_tool_fields
 async def delete_dataset_run(
     ctx: Context,
     dataset_name: str = Field(..., description="The name of the dataset that owns the run"),
@@ -5066,6 +5142,7 @@ async def delete_dataset_run(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@_normalize_tool_fields
 async def list_annotation_queues(
     ctx: Context,
     page: int = Field(1, ge=1, description="Page number for pagination (starts at 1)"),
@@ -5090,6 +5167,7 @@ async def list_annotation_queues(
         raise
 
 
+@_normalize_tool_fields
 async def create_annotation_queue(
     ctx: Context,
     name: str = Field(..., description="Unique queue name"),
@@ -5122,6 +5200,7 @@ async def create_annotation_queue(
         raise
 
 
+@_normalize_tool_fields
 async def get_annotation_queue(
     ctx: Context,
     queue_id: str = Field(..., description="Annotation queue ID"),
@@ -5140,6 +5219,7 @@ async def get_annotation_queue(
         raise
 
 
+@_normalize_tool_fields
 async def list_annotation_queue_items(
     ctx: Context,
     queue_id: str = Field(..., description="Annotation queue ID"),
@@ -5171,6 +5251,7 @@ async def list_annotation_queue_items(
         raise
 
 
+@_normalize_tool_fields
 async def get_annotation_queue_item(
     ctx: Context,
     queue_id: str = Field(..., description="Annotation queue ID"),
@@ -5190,6 +5271,7 @@ async def get_annotation_queue_item(
         raise
 
 
+@_normalize_tool_fields
 async def create_annotation_queue_item(
     ctx: Context,
     queue_id: str = Field(..., description="Annotation queue ID"),
@@ -5220,6 +5302,7 @@ async def create_annotation_queue_item(
         raise
 
 
+@_normalize_tool_fields
 async def update_annotation_queue_item(
     ctx: Context,
     queue_id: str = Field(..., description="Annotation queue ID"),
@@ -5244,6 +5327,7 @@ async def update_annotation_queue_item(
         raise
 
 
+@_normalize_tool_fields
 async def delete_annotation_queue_item(
     ctx: Context,
     queue_id: str = Field(..., description="Annotation queue ID"),
@@ -5297,6 +5381,7 @@ def _build_annotation_queue_assignment_request(user_id: str) -> Any:
     )(user_id=user_id)
 
 
+@_normalize_tool_fields
 async def create_annotation_queue_assignment(
     ctx: Context,
     queue_id: str = Field(..., description="Annotation queue ID"),
@@ -5320,6 +5405,7 @@ async def create_annotation_queue_assignment(
         raise
 
 
+@_normalize_tool_fields
 async def delete_annotation_queue_assignment(
     ctx: Context,
     queue_id: str = Field(..., description="Annotation queue ID"),
@@ -5352,6 +5438,22 @@ async def delete_annotation_queue_assignment(
 # v3 is not served or for the filters v3 dropped (user_id, trace_tags).
 SCORES_V3_FIELDS = "details,subject,annotation"
 ERR_SCORES_V2_ONLY_FILTER = "ERR_LANGFUSE_SCORES_V2_ONLY_FILTER"
+ERR_SCORES_V2_REMOVED = "ERR_LANGFUSE_SCORES_V2_REMOVED"
+
+
+def _scores_v2_removed_error(exc: Exception) -> RuntimeError:
+    """Build the upgrade error for a 404/405 on GET /v2/scores with no Scores API v3 available.
+
+    Fires only when both are true: the installed SDK exposes no ``api.scores_v3`` (added in
+    langfuse SDK 4.8.1) and the server no longer serves GET /v2/scores (Langfuse Cloud removes
+    it on 2026-11-16). Neither symptom alone is actionable by upgrading the package -- both
+    together mean the SDK build predates the only route this server still answers.
+    """
+    return RuntimeError(
+        f"{ERR_SCORES_V2_REMOVED}: GET /v2/scores is not served by this Langfuse instance, and this SDK build has "
+        "no Scores API v3 client (scores_v3 needs langfuse>=4.8.1). Upgrade the 'langfuse' package to >=4.8.1 to "
+        "restore score reads."
+    )
 
 
 def _score_v3_row(item: Any) -> Any:
@@ -5437,6 +5539,7 @@ def _list_scores_v3(
     return ([row for row in rows if keep(row)] if keep else rows), cursor
 
 
+@_normalize_tool_fields
 async def list_scores_v2(
     ctx: Context,
     page: int = Field(1, ge=1, description="Page number for pagination (starts at 1)"),
@@ -5569,11 +5672,15 @@ async def list_scores_v2(
         try:
             response = list_method(**api_kwargs)
         except Exception as exc:
-            if (user_id or trace_tags) and _route_missing(exc):
-                raise RuntimeError(
-                    f"{ERR_SCORES_V2_ONLY_FILTER}: user_id and trace_tags need GET /v2/scores, which this Langfuse server "
-                    "no longer serves (Langfuse Cloud removed it on 2026-11-16). Filter by trace_id or session_id instead."
-                ) from exc
+            if _route_missing(exc):
+                if user_id or trace_tags:
+                    raise RuntimeError(
+                        f"{ERR_SCORES_V2_ONLY_FILTER}: user_id and trace_tags need GET /v2/scores, which this Langfuse "
+                        "server no longer serves (Langfuse Cloud removed it on 2026-11-16). Filter by trace_id or "
+                        "session_id instead."
+                    ) from exc
+                if v3_method is None:
+                    raise _scores_v2_removed_error(exc) from exc
             raise
         items, pagination = _extract_items_from_response(response)
         scores = [_sdk_object_to_python(item) for item in items]
@@ -5592,6 +5699,7 @@ async def list_scores_v2(
         raise
 
 
+@_normalize_tool_fields
 async def get_score_v2(
     ctx: Context,
     score_id: str = Field(..., description="Score ID"),
@@ -5619,7 +5727,12 @@ async def get_score_v2(
         scores_namespace = _compat.get_score_namespace(client)
         if scores_namespace is None or not hasattr(scores_namespace, "get_by_id"):
             raise RuntimeError("Unsupported Langfuse client: no get_by_id method on scores namespace")
-        score = scores_namespace.get_by_id(score_id=score_id)
+        try:
+            score = scores_namespace.get_by_id(score_id=score_id)
+        except Exception as exc:
+            if v3_method is None and _route_missing(exc):
+                raise _scores_v2_removed_error(exc) from exc
+            raise
         result = _sdk_object_to_python(score)
         if not result:
             raise LookupError(f"Score '{score_id}' not found")
@@ -5642,6 +5755,7 @@ METRICS_HIGH_CARDINALITY_DIMENSIONS = {"id", "traceId", "userId", "sessionId", "
 DEFAULT_METRICS_LOOKBACK_MINUTES = 1440  # 24h, used when neither age nor from_timestamp is supplied
 
 
+@_normalize_tool_fields
 async def query_metrics(
     ctx: Context,
     view: Literal["observations", "scores-numeric", "scores-categorical"] = Field(
@@ -5842,6 +5956,7 @@ async def query_metrics(
     return {"data": processed_data, "metadata": metadata_block}
 
 
+@_normalize_tool_fields
 async def get_metrics_schema(ctx: Context, dummy: str = "") -> str:
     """Get the query schema for the metrics API (views, dimensions, measures, aggregations).
 

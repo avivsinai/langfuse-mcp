@@ -79,3 +79,26 @@ def test_update_prompt_labels(state):
     assert data["version"] == 1
     assert data["labels"] == ["production", "staging"]
     assert state.langfuse_client.last_update_kwargs["new_labels"] == ["production"]
+
+
+def test_list_prompts_called_directly_never_leaks_fieldinfo(state):
+    """A direct coroutine call (no MCP/Pydantic in between) must not forward FieldInfo objects.
+
+    ``list_prompts`` declares ``name``/``label``/``tag`` as ``Field(None, ...)``. A caller that
+    awaits the coroutine directly -- exactly what an embedder or a test does -- skips Pydantic's
+    argument resolution, so an omitted parameter binds to the literal ``FieldInfo`` object via
+    Python's own default-argument mechanism. ``FieldInfo`` is truthy, so the unguarded
+    ``if name: api_kwargs["name"] = name`` pattern used to forward it straight to the SDK as a
+    real filter value. This must fail on unfixed code (the FieldInfo objects show up as filter
+    values in ``last_list_kwargs``) and pass once the call boundary normalizes Field defaults.
+
+    """
+    from langfuse_mcp.__main__ import list_prompts
+
+    ctx = FakeContext(state)
+    asyncio.run(list_prompts(ctx))
+
+    sent_kwargs = state.langfuse_client.api.prompts.last_list_kwargs
+    assert sent_kwargs == {"page": 1, "limit": 50}
+    for value in sent_kwargs.values():
+        assert type(value).__name__ != "FieldInfo"

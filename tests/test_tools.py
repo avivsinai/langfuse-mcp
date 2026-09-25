@@ -1292,6 +1292,16 @@ def test_omitted_output_mode_uses_configured_default(state):
     assert result["metadata"].get("file_path") is not None
 
 
+def test_direct_call_without_output_mode_uses_configured_default(state):
+    """A direct call that really omits output_mode gets the configured default, not the schema's compact."""
+    from langfuse_mcp.__main__ import OutputMode, _bind_default_output_mode, fetch_traces
+
+    bound = _bind_default_output_mode(fetch_traces, OutputMode.FULL_JSON_STRING)
+
+    assert isinstance(asyncio.run(bound(FakeContext(state), age=10)), str)
+    assert isinstance(asyncio.run(fetch_traces(FakeContext(state), age=10)), dict)
+
+
 def test_invalid_output_mode_falls_back_to_compact(state):
     """Invalid output_mode values must fall back to compact, not to the configured default."""
     from langfuse_mcp.__main__ import OutputMode, _ensure_output_mode
@@ -1307,3 +1317,18 @@ def test_ensure_output_mode_normalizes_valid_values():
     assert _ensure_output_mode("full_json_string") == OutputMode.FULL_JSON_STRING
     assert _ensure_output_mode("full_json_file") == OutputMode.FULL_JSON_FILE
     assert _ensure_output_mode(OutputMode.COMPACT) == OutputMode.COMPACT
+
+
+@pytest.mark.parametrize(
+    ("field_kwargs", "expected"),
+    [({"default": 1}, 1), ({"default": None}, None), ({"default_factory": list}, []), ({}, None)],
+)
+def test_normalize_field_default_resolves_like_pydantic(field_kwargs, expected):
+    """FieldInfo resolves to the value Pydantic would bind; a required Field(...) resolves to None."""
+    from pydantic import Field
+
+    from langfuse_mcp.__main__ import _normalize_field_default
+
+    field = Field(**field_kwargs) if field_kwargs else Field(...)
+    assert _normalize_field_default(field) == expected
+    assert _normalize_field_default("explicit") == "explicit"

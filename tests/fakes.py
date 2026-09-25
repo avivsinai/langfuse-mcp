@@ -1611,6 +1611,11 @@ class _LegacyAPI:
     def __init__(self, store: FakeDataStore) -> None:
         """Wire the legacy v1 namespaces to the shared store."""
         self.observations_v1 = _LegacyObservationsV1API(store)
+        # A separate _MetricsV2API instance: real SDK 4.15.4 keeps this behaviorally
+        # identical to api.metrics (record query, return canned rows) but it must be a
+        # distinct object so a test can assert the v2 and legacy routes are never the
+        # same callable (see _compat.get_metrics_method).
+        self.metrics_v1 = _MetricsV2API(store)
 
 
 class FakeAPIV4:
@@ -1620,6 +1625,9 @@ class FakeAPIV4:
     - No ``score_v_2``; scores resource is renamed to ``scores`` with ``get_many``.
     - ``observations.get`` is absent; ``observations.get_many`` is cursor-only.
     - ``api.legacy.observations_v1`` exposes the page-based v1 fallback.
+    - No ``metrics_v_2``: the v2 metrics route is ``api.metrics`` (real SDK 4.15.4 keeps
+      the plain ``metrics`` name for the v2 endpoint); the legacy v1 route moved to
+      ``api.legacy.metrics_v1``. See ``_compat.get_metrics_method``.
     - Annotation queue write methods take direct kwargs (no ``request=``).
     - ``api.dataset_run_items.create`` takes direct kwargs (no ``request=``).
     - ``api.datasets`` / ``api.dataset_items`` are intentionally not wired for
@@ -1638,7 +1646,7 @@ class FakeAPIV4:
         self.datasets = _DatasetsAPI(store)
         self.experiments = _ExperimentsAPI(store)
         self.annotation_queues = _AnnotationQueuesV4API(store)
-        self.metrics_v_2 = _MetricsV2API(store)
+        self.metrics = _MetricsV2API(store)
         self.dataset_run_items = _DatasetRunItemsV4API(store)
         # dataset_items is filled in by S4.
         self.legacy = _LegacyAPI(store)

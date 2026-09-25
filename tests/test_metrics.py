@@ -54,8 +54,10 @@ def test_query_metrics_builds_v2_query(tmp_path, client_factory):
     assert result["metadata"]["metrics_endpoint"] == "v2"
     assert result["metadata"]["item_count"] == 2
 
-    # The query string sent to the SDK is a faithful v2 query object.
-    sent = json.loads(client.api.metrics_v_2.last_query)
+    # The query string sent to the SDK is a faithful v2 query object. On the v3 fake the v2
+    # route is api.metrics_v_2; on the v4 fake it is the plain api.metrics (see _compat).
+    v2_namespace = getattr(client.api, "metrics_v_2", None) or client.api.metrics
+    sent = json.loads(v2_namespace.last_query)
     assert sent["view"] == "observations"
     assert sent["metrics"] == [
         {"measure": "totalCost", "aggregation": "sum"},
@@ -218,6 +220,41 @@ def test_get_metrics_method_prefers_v2_then_legacy_then_none():
     assert _compat.get_metrics_method(neither) is None
 
 
+def test_get_metrics_method_routes_sdk4_layout_correctly():
+    """On the real SDK 4 layout, ``api.metrics`` is v2 and ``api.legacy.metrics_v1`` is legacy.
+
+    Verified against real langfuse 4.15.4: ``api.metrics.metrics`` calls
+    ``GET /api/public/v2/metrics`` and ``api.legacy.metrics_v1.metrics`` calls
+    ``GET /api/public/metrics`` -- there is no ``api.metrics_v_2`` namespace at all. A client
+    shaped this way must not be mistaken for the SDK 3 layout, where the plain ``metrics``
+    namespace *is* the legacy route.
+    """
+    from langfuse_mcp import _compat
+
+    class _V2Ns:
+        def metrics(self, *, query):  # pragma: no cover - not invoked
+            return "v2-response"
+
+    class _LegacyV1Ns:
+        def metrics(self, *, query):  # pragma: no cover - not invoked
+            return "legacy-response"
+
+    v2_namespace = _V2Ns()
+    legacy_namespace = _LegacyV1Ns()
+    sdk4_client = SimpleNamespace(api=SimpleNamespace(metrics=v2_namespace, legacy=SimpleNamespace(metrics_v1=legacy_namespace)))
+
+    method, mode = _compat.get_metrics_method(sdk4_client)
+    assert mode == "v2"
+    assert method == v2_namespace.metrics
+
+    legacy_method = _compat.get_legacy_metrics_method(sdk4_client)
+    assert legacy_method == legacy_namespace.metrics
+    # Negative case: the 404 fallback must never be the same callable as the v2 route (the
+    # exact bug this fix closes -- the old code labeled SDK 4's api.metrics as "legacy" and
+    # its fallback resolved to that same v2-serving callable).
+    assert legacy_method is not method
+
+
 def test_query_metrics_falls_back_to_legacy_on_v2_404(tmp_path):
     """A v2 404 (Cloud-only) should retry the legacy endpoint when it is available.
 
@@ -259,6 +296,34 @@ def test_query_metrics_falls_back_to_legacy_on_v2_404(tmp_path):
     assert legacy.last_query is not None, "legacy endpoint should have been invoked after the v2 404"
     assert result["metadata"]["metrics_endpoint"] == "legacy"
     assert result["data"][0]["count_count"] == 3
+
+
+def test_query_metrics_falls_back_to_legacy_v1_on_sdk4_v2_404(tmp_path, monkeypatch):
+    """On the real SDK 4 shape, a v2 404 must retry ``api.legacy.metrics_v1``, not ``api.metrics`` again.
+
+    Regression test for the bug this fix closes: the old ``get_legacy_metrics_method``
+    looked up ``client.api.metrics`` unconditionally, which on SDK 4 is the *same* callable
+    ``get_metrics_method`` already tried and got a 404 from -- so a self-hosted server
+    without v2 metrics would 404 forever instead of falling back to the real legacy route.
+    """
+    from langfuse_mcp.__main__ import query_metrics
+
+    client = FakeLangfuseV4()
+
+    class _ApiError(Exception):
+        status_code = 404
+
+    def v2_gone(*, query, **kwargs):
+        raise _ApiError()
+
+    monkeypatch.setattr(client.api.metrics, "metrics", v2_gone)
+
+    state = _state(tmp_path, client)
+    ctx = FakeContext(state)
+    result = asyncio.run(query_metrics(ctx, view="observations", metrics=[{"measure": "count", "aggregation": "count"}]))
+
+    assert result["metadata"]["metrics_endpoint"] == "legacy"
+    assert client.api.legacy.metrics_v1.last_query is not None, "the real legacy route should have been called"
 
 
 def test_query_metrics_rejects_malformed_filter(tmp_path):

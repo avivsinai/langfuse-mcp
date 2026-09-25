@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from tests.fakes import FakeContext, FakeHTTPError, FakeLangfuseV4, FakeScore, _ScoresV3API
+from tests.fakes import FakeContext, FakeHTTPError, FakeLangfuse, FakeLangfuseV4, FakeScore, _ScoresV3API
 
 
 @pytest.fixture()
@@ -22,6 +22,18 @@ def v4_state(tmp_path):
     from langfuse_mcp.__main__ import MCPState
 
     return MCPState(langfuse_client=FakeLangfuseV4(), dump_dir=str(tmp_path))
+
+
+@pytest.fixture()
+def v3_only_state(tmp_path):
+    """Return an MCPState backed by the v3 fake client, which has no ``api.scores_v3`` at all.
+
+    Stands in for an SDK build older than 4.8.1: ``_compat.get_scores_v3_method`` returns
+    ``None`` for this client, so both score tools fall straight to GET /v2/scores.
+    """
+    from langfuse_mcp.__main__ import MCPState
+
+    return MCPState(langfuse_client=FakeLangfuse(), dump_dir=str(tmp_path))
 
 
 def _list(state: Any, **filters: Any) -> Any:
@@ -200,6 +212,60 @@ def test_get_score_reads_v3_by_id(v4_state):
 
     with pytest.raises(LookupError):
         asyncio.run(get_score_v2(FakeContext(v4_state), score_id="missing"))
+
+
+def test_list_scores_v2_removed_reports_upgrade_when_sdk_has_no_v3(v3_only_state, monkeypatch):
+    """No scores_v3 on the SDK plus a 404 from GET /v2/scores must name the langfuse>=4.8.1 upgrade.
+
+    Regression test: previously this case re-raised the bare 404 from the SDK, giving the
+    caller no hint that upgrading the 'langfuse' package (not the filters) is the fix.
+    """
+
+    def v2_gone(**kwargs: Any) -> Any:
+        raise FakeHTTPError(404, "not found")
+
+    monkeypatch.setattr(v3_only_state.langfuse_client.api.score_v_2, "get", v2_gone)
+
+    with pytest.raises(RuntimeError, match="ERR_LANGFUSE_SCORES_V2_REMOVED"):
+        _list(v3_only_state, name="quality")
+
+
+def test_get_score_v2_removed_reports_upgrade_when_sdk_has_no_v3(v3_only_state, monkeypatch):
+    """Same upgrade guidance applies to the get-by-id tool."""
+    from langfuse_mcp.__main__ import get_score_v2
+
+    def v2_gone(**kwargs: Any) -> Any:
+        raise FakeHTTPError(405, "method not allowed")
+
+    monkeypatch.setattr(v3_only_state.langfuse_client.api.score_v_2, "get_by_id", v2_gone)
+
+    with pytest.raises(RuntimeError, match="ERR_LANGFUSE_SCORES_V2_REMOVED"):
+        asyncio.run(get_score_v2(FakeContext(v3_only_state), score_id="score_1"))
+
+
+def test_list_scores_v2_other_errors_propagate_when_sdk_has_no_v3(v3_only_state, monkeypatch):
+    """Only 404/405 means 'v2 is gone'; a 500 must surface unchanged, not the upgrade message."""
+
+    def boom(**kwargs: Any) -> Any:
+        raise FakeHTTPError(500, "server error")
+
+    monkeypatch.setattr(v3_only_state.langfuse_client.api.score_v_2, "get", boom)
+
+    with pytest.raises(FakeHTTPError):
+        _list(v3_only_state, name="quality")
+
+
+def test_get_score_v2_other_errors_propagate_when_sdk_has_no_v3(v3_only_state, monkeypatch):
+    """Same guarantee for the get-by-id tool: a non-404/405 error is not reinterpreted."""
+    from langfuse_mcp.__main__ import get_score_v2
+
+    def boom(**kwargs: Any) -> Any:
+        raise FakeHTTPError(500, "server error")
+
+    monkeypatch.setattr(v3_only_state.langfuse_client.api.score_v_2, "get_by_id", boom)
+
+    with pytest.raises(FakeHTTPError):
+        asyncio.run(get_score_v2(FakeContext(v3_only_state), score_id="score_1"))
 
 
 @pytest.mark.parametrize(
