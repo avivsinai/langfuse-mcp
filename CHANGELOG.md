@@ -6,10 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.12.1] - 2026-09-25
 ### Fixed
 - Rebuilt traces and session summaries return `null` for absent `session_id`, `user_id`, and `release` values that Observations API v2 sends as empty strings.
 - Compact output keeps ordinary identifiers intact at every nesting level, caps long essential text at the base field limit, and still limits non-essential fields.
 - Observation lists and exception scans omit migration-created virtual `t-<traceId>` roots and expose their real child spans as roots; direct fetch by the virtual root ID remains available.
+
 
 ## [0.12.0] - 2026-09-25
 ### Upgrade notes
