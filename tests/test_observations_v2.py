@@ -89,6 +89,148 @@ def _fetch_traces(state: Any, **overrides: Any) -> Any:
     return asyncio.run(fetch_traces(FakeContext(state), **kwargs))
 
 
+@pytest.mark.parametrize("value, expected", [("", None), ("known", "known")])
+def test_parity_trace_context_optional_strings(value, expected):
+    """The rebuilt trace uses legacy nulls for missing trace-context strings."""
+    from langfuse_mcp.__main__ import _trace_from_v2_root
+
+    trace = _trace_from_v2_root({"trace_id": "trace_1", "session_id": value, "user_id": value, "release": value})
+    assert (trace["session_id"], trace["user_id"], trace["release"]) == (expected, expected, expected)
+
+
+def test_parity_empty_trace_context_in_trace_and_session_reads(v4_state, monkeypatch):
+    """Trace lists, one trace, and session summaries agree on empty user context."""
+    from langfuse_mcp.__main__ import fetch_sessions, fetch_trace
+
+    _add_trace(v4_state.langfuse_client, "trace_empty", minutes=1, session_id="session_a")
+    original = _ObservationsV4API._row
+
+    def empty_context(self, obs):
+        row = original(self, obs)
+        if row["traceId"] == "trace_empty":
+            row["userId"] = ""
+            row["release"] = ""
+        return row
+
+    monkeypatch.setattr(_ObservationsV4API, "_row", empty_context)
+    listed = _fetch_traces(v4_state)["data"][0]
+    fetched = asyncio.run(fetch_trace(FakeContext(v4_state), trace_id="trace_empty", output_mode="compact"))["data"]
+    sessions = asyncio.run(fetch_sessions(FakeContext(v4_state), age=60, output_mode="compact"))["data"]
+
+    assert listed["user_id"] is None and listed["release"] is None
+    assert fetched["user_id"] is None and fetched["release"] is None
+    assert next(session for session in sessions if session["id"] == "session_a")["user_id"] is None
+
+
+def test_parity_compact_trace_page_keeps_fifty_ids_with_large_io(v4_state):
+    """The default compact result retains every actionable ID within its size budget."""
+    from langfuse_mcp.__main__ import MAX_RESPONSE_SIZE
+
+    client = v4_state.langfuse_client
+    ids = [f"ced71c8c-47cf-4834-abcd-{number:012d}" for number in range(50)]
+    for number, trace_id in enumerate(ids):
+        _add_trace(client, trace_id, minutes=1)
+        client._store.observations[f"{trace_id}_root"].start_time += timedelta(seconds=number)
+        client._store.observations[f"{trace_id}_root"].input = "x" * 3000
+        client._store.observations[f"{trace_id}_root"].output = "y" * 3000
+
+    result = _fetch_traces(v4_state)
+    returned = result["data"]
+    assert len(returned) == 50
+    assert {row["id"] for row in returned} == set(ids)
+    assert len(json.dumps(returned)) <= MAX_RESPONSE_SIZE
+    assert all("input" not in row or len(row["input"]) < 3000 for row in returned)
+
+
+def _add_virtual_trace(client: Any, trace_id: str, *, minutes: int = 1) -> None:
+    """Add a migration-created root above one real span and its child."""
+    _add_trace(client, trace_id, minutes=minutes)
+    real_root = client._store.observations[f"{trace_id}_root"]
+    virtual_id = f"t-{trace_id}"
+    client._store.observations[virtual_id] = FakeObservation(
+        id=virtual_id,
+        type="SPAN",
+        name="support-turn",
+        status="SUCCEEDED",
+        start_time=real_root.start_time,
+        end_time=real_root.end_time,
+        trace_id=trace_id,
+    )
+    real_root.parent_observation_id = virtual_id
+    client._store.traces[trace_id].observations.append(virtual_id)
+
+
+def test_parity_virtual_root_is_hidden_from_lists_but_explicit_fetch_works(v4_state):
+    """Only the exact migration root is hidden; a different t-prefix ID survives."""
+    from langfuse_mcp.__main__ import fetch_observation, fetch_observations, fetch_trace, get_session_details, get_user_sessions
+
+    client = v4_state.langfuse_client
+    _add_virtual_trace(client, "trace_virtual")
+    real_root = client._store.observations["trace_virtual_root"]
+    client._store.observations["t-other"] = FakeObservation(
+        id="t-other",
+        type="SPAN",
+        name="other",
+        status="SUCCEEDED",
+        start_time=real_root.start_time,
+        end_time=real_root.end_time,
+        trace_id="trace_virtual",
+        parent_observation_id="t-trace_virtual",
+    )
+    listed = asyncio.run(fetch_observations(FakeContext(v4_state), age=60, trace_id="trace_virtual", output_mode="compact"))["data"]
+    trace_list = _fetch_traces(v4_state, include_observations=True)["data"]
+    trace = asyncio.run(fetch_trace(FakeContext(v4_state), trace_id="trace_virtual", include_observations=True, output_mode="compact"))[
+        "data"
+    ]
+    session = asyncio.run(get_session_details(FakeContext(v4_state), session_id="s_a", include_observations=True, output_mode="compact"))[
+        "data"
+    ]
+    user_sessions = asyncio.run(
+        get_user_sessions(FakeContext(v4_state), user_id="user_a", age=60, include_observations=True, output_mode="compact")
+    )["data"]
+    explicit = asyncio.run(fetch_observation(FakeContext(v4_state), observation_id="t-trace_virtual", output_mode="compact"))["data"]
+    explicit_child = asyncio.run(fetch_observation(FakeContext(v4_state), observation_id="trace_virtual_root", output_mode="compact"))[
+        "data"
+    ]
+
+    expected = {"trace_virtual_root", "trace_virtual_gen", "t-other"}
+    assert {row["id"] for row in listed} == expected
+    assert {row["id"] for row in trace_list[0]["observations"]} == expected
+    assert {row["id"] for row in trace["observations"]} == expected
+    assert trace["name"] == "support-turn"
+    assert next(row for row in listed if row["id"] == "trace_virtual_root")["parent_observation_id"] is None
+    assert next(row for row in listed if row["id"] == "t-other")["parent_observation_id"] is None
+    assert {row["id"] for row in session["traces"][0]["observations"]} == expected
+    assert {row["id"] for row in user_sessions[0]["traces"][0]["observations"]} == expected
+    assert explicit["id"] == "t-trace_virtual"
+    assert explicit_child["parent_observation_id"] is None
+
+
+def test_parity_native_root_is_unchanged(v4_state):
+    """A native OTel trace without a migration root keeps its observations and parents."""
+    from langfuse_mcp.__main__ import fetch_observations
+
+    _add_trace(v4_state.langfuse_client, "native", minutes=1)
+    rows = asyncio.run(fetch_observations(FakeContext(v4_state), age=60, trace_id="native", output_mode="compact"))["data"]
+    assert {row["id"] for row in rows} == {"native_root", "native_gen"}
+    assert next(row for row in rows if row["id"] == "native_gen")["parent_observation_id"] == "native_root"
+
+
+def test_parity_error_scan_excludes_virtual_root(v4_state):
+    """Exception tools do not count a migration root as another ERROR observation."""
+    from langfuse_mcp.__main__ import _scan_error_observations
+
+    client = v4_state.langfuse_client
+    _add_virtual_trace(client, "trace_error")
+    client._store.observations["t-trace_error"].level = "ERROR"
+    client._store.observations["trace_error_root"].level = "ERROR"
+
+    rows = _scan_error_observations(client, from_start_time=T0, to_start_time=datetime.now(timezone.utc))
+
+    assert {row["id"] for row in rows} == {"trace_error_root"}
+    assert rows[0]["parent_observation_id"] is None
+
+
 @pytest.mark.parametrize(
     ("operator", "expected"),
     [("<", True), ("<=", True), (">", False), (">=", False)],

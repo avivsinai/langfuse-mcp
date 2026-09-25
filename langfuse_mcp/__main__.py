@@ -755,10 +755,19 @@ def _normalize_v2_row(row: Any) -> Any:
     if not isinstance(row, dict):
         return row
     normalized = {_CAMEL_BOUNDARY.sub("_", key).lower(): value for key, value in row.items()}
+    trace_id = normalized.get("trace_id")
+    if trace_id and normalized.get("parent_observation_id") == f"t-{trace_id}":
+        normalized["parent_observation_id"] = None
     for key in ("input", "output"):
         if key in normalized:
             normalized[key] = _parse_io_text(normalized[key])
     return normalized
+
+
+def _is_virtual_trace_root(row: Any) -> bool:
+    """Identify the exact virtual root ID created by the Langfuse trace migration."""
+    # langfuse worker/src/backgroundMigrations/createRootSpansFromTraces.ts materializes t-<traceId>.
+    return isinstance(row, dict) and bool(row.get("trace_id")) and row.get("id") == f"t-{row['trace_id']}"
 
 
 def _v2_timestamp(value: datetime) -> str:
@@ -880,10 +889,10 @@ def _trace_from_v2_root(root: dict[str, Any], *, trace_id: str | None = None) ->
         "input": root.get("input"),
         "output": root.get("output"),
         "metadata": root.get("metadata"),
-        "session_id": root.get("session_id"),
-        "user_id": root.get("user_id"),
+        "session_id": root.get("session_id") or None,
+        "user_id": root.get("user_id") or None,
         "tags": root.get("tags") or [],
-        "release": root.get("release"),
+        "release": root.get("release") or None,
         "version": root.get("version"),
         "environment": root.get("environment"),
         "public": root.get("public"),
@@ -947,7 +956,11 @@ def _list_traces_v2(
         pagination["filtered_count"] = len(traces)
     if include_observations:
         for trace in traces:
-            trace["observations"] = _v2_collect(method, trace_id=trace["id"], limit=V2_MAX_LIMIT, fields=V2_FULL_FIELDS)
+            trace["observations"] = [
+                row
+                for row in _v2_collect(method, trace_id=trace["id"], limit=V2_MAX_LIMIT, fields=V2_FULL_FIELDS)
+                if not _is_virtual_trace_root(row)
+            ]
     return traces, pagination
 
 
@@ -1061,6 +1074,7 @@ def _list_observations(
             logger.info(f"Observations API v2 not served (HTTP {getattr(exc, 'status_code', None)}); listing via the v1 route")
         else:
             v2_pagination: dict[str, Any] = {"next_page": (page or 1) + 1 if next_cursor else None}
+            rows = [row for row in rows if not _is_virtual_trace_root(row)]
             if metadata:
                 rows = [row for row in rows if _metadata_matches(row, metadata)]
                 v2_pagination["filtered_count"] = len(rows)
@@ -1324,8 +1338,10 @@ def _scan_error_observations(
             raise
 
         for item in items:
-            obs = _normalize_observation_envelope(_sdk_object_to_python(item))
+            obs = _normalize_observation_envelope(_normalize_v2_row(item) if mode == "cursor" else _sdk_object_to_python(item))
             if not isinstance(obs, dict):
+                continue
+            if mode == "cursor" and _is_virtual_trace_root(obs):
                 continue
             if obs.get("level") != "ERROR":
                 continue
@@ -1555,7 +1571,7 @@ def _get_trace_v2(langfuse_client: Any, method: Callable[..., Any], trace_id: st
     costs = [cost for cost in (_as_number(row.get("total_cost")) for row in rows) if cost is not None]
     trace["total_cost"] = sum(costs) if costs else None
     if include_observations:
-        trace["observations"] = rows
+        trace["observations"] = [row for row in rows if not _is_virtual_trace_root(row)]
 
     scores_method = _compat.get_scores_v3_method(langfuse_client)
     if scores_method is not None:
@@ -1641,7 +1657,7 @@ def _list_sessions_v2(method: Callable[..., Any], *, limit: int, page: int, from
             sessions[session_id] = {
                 "id": session_id,
                 "last_trace_at": row.get("start_time"),
-                "user_id": row.get("user_id"),
+                "user_id": row.get("user_id") or None,
                 "environment": row.get("environment"),
                 "project_id": row.get("project_id"),
             }
@@ -1719,8 +1735,9 @@ def truncate_large_strings(
         # Minimal representation for level 2 (extreme truncation)
         adjusted_max_length = max(20, max_length // 5)
 
-    # Base case: if we've already exceeded max response size by a lot, return minimal representation
-    if current_size > max_response_size * 1.5:
+    # Essential strings keep the base limit even at aggressive truncation levels.
+    essential_string = isinstance(obj, str) and path.rsplit(".", 1)[-1] in ESSENTIAL_FIELDS
+    if current_size > max_response_size * 1.5 and not essential_string and not isinstance(obj, (dict, list)):
         return "[TRUNCATED]", len("[TRUNCATED]")
 
     # Handle different types
@@ -1733,7 +1750,7 @@ def truncate_large_strings(
             if key in ESSENTIAL_FIELDS:
                 processed_value, value_size = truncate_large_strings(
                     obj[key],
-                    adjusted_max_length,
+                    max_length,
                     max_response_size,
                     f"{path}.{key}" if path else key,
                     current_size + result_size,
@@ -1770,7 +1787,7 @@ def truncate_large_strings(
                         else:
                             processed_value, value_size = truncate_large_strings(
                                 value,
-                                adjusted_max_length,
+                                max_length,
                                 max_response_size,
                                 f"{path}.{key}" if path else key,
                                 current_size + result_size,
@@ -1798,7 +1815,7 @@ def truncate_large_strings(
 
                 processed_value, value_size = truncate_large_strings(
                     obj[key],
-                    adjusted_max_length,
+                    max_length,
                     max_response_size,
                     f"{path}.{key}" if path else key,
                     current_size + result_size,
@@ -1817,25 +1834,21 @@ def truncate_large_strings(
         if not obj:
             return [], 2
 
-        # Estimate average item size to plan truncation strategy
-        # We'll sample the first item or use a default
-        sample_size = 0
-        if obj:
-            sample_item, sample_size = truncate_large_strings(
-                obj[0], adjusted_max_length, max_response_size, f"{path}[0]", current_size + result_size, truncation_level
-            )
-
-        estimated_total_size = sample_size * len(obj)
-
-        # Determine the appropriate truncation strategy based on estimated size
+        # Sample each level before choosing a list-wide strategy. A level-0 sample
+        # cannot predict the size after non-essential fields are dropped at level 2.
         target_truncation_level = truncation_level
-        if estimated_total_size > max_response_size * 0.8:
-            # If the list would be too large, increase truncation level
-            target_truncation_level = min(2, truncation_level + 1)
+        while True:
+            _, sample_size = truncate_large_strings(
+                obj[0], max_length, max_response_size, f"{path}[0]", current_size + result_size, target_truncation_level
+            )
+            estimated_total_size = sample_size * len(obj)
+            if estimated_total_size <= max_response_size * 0.8 or target_truncation_level == 2:
+                break
+            target_truncation_level += 1
 
         # If even at max truncation we'd exceed size, we need to limit the number of items
         will_need_item_limit = False
-        if target_truncation_level == 2 and estimated_total_size > max_response_size:
+        if target_truncation_level == 2 and estimated_total_size > max_response_size * 0.8:
             will_need_item_limit = True
             max_items = max(5, int(max_response_size * 0.8 / (sample_size or 100)))
         else:
@@ -1854,7 +1867,7 @@ def truncate_large_strings(
                 item_truncation_level = 2
 
             processed_item, item_size = truncate_large_strings(
-                item, adjusted_max_length, max_response_size, f"{path}[{i}]", current_size + result_size, item_truncation_level
+                item, max_length, max_response_size, f"{path}[{i}]", current_size + result_size, item_truncation_level
             )
             result.append(processed_item)
             result_size += item_size
@@ -1865,7 +1878,8 @@ def truncate_large_strings(
 
     elif isinstance(obj, str):
         # String truncation strategy based on truncation level
-        if len(obj) <= adjusted_max_length:
+        string_limit = max_length if essential_string else adjusted_max_length
+        if len(obj) <= string_limit:
             return obj, len(obj)
 
         # Special handling for stacktraces at normal truncation level
@@ -1877,8 +1891,8 @@ def truncate_large_strings(
                 return truncated, len(truncated)
 
         # Regular string truncation with adjusted max length
-        if len(obj) > adjusted_max_length:
-            truncated = obj[:adjusted_max_length] + TRUNCATE_SUFFIX
+        if len(obj) > string_limit:
+            truncated = obj[:string_limit] + TRUNCATE_SUFFIX
             return truncated, len(truncated)
 
         return obj, len(obj)
