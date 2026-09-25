@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.metadata
+import json
 import os
 import uuid
 from typing import Any
@@ -155,14 +156,19 @@ def test_dispatcher_paths_against_live_sdk(tmp_path, capsys):
     fetcher = _compat.get_observations_single_fetcher(state.langfuse_client)
     fetcher_repr = "<present>" if fetcher is not None else "<unsupported>"
 
+    v2_method = _compat.get_observations_v2_method(state.langfuse_client)
+    v2_repr = f"{type(v2_method.__self__).__name__}.{v2_method.__name__}" if v2_method is not None else "<unsupported>"
+
     print()
     print(f"langfuse-version    : {sdk_version}")
     print(f"score-namespace     : {score_ns_name}")
-    print(f"observations-list   : {list_repr}")
-    print(f"observations-single : {fetcher_repr}")
+    print(f"observations-v2     : {v2_repr}")
+    print(f"observations-list   : {list_repr} (fallback where v2 is not served)")
+    print(f"observations-single : {fetcher_repr} (fallback where v2 is not served)")
 
     assert sdk_version
     assert score_ns is not None, "Both api.scores and api.score_v_2 missing"
+    assert v2_method is not None, "No Observations API v2 method with cursor + filter found"
     assert list_method is not None, "No observation list endpoint found"
     assert fetcher is not None, "No observation single-fetch endpoint found"
 
@@ -196,8 +202,119 @@ def test_fetch_traces_live(tmp_path):
     assert result["metadata"]["item_count"] == len(result["data"])
 
 
+def _forbid_removed_read_routes(state, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail the test if a read reaches a route Langfuse Cloud removes on 2026-11-16.
+
+    Patches the SDK classes behind ``api.trace``, ``api.sessions`` and
+    ``api.legacy.observations_v1`` so only Observations API v2 can serve the reads.
+    """
+    api = state.langfuse_client.api
+    targets = [(api.trace, ("list", "get")), (api.sessions, ("list", "get")), (api.legacy.observations_v1, ("get", "get_many"))]
+    for namespace, methods in targets:
+        for method in methods:
+
+            def removed(*args: Any, _name: str = f"{type(namespace).__name__}.{method}", **kwargs: Any) -> Any:
+                raise AssertionError(f"{_name} calls a route removed on 2026-11-16")
+
+            monkeypatch.setattr(type(namespace), method, removed)
+
+
+def test_reads_use_observations_v2_only_live(tmp_path, monkeypatch):
+    """Every trace, session and observation read is served by Observations API v2 alone."""
+    from langfuse_mcp.__main__ import (
+        fetch_observation,
+        fetch_observations,
+        fetch_sessions,
+        fetch_trace,
+        fetch_traces,
+        get_session_details,
+    )
+
+    _require_v4_sdk()
+    state = _make_state(tmp_path)
+    _forbid_removed_read_routes(state, monkeypatch)
+    ctx = _ctx(state)
+
+    traces = asyncio.run(
+        fetch_traces(
+            ctx,
+            age=1440,
+            name=None,
+            user_id=None,
+            session_id=None,
+            metadata=None,
+            page=1,
+            limit=2,
+            tags=None,
+            include_observations=False,
+            output_mode="compact",
+        )
+    )
+    sessions = asyncio.run(fetch_sessions(ctx, age=1440, page=1, limit=2, output_mode="compact"))
+    assert isinstance(sessions["data"], list)
+    if not traces["data"]:
+        pytest.skip("No traces in the project's last 24 hours; skipping the per-trace reads")
+
+    first = traces["data"][0]
+    trace_id = first["id"]
+    assert first["timestamp"]
+
+    def list_traces(**filters: Any) -> Any:
+        kwargs: dict[str, Any] = {
+            "age": 1440,
+            "name": None,
+            "user_id": None,
+            "session_id": None,
+            "metadata": None,
+            "page": 1,
+            "limit": 5,
+            "tags": None,
+            "include_observations": False,
+            "output_mode": "compact",
+        }
+        kwargs.update(filters)
+        return asyncio.run(fetch_traces(ctx, **kwargs))
+
+    # Trace name and tags exist only as v2 filter columns; exercise their live filter shapes.
+    filtered = list_traces(name=first["name"], user_id=first["user_id"], tags=",".join(first["tags"]) or None)
+    assert filtered["data"], "name/user/tags filters dropped the trace they were built from"
+    assert all(trace["name"] == first["name"] and set(first["tags"]) <= set(trace["tags"]) for trace in filtered["data"])
+    assert isinstance(list_traces(page=2, limit=1)["data"], list)
+
+    summary = asyncio.run(fetch_trace(ctx, trace_id=trace_id, include_observations=False, output_mode="compact"))
+    assert summary["data"]["id"] == trace_id and "observations" not in summary["data"]
+
+    # full_json_string: compact mode shortens strings (ids included) as the payload grows.
+    full = json.loads(asyncio.run(fetch_trace(ctx, trace_id=trace_id, include_observations=True, output_mode="full_json_string")))
+    observations = full["observations"]
+    assert observations and all(obs.get("trace_id") == trace_id for obs in observations)
+
+    listed = asyncio.run(
+        fetch_observations(
+            ctx,
+            type=None,
+            age=1440,
+            name=None,
+            user_id=None,
+            trace_id=trace_id,
+            parent_observation_id=None,
+            page=1,
+            limit=5,
+            output_mode="compact",
+        )
+    )
+    assert listed["data"]
+    single = asyncio.run(fetch_observation(ctx, observation_id=observations[0]["id"], output_mode="compact"))
+    assert single["data"]["id"] == observations[0]["id"]
+
+    session_id = summary["data"].get("session_id")
+    if session_id:
+        details = asyncio.run(get_session_details(ctx, session_id=session_id, include_observations=False, output_mode="compact"))
+        assert details["data"]["found"] is True
+
+
 def test_fetch_observations_live(tmp_path):
-    """``fetch_observations`` should round-trip; v4 routes through legacy.observations_v1."""
+    """``fetch_observations`` should round-trip against the live API (Observations API v2 on SDK v4)."""
     from langfuse_mcp.__main__ import fetch_observations
 
     _require_v4_sdk()

@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- Trace, session and observation reads go through Observations API v2 (`GET /api/public/v2/observations`). Langfuse Cloud removes `GET /traces`, `/traces/{id}`, `/sessions` and the v1 `/observations` routes on 2026-11-16 ([deprecated API migration](https://langfuse.com/faq/all/deprecated-api-migration)). Covers `fetch_traces`, `fetch_trace`, `fetch_observations`, `fetch_observation`, `fetch_sessions`, `get_session_details`, `get_user_sessions` and the route-decision tools. v2 is used whenever the SDK exposes it with `filter` (v4, and v3 3.11.2+ via `observations_v_2`); a server that answers 404/405 (self-hosted Langfuse v3) falls back to the old routes, and any other error propagates.
+- **Breaking output change:** Traces are rebuilt from their root observation: `name`, `tags` and `release` from the trace context; `input`, `output`, `metadata` and `latency` from the root; `html_path` from the project id. `fetch_trace` also sums `total_cost` over the trace's observations and reads `scores` from Scores API v3 when the SDK has it (4.8.1+). `fetch_traces` loses total cost, scores and observation ids; observations still come with `include_observations=True`.
+- **Breaking output change:** `fetch_sessions` groups the window's root observations by session: `id`, `last_trace_at`, `user_id`, `environment`, `project_id`. `last_trace_at` replaces `created_at` because v4 has no session object.
+- `page` keeps working on the cursor-only endpoint by walking the cursor, up to page 50 (`ERR_LANGFUSE_V2_PAGE_LIMIT` beyond). `fetch_observations` no longer rejects `page > 1` on SDK v4.
+- **Breaking output change:** v2 rows get the snake_case keys the v1 SDK models produced, and `input`/`output` strings are parsed back to JSON where they are JSON. Metadata values over 200 characters are truncated (the v2 default), except route-decision keys.
 
 ## [0.11.0] - 2026-09-10
 ### Changed

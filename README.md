@@ -144,6 +144,8 @@ The MCP server provides the tools; the skill provides the agent-facing workflow.
 | Metrics | `query_metrics`, `get_metrics_schema` |
 | Schema | `get_data_schema` |
 
+On Observations API v2, traces are built from root observations. `fetch_traces` omits traces without a root observation, and `fetch_trace` cannot find traces with no observations.
+
 ## Dataset Item Updates (Upsert)
 
 Langfuse uses upsert for dataset items. To edit an existing item, call `create_dataset_item` with `item_id`. If the ID exists, it updates; otherwise it creates a new item.

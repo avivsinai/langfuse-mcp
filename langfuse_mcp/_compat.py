@@ -9,6 +9,9 @@ The Langfuse Python SDK reorganized several namespaces between v3.x and v4.x:
   legacy route at ``client.api.legacy.observations_v1`` remains page-based.
 - Several ``api.<resource>.create*`` and ``update*`` methods now take direct
   kwargs instead of a Pydantic ``request=...`` model.
+- Langfuse Cloud removes ``GET /traces``, ``/traces/{id}``, ``/sessions`` and the v1
+  ``/observations`` routes on 2026-11-16; trace, session and observation reads go
+  through Observations API v2 (``get_observations_v2_method``) instead.
 
 This module exposes small, capability-based helpers — branching is done on
 *what the client actually exposes* rather than on a sniffed version string,
@@ -189,6 +192,37 @@ def get_observations_list_method(client: Any) -> tuple[Any, ObservationListMode]
             return get_many, "cursor"
 
     return None
+
+
+def get_observations_v2_method(client: Any) -> Callable[..., Any] | None:
+    """Return the Observations API v2 list callable, or ``None``.
+
+    ``GET /api/public/v2/observations`` replaces the trace, session and v1 observation
+    reads that Langfuse Cloud removes on 2026-11-16. It is exposed as:
+
+    - v4: ``client.api.observations.get_many``
+    - v3 (3.11.2+): ``client.api.observations_v_2.get_many``
+
+    A callable is returned only when its signature shows both ``cursor`` and ``filter``:
+    trace, session and by-id lookups need the structured ``filter``. Presence says nothing
+    about the server; a self-hosted Langfuse v3 answers 404/405, which callers handle.
+    """
+    api = getattr(client, "api", None)
+    if api is None:
+        return None
+    for namespace_name in ("observations", "observations_v_2"):
+        namespace = getattr(api, namespace_name, None)
+        method = getattr(namespace, "get_many", None) if namespace is not None else None
+        if method is not None and method_has_param(method, "cursor") is True and method_has_param(method, "filter") is True:
+            return method
+    return None
+
+
+def get_scores_v3_method(client: Any) -> Callable[..., Any] | None:
+    """Return ``client.api.scores_v3.get_many_v3`` (SDK 4.8.1+), or ``None``."""
+    api = getattr(client, "api", None)
+    scores_v3 = getattr(api, "scores_v3", None) if api is not None else None
+    return getattr(scores_v3, "get_many_v3", None) if scores_v3 is not None else None
 
 
 def call_with_request_or_kwargs(

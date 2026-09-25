@@ -11,6 +11,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import sys
 import types
 from collections import Counter
@@ -180,6 +181,13 @@ TOOL_GROUPS = {
 }
 ALL_TOOL_GROUPS = set(TOOL_GROUPS.keys())
 ROUTE_DECISION_SCHEMA_VERSION = "mcp.route_decision.v1"
+# Metadata keys a route-decision record reads; Observations API v2 truncates metadata values
+# over 200 characters unless the key is expanded (top_candidates and reason_codes run long).
+_ROUTE_DECISION_METADATA_KEYS = (
+    "schema_version,decision_id,session_id,router_name,router_version,policy_version,decision_method,capability_id,"
+    "provider,execution_type,callable,selected_tool,confidence,latency_ms,candidate_count,reason_codes,top_candidates,"
+    "feedback_expected"
+)
 
 # Tools that perform write operations (disabled in read-only mode)
 WRITE_TOOLS = {
@@ -659,6 +667,248 @@ def _metadata_matches(item: Any, metadata_filter: dict[str, Any]) -> bool:
     return all(metadata.get(key) == value for key, value in metadata_filter.items())
 
 
+# Observations API v2 (GET /api/public/v2/observations) replaces the trace, session and v1
+# observation reads that Langfuse Cloud removes on 2026-11-16. It is cursor-only and returns
+# observation rows; the helpers below keep each tool's parameters and legacy output shape.
+V2_PAGE_WALK_MAX = 50
+V2_SCAN_MAX_REQUESTS = 50
+V2_MAX_LIMIT = 1000
+SCORES_V3_MAX_LIMIT = 100
+V2_FULL_FIELDS = "core,basic,time,io,metadata,model,usage,prompt,metrics,trace_context"
+V2_TRACE_ROOT_FIELDS = "core,basic,time,io,metadata,metrics,trace_context"
+V2_TRACE_COST_FIELDS = "core,basic,usage"
+V2_SESSION_FIELDS = "core,basic"
+ERR_V2_PAGE_LIMIT = "ERR_LANGFUSE_V2_PAGE_LIMIT"
+ERR_V2_SCAN_LIMIT = "ERR_LANGFUSE_V2_SCAN_LIMIT"
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def _route_missing(exc: Exception) -> bool:
+    """Return True when the server does not serve the route (404/405), e.g. self-hosted Langfuse v3 without v2."""
+    return getattr(exc, "status_code", None) in (404, 405)
+
+
+def _parse_io_text(value: Any) -> Any:
+    """Parse a v2 ``input``/``output`` string back into JSON when it is JSON.
+
+    v2 always returns IO as raw strings; the v1 routes returned it parsed. Text that is not
+    valid JSON is returned unchanged.
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except ValueError:
+        return value
+
+
+def _normalize_v2_row(row: Any) -> Any:
+    """Return a v2 row with snake_case top-level keys and parsed ``input``/``output``.
+
+    v2 rows are raw camelCase dicts, while the SDK models the v1 routes returned dump to
+    snake_case; normalizing keeps ``trace_id``/``start_time``/``session_id`` stable for the
+    tools and their callers. Nested values (metadata keys) are left untouched.
+    """
+    row = _sdk_object_to_python(row)
+    if not isinstance(row, dict):
+        return row
+    normalized = {_CAMEL_BOUNDARY.sub("_", key).lower(): value for key, value in row.items()}
+    for key in ("input", "output"):
+        if key in normalized:
+            normalized[key] = _parse_io_text(normalized[key])
+    return normalized
+
+
+def _v2_timestamp(value: datetime) -> str:
+    """Format a datetime for a v2 ``filter`` condition (UTC, ISO 8601, millisecond precision)."""
+    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _v2_request(
+    method: Callable[..., Any],
+    *,
+    cursor: str | None,
+    limit: int,
+    fields: str,
+    filters: list[dict[str, Any]] | None = None,
+    expand_metadata: str | None = None,
+    timeout_seconds: int | None = None,
+    **params: Any,
+) -> tuple[list[Any], str | None]:
+    """Issue one Observations API v2 request and return ``(normalized rows, next cursor)``.
+
+    ``filters`` becomes the structured ``filter`` parameter. The server ignores query-parameter
+    filters whenever ``filter`` is present, so a filtered query carries every condition in
+    ``filters`` and passes no other filter params.
+    """
+    kwargs: dict[str, Any] = {key: value for key, value in params.items() if value is not None}
+    kwargs["limit"] = limit
+    if cursor:
+        kwargs["cursor"] = cursor
+    if _compat.method_has_param(method, "fields") is True:
+        kwargs["fields"] = fields
+    if filters:
+        kwargs["filter"] = json.dumps(filters)
+
+    request_options: dict[str, Any] = {}
+    if expand_metadata:
+        if _compat.method_has_param(method, "expand_metadata") is True:
+            kwargs["expand_metadata"] = expand_metadata
+        else:
+            # SDK 3.11.2's cursor route has no first-class expand_metadata parameter.
+            request_options["additional_query_parameters"] = {"expandMetadata": expand_metadata}
+    if timeout_seconds is not None:
+        request_options["timeout_in_seconds"] = timeout_seconds
+    if request_options and _compat.method_has_param(method, "request_options") is True:
+        kwargs["request_options"] = request_options
+
+    items, pagination = _extract_items_from_response(method(**kwargs))
+    next_cursor = pagination.get("cursor")
+    return [_normalize_v2_row(item) for item in items], next_cursor if isinstance(next_cursor, str) and next_cursor else None
+
+
+def _v2_page(method: Callable[..., Any], *, page: int, **request: Any) -> tuple[list[Any], str | None]:
+    """Return one 1-based page of a v2 listing by walking the cursor forward ``page - 1`` times.
+
+    Keeps the tools' ``page`` parameter on the cursor-only endpoint. The skipped pages are
+    requested with the ``core`` field group only; the cursor is positional, so it does not
+    depend on the requested fields.
+    """
+    if page > V2_PAGE_WALK_MAX:
+        raise RuntimeError(
+            f"{ERR_V2_PAGE_LIMIT}: page {page} would need {page - 1} cursor requests (max {V2_PAGE_WALK_MAX - 1}). "
+            "Narrow the filters or raise limit and retry."
+        )
+    cursor: str | None = None
+    for _ in range(page - 1):
+        _, cursor = _v2_request(method, cursor=cursor, **{**request, "fields": "core"})
+        if cursor is None:
+            return [], None
+    return _v2_request(method, cursor=cursor, **request)
+
+
+def _v2_collect(method: Callable[..., Any], **request: Any) -> list[Any]:
+    """Walk every page of a v2 listing; raise at the request cap instead of returning partial data."""
+    rows: list[Any] = []
+    cursor: str | None = None
+    for _ in range(V2_SCAN_MAX_REQUESTS):
+        page_rows, cursor = _v2_request(method, cursor=cursor, **request)
+        rows.extend(page_rows)
+        if cursor is None:
+            return rows
+    raise RuntimeError(
+        f"{ERR_V2_SCAN_LIMIT}: stopped after {V2_SCAN_MAX_REQUESTS} requests with more observations remaining. Narrow the query and retry."
+    )
+
+
+def _v2_root(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Pick a trace's root observation: a logical root without a parent, else any parentless row, else the earliest."""
+    for row in rows:
+        if row.get("is_root_observation") and row.get("parent_observation_id") is None:
+            return row
+    for row in rows:
+        if row.get("parent_observation_id") is None:
+            return row
+    return min(rows, key=lambda row: _datetime_sort_key(row.get("start_time")))
+
+
+def _as_number(value: Any) -> float | None:
+    """Return a numeric value (v2 may send decimals as strings), or None."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _trace_from_v2_root(root: dict[str, Any], *, trace_id: str | None = None) -> dict[str, Any]:
+    """Rebuild the legacy trace shape from a trace's root observation row.
+
+    v4 has no trace object: name, tags and release come from the ``trace_context`` field
+    group, and input, output, metadata and latency from the root observation, as Langfuse's
+    deprecated-API migration guide prescribes.
+    """
+    resolved_id = trace_id or root.get("trace_id")
+    project_id = root.get("project_id")
+    return {
+        "id": resolved_id,
+        "name": root.get("trace_name") or root.get("name"),
+        "timestamp": root.get("start_time"),
+        "input": root.get("input"),
+        "output": root.get("output"),
+        "metadata": root.get("metadata"),
+        "session_id": root.get("session_id"),
+        "user_id": root.get("user_id"),
+        "tags": root.get("tags") or [],
+        "release": root.get("release"),
+        "version": root.get("version"),
+        "environment": root.get("environment"),
+        "public": root.get("public"),
+        "latency": root.get("latency"),
+        "html_path": f"/project/{project_id}/traces/{resolved_id}" if project_id and resolved_id else None,
+    }
+
+
+def _v2_trace_list_filters(
+    *,
+    from_timestamp: datetime | None,
+    name: str | None,
+    user_id: str | None,
+    session_id: str | None,
+    tags: list[str] | None,
+) -> list[dict[str, Any]]:
+    """Build the v2 ``filter`` that lists one root observation per trace."""
+    filters: list[dict[str, Any]] = [{"type": "boolean", "column": "isRootObservation", "operator": "=", "value": True}]
+    if from_timestamp is not None:
+        filters.append({"type": "datetime", "column": "startTime", "operator": ">=", "value": _v2_timestamp(from_timestamp)})
+    for column, value in (("userId", user_id), ("sessionId", session_id), ("traceName", name)):
+        if value is not None:
+            filters.append({"type": "string", "column": column, "operator": "=", "value": value})
+    if tags:
+        filters.append({"type": "arrayOptions", "column": "tags", "operator": "all of", "value": tags})
+    return filters
+
+
+def _list_traces_v2(
+    method: Callable[..., Any],
+    *,
+    limit: int,
+    page: int,
+    include_observations: bool,
+    tags: list[str] | None,
+    from_timestamp: datetime | None,
+    name: str | None,
+    user_id: str | None,
+    session_id: str | None,
+    metadata: dict[str, Any] | None,
+) -> tuple[list[Any], dict[str, Any]]:
+    """List traces as root observations (one per trace) and rebuild the legacy trace shape."""
+    rows, next_cursor = _v2_page(
+        method,
+        page=page,
+        limit=limit,
+        fields=V2_TRACE_ROOT_FIELDS,
+        filters=_v2_trace_list_filters(from_timestamp=from_timestamp, name=name, user_id=user_id, session_id=session_id, tags=tags),
+    )
+    traces: list[dict[str, Any]] = []
+    seen: set[Any] = set()
+    for row in rows:
+        if not isinstance(row, dict) or row.get("trace_id") in seen:
+            continue
+        seen.add(row.get("trace_id"))
+        traces.append(_trace_from_v2_root(row))
+
+    pagination: dict[str, Any] = {"next_page": page + 1 if next_cursor else None}
+    if metadata:
+        traces = [trace for trace in traces if _metadata_matches(trace, metadata)]
+        pagination["filtered_count"] = len(traces)
+    if include_observations:
+        for trace in traces:
+            trace["observations"] = _v2_collect(method, trace_id=trace["id"], limit=V2_MAX_LIMIT, fields=V2_FULL_FIELDS)
+    return traces, pagination
+
+
 def _list_traces(
     langfuse_client: Any,
     *,
@@ -672,7 +922,27 @@ def _list_traces(
     session_id: str | None,
     metadata: dict[str, Any] | None,
 ) -> tuple[list[Any], dict[str, Any]]:
-    """Fetch traces via the Langfuse SDK handling both v2 and v3 signatures."""
+    """Fetch traces via Observations API v2, falling back to ``GET /traces`` where v2 is not served."""
+    v2_method = _compat.get_observations_v2_method(langfuse_client)
+    if v2_method is not None:
+        try:
+            return _list_traces_v2(
+                v2_method,
+                limit=limit or 50,
+                page=page or 1,
+                include_observations=include_observations,
+                tags=tags,
+                from_timestamp=from_timestamp,
+                name=name,
+                user_id=user_id,
+                session_id=session_id,
+                metadata=metadata,
+            )
+        except Exception as exc:
+            if not _route_missing(exc):
+                raise
+            logger.info(f"Observations API v2 not served (HTTP {getattr(exc, 'status_code', None)}); listing traces via GET /traces")
+
     if not hasattr(langfuse_client, "api") or not hasattr(langfuse_client.api, "trace"):
         raise RuntimeError("Unsupported Langfuse client: no trace listing method available")
 
@@ -719,8 +989,41 @@ def _list_observations(
     trace_id: str | None,
     parent_observation_id: str | None,
     metadata: dict[str, Any] | None,
+    expand_metadata: str | None = None,
 ) -> tuple[list[Any], dict[str, Any]]:
-    """Fetch observations via the Langfuse SDK handling v3 page-based and v4 cursor-based listings."""
+    """Fetch observations via Observations API v2, falling back to the page-based v1 listing where v2 is not served.
+
+    ``expand_metadata`` names metadata keys to return untruncated on v2, which cuts metadata
+    values at 200 characters by default.
+    """
+    v2_method = _compat.get_observations_v2_method(langfuse_client)
+    if v2_method is not None:
+        try:
+            rows, next_cursor = _v2_page(
+                v2_method,
+                page=page or 1,
+                limit=limit or 50,
+                fields=V2_FULL_FIELDS,
+                expand_metadata=expand_metadata,
+                name=name,
+                user_id=user_id,
+                type=obs_type,
+                trace_id=trace_id,
+                parent_observation_id=parent_observation_id,
+                from_start_time=from_start_time,
+                to_start_time=to_start_time,
+            )
+        except Exception as exc:
+            if not _route_missing(exc):
+                raise
+            logger.info(f"Observations API v2 not served (HTTP {getattr(exc, 'status_code', None)}); listing via the v1 route")
+        else:
+            v2_pagination: dict[str, Any] = {"next_page": (page or 1) + 1 if next_cursor else None}
+            if metadata:
+                rows = [row for row in rows if _metadata_matches(row, metadata)]
+                v2_pagination["filtered_count"] = len(rows)
+            return rows, v2_pagination
+
     list_method = _compat.get_observations_list_method(langfuse_client)
     if list_method is None:
         raise RuntimeError("Unsupported Langfuse client: no observation listing method available")
@@ -763,7 +1066,32 @@ def _list_observations(
 
 
 def _get_observation(langfuse_client: Any, observation_id: str) -> Any:
-    """Fetch a single observation; precedence is v3 -> v4 legacy_v1 -> top-level shim."""
+    """Fetch a single observation via an ``id`` filter on Observations API v2.
+
+    v2 has no single-observation getter. Where v2 is not served, precedence is
+    v3 -> v4 legacy_v1 -> top-level shim.
+    """
+    v2_method = _compat.get_observations_v2_method(langfuse_client)
+    if v2_method is not None:
+        try:
+            rows, _ = _v2_request(
+                v2_method,
+                cursor=None,
+                limit=1,
+                fields=V2_FULL_FIELDS,
+                filters=[{"type": "string", "column": "id", "operator": "=", "value": observation_id}],
+            )
+        except Exception as exc:
+            if not _route_missing(exc):
+                raise
+            logger.info(
+                f"Observations API v2 not served (HTTP {getattr(exc, 'status_code', None)}); fetching the observation via the v1 route"
+            )
+        else:
+            if rows:
+                return rows[0]
+            raise RuntimeError(f"ERR_LANGFUSE_OBSERVATION_NOT_FOUND: no observation with id {observation_id}")
+
     fetcher = _compat.get_observations_single_fetcher(langfuse_client)
     if fetcher is None:
         raise RuntimeError("Unsupported Langfuse client: no observation getter available")
@@ -1124,8 +1452,85 @@ def _count_by_key(decisions: list[dict[str, Any]], key: str) -> dict[str, int]:
     return dict(counts)
 
 
+def _trace_scores_v3(scores_method: Callable[..., Any], trace_id: str) -> list[Any] | None:
+    """Return a trace's scores from Scores API v3, or None when the read fails.
+
+    Best effort: the trace itself is already assembled, so a failed score read leaves the
+    ``scores`` key out rather than failing the whole call.
+    """
+    scores: list[Any] = []
+    cursor: str | None = None
+    try:
+        for _ in range(V2_SCAN_MAX_REQUESTS):
+            kwargs: dict[str, Any] = {"trace_id": trace_id, "limit": SCORES_V3_MAX_LIMIT, "fields": "details,subject"}
+            if cursor:
+                kwargs["cursor"] = cursor
+            items, pagination = _extract_items_from_response(scores_method(**kwargs))
+            scores.extend(_normalize_v2_row(item) for item in items)
+            next_cursor = pagination.get("cursor")
+            if not (isinstance(next_cursor, str) and next_cursor):
+                return scores
+            cursor = next_cursor
+    except Exception as exc:  # the trace is already assembled; scores are an addition
+        logger.warning(f"Could not read scores for trace {trace_id} via Scores API v3: {exc}")
+        return None
+    logger.warning(f"Stopped reading scores for trace {trace_id} after {V2_SCAN_MAX_REQUESTS} requests")
+    return None
+
+
+def _get_trace_v2(langfuse_client: Any, method: Callable[..., Any], trace_id: str, include_observations: bool) -> dict[str, Any]:
+    """Rebuild a trace from its Observations API v2 rows.
+
+    One listing by ``trace_id`` supplies every observation (with IO only when observations
+    were asked for) plus their costs; without observations, the root's IO and metadata come
+    from a second, single-row request. ``total_cost`` sums the observations' costs, and
+    ``scores`` comes from Scores API v3 when the SDK has it (4.8.1+).
+    """
+    rows = _v2_collect(
+        method,
+        trace_id=trace_id,
+        limit=V2_MAX_LIMIT,
+        fields=V2_FULL_FIELDS if include_observations else V2_TRACE_COST_FIELDS,
+        timeout_seconds=TRACE_GET_TIMEOUT_SECONDS,
+    )
+    if not rows:
+        raise RuntimeError(f"ERR_LANGFUSE_TRACE_NOT_FOUND: no observations found for trace {trace_id}")
+
+    root = _v2_root(rows)
+    if not include_observations:
+        detail, _ = _v2_request(
+            method,
+            cursor=None,
+            limit=1,
+            fields=V2_TRACE_ROOT_FIELDS,
+            timeout_seconds=TRACE_GET_TIMEOUT_SECONDS,
+            filters=[
+                {"type": "string", "column": "id", "operator": "=", "value": root.get("id")},
+                {"type": "string", "column": "traceId", "operator": "=", "value": trace_id},
+            ],
+        )
+        if detail and isinstance(detail[0], dict):
+            root = {**root, **detail[0]}
+
+    trace = _trace_from_v2_root(root, trace_id=trace_id)
+    costs = [cost for cost in (_as_number(row.get("total_cost")) for row in rows) if cost is not None]
+    trace["total_cost"] = sum(costs) if costs else None
+    if include_observations:
+        trace["observations"] = rows
+
+    scores_method = _compat.get_scores_v3_method(langfuse_client)
+    if scores_method is not None:
+        scores = _trace_scores_v3(scores_method, trace_id)
+        if scores is not None:
+            trace["scores"] = scores
+    return trace
+
+
 def _get_trace(langfuse_client: Any, trace_id: str, include_observations: bool) -> Any:
     """Fetch a single trace handling SDK version differences.
+
+    Observations API v2 is tried first (``_get_trace_v2``). The rest of this docstring covers
+    the ``GET /traces/{id}`` fallback for servers that do not serve v2.
 
     The public ``GET /traces/{id}`` endpoint returns every field group by default
     (``core,io,scores,observations,metrics``). For a trace with many observations
@@ -1143,6 +1548,17 @@ def _get_trace(langfuse_client: Any, trace_id: str, include_observations: bool) 
     Falls back to a plain ``get()`` for older SDKs whose ``trace.get()`` predates
     ``request_options`` entirely.
     """
+    v2_method = _compat.get_observations_v2_method(langfuse_client)
+    if v2_method is not None:
+        try:
+            return _get_trace_v2(langfuse_client, v2_method, trace_id, include_observations)
+        except Exception as exc:
+            if not _route_missing(exc):
+                raise
+            logger.info(
+                f"Observations API v2 not served (HTTP {getattr(exc, 'status_code', None)}); fetching the trace via GET /traces/{{id}}"
+            )
+
     if not hasattr(langfuse_client, "api") or not hasattr(langfuse_client.api, "trace"):
         raise RuntimeError("Unsupported Langfuse client: no trace getter available")
 
@@ -1160,6 +1576,49 @@ def _get_trace(langfuse_client: Any, trace_id: str, include_observations: bool) 
         return langfuse_client.api.trace.get(trace_id=trace_id)
 
 
+def _list_sessions_v2(method: Callable[..., Any], *, limit: int, page: int, from_timestamp: datetime) -> tuple[list[Any], dict[str, Any]]:
+    """List sessions by grouping the window's root observations by ``sessionId``.
+
+    v4 has no session object. Rows arrive newest first, so each session's first row gives
+    its most recent trace start (``last_trace_at``); sessions are ordered by it. Scanning
+    stops once one session past the requested page is seen, and raises at the request cap
+    instead of returning an incomplete page.
+    """
+    filters: list[dict[str, Any]] = [
+        {"type": "boolean", "column": "isRootObservation", "operator": "=", "value": True},
+        {"type": "datetime", "column": "startTime", "operator": ">=", "value": _v2_timestamp(from_timestamp)},
+        # The server rejects a null-type condition without value "" (HTTP 400), despite the SDK docs.
+        {"type": "null", "column": "sessionId", "operator": "is not null", "value": ""},
+    ]
+    wanted = page * limit + 1
+    sessions: dict[str, dict[str, Any]] = {}
+    cursor: str | None = None
+    for _ in range(V2_SCAN_MAX_REQUESTS):
+        rows, cursor = _v2_request(method, cursor=cursor, limit=V2_MAX_LIMIT, fields=V2_SESSION_FIELDS, filters=filters)
+        for row in rows:
+            session_id = row.get("session_id") if isinstance(row, dict) else None
+            if not session_id or session_id in sessions:
+                continue
+            sessions[session_id] = {
+                "id": session_id,
+                "last_trace_at": row.get("start_time"),
+                "user_id": row.get("user_id"),
+                "environment": row.get("environment"),
+                "project_id": row.get("project_id"),
+            }
+        if len(sessions) >= wanted or cursor is None:
+            break
+    else:
+        raise RuntimeError(
+            f"{ERR_V2_SCAN_LIMIT}: stopped after {V2_SCAN_MAX_REQUESTS} requests before reaching page {page}. "
+            "Narrow the age window and retry."
+        )
+
+    ordered = list(sessions.values())
+    start = (page - 1) * limit
+    return ordered[start : start + limit], {"next_page": page + 1 if len(ordered) > start + limit else None}
+
+
 def _list_sessions(
     langfuse_client: Any,
     *,
@@ -1167,7 +1626,16 @@ def _list_sessions(
     page: int,
     from_timestamp: datetime,
 ) -> tuple[list[Any], dict[str, Any]]:
-    """Fetch sessions via the Langfuse SDK handling v2/v3 differences."""
+    """Fetch sessions via Observations API v2, falling back to ``GET /sessions`` where v2 is not served."""
+    v2_method = _compat.get_observations_v2_method(langfuse_client)
+    if v2_method is not None:
+        try:
+            return _list_sessions_v2(v2_method, limit=limit or 50, page=page or 1, from_timestamp=from_timestamp)
+        except Exception as exc:
+            if not _route_missing(exc):
+                raise
+            logger.info(f"Observations API v2 not served (HTTP {getattr(exc, 'status_code', None)}); listing sessions via GET /sessions")
+
     if not hasattr(langfuse_client, "api") or not hasattr(langfuse_client.api, "sessions"):
         raise RuntimeError("Unsupported Langfuse client: no session listing method available")
 
@@ -1770,7 +2238,10 @@ async def fetch_traces(
         ),
     ),
 ) -> ResponseDict | str:
-    """Find traces based on filters. All filter parameters are optional."""
+    """Find traces based on filters. All filter parameters are optional.
+
+    On Observations API v2, each trace is built from its root observation; traces without a root observation do not appear.
+    """
     age = validate_age(age)
 
     state = cast(MCPState, ctx.request_context.lifespan_context)
@@ -1863,6 +2334,8 @@ async def fetch_trace(
     ),
 ) -> ResponseDict | str:
     """Get a single trace by ID with full details.
+
+    On Observations API v2, a trace is built from its root observation; a trace with no observations is not found.
 
     Args:
         ctx: Context object containing lifespan context with Langfuse client
@@ -2132,6 +2605,7 @@ def _list_route_decision_records(
         trace_id=trace_id,
         parent_observation_id=None,
         metadata=metadata_filter,
+        expand_metadata=_ROUTE_DECISION_METADATA_KEYS,
     )
     return [_route_decision_from_observation(obs) for obs in observation_items], pagination, metadata_filter
 
