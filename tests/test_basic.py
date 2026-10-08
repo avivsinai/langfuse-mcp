@@ -78,6 +78,58 @@ def test_cli_accepts_no_keys_without_env(monkeypatch):
     assert args.secret_key is None
 
 
+PROFILES_TOML = """
+[profiles.prod]
+host = "https://prod.langfuse.example"
+public_key = "pk-prod"
+secret_key_env = "PROD_LANGFUSE_SECRET"
+
+[profiles.staging]
+host = "https://staging.langfuse.example"
+public_key = "pk-staging"
+secret_key = "sk-staging"
+"""
+
+
+def _isolate_profiles(monkeypatch, tmp_path):
+    """Point profile lookup at tmp_path and clear env values that would override a profile."""
+    for var in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST", "LANGFUSE_MCP_PROFILE"):
+        monkeypatch.delenv(var, raising=False)
+    profiles_file = tmp_path / "profiles.toml"
+    profiles_file.write_text(PROFILES_TOML, encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("LANGFUSE_MCP_PROFILES_FILE", str(profiles_file))
+    return profiles_file
+
+
+def test_cli_profile_supplies_credentials_and_host(monkeypatch, tmp_path):
+    """--profile selects that profile's host and keys, including a secret referenced by env var name."""
+    _isolate_profiles(monkeypatch, tmp_path)
+    monkeypatch.setenv("PROD_LANGFUSE_SECRET", "sk-prod")
+
+    from langfuse_mcp.__main__ import _resolve_args
+
+    args, _, overrides = _resolve_args(["--profile", "prod"])
+
+    assert (args.host, args.public_key, args.secret_key) == ("https://prod.langfuse.example", "pk-prod", "sk-prod")
+    assert overrides == []
+
+
+def test_cli_unknown_profile_names_file_and_available_profiles(monkeypatch, tmp_path, capsys):
+    """An unknown profile exits with an error naming the profiles file and the profiles it defines."""
+    profiles_file = _isolate_profiles(monkeypatch, tmp_path)
+
+    from langfuse_mcp.__main__ import _resolve_args
+
+    with pytest.raises(SystemExit) as exc_info:
+        _resolve_args(["--profile", "nope"])
+
+    assert exc_info.value.code == 2
+    stderr = capsys.readouterr().err
+    assert str(profiles_file) in stderr
+    assert "prod, staging" in stderr
+
+
 def test_package_importable():
     """Test that the package can be imported."""
     # This test verifies the package can be imported
