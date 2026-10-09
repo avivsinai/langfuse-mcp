@@ -32,6 +32,11 @@ from pydantic import AfterValidator, BaseModel, Field
 
 from langfuse_mcp import _compat
 
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover - exercised only on Python 3.10
+    import tomli as tomllib  # pyright: ignore[reportMissingImports]
+
 try:
     from pydantic.fields import FieldInfo
 except ImportError:  # pragma: no cover - pydantic stubbed in tests
@@ -373,8 +378,63 @@ def _load_env_file(env_path: Path | None = None) -> None:
         logger.warning(f"Unable to load environment file {env_path}: {exc}")
 
 
-def _read_env_defaults() -> dict[str, Any]:
-    """Read environment defaults used by the CLI."""
+PROFILE_FIELDS = {"public_key": "LANGFUSE_PUBLIC_KEY", "secret_key": "LANGFUSE_SECRET_KEY", "host": "LANGFUSE_HOST"}
+
+
+class ProfileError(ValueError):
+    """Raised when a named credentials profile cannot be loaded."""
+
+
+def _default_profiles_path() -> Path:
+    """Return the XDG location of the profiles file."""
+    config_home = os.getenv("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(config_home).expanduser() / "langfuse-mcp" / "profiles.toml"
+
+
+def _load_profile(name: str, path: Path) -> dict[str, str]:
+    """Load one named profile from a TOML profiles file.
+
+    Each of ``public_key``, ``secret_key`` and ``host`` is given either literally or as
+    ``<field>_env``, the name of an environment variable that holds the value.
+    """
+    try:
+        with path.open("rb") as profiles_file:
+            data = tomllib.load(profiles_file)
+    except FileNotFoundError:
+        raise ProfileError(f"profile {name!r} requested but profiles file {path} does not exist") from None
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ProfileError(f"cannot read profiles file {path}: {exc}") from exc
+
+    profiles = data.get("profiles")
+    profiles = profiles if isinstance(profiles, dict) else {}
+    profile = profiles.get(name)
+    if not isinstance(profile, dict):
+        available = ", ".join(sorted(profiles)) or "none"
+        raise ProfileError(f"unknown profile {name!r} in {path} (available profiles: {available})")
+
+    allowed = set(PROFILE_FIELDS) | {f"{field_name}_env" for field_name in PROFILE_FIELDS}
+    unknown = sorted(set(profile) - allowed)
+    if unknown:
+        raise ProfileError(f"profile {name!r} in {path} has unknown keys: {', '.join(unknown)} (allowed: {', '.join(sorted(allowed))})")
+
+    resolved: dict[str, str] = {}
+    for field_name in PROFILE_FIELDS:
+        if field_name in profile and f"{field_name}_env" in profile:
+            raise ProfileError(f"profile {name!r} in {path} sets both {field_name} and {field_name}_env")
+        if field_name in profile:
+            resolved[field_name] = str(profile[field_name])
+        elif f"{field_name}_env" in profile:
+            var_name = str(profile[f"{field_name}_env"])
+            value = os.getenv(var_name)
+            if not value:
+                raise ProfileError(f"profile {name!r} in {path}: {field_name}_env names {var_name}, which is not set")
+            resolved[field_name] = value
+    return resolved
+
+
+def _read_env_defaults(profile: dict[str, str] | None = None) -> dict[str, Any]:
+    """Read CLI defaults: environment variables first, then the selected profile, then built-in defaults."""
+    profile = profile or {}
     # Parse timeout with fallback to our default of 30s (SDK defaults to 5s which is too aggressive)
     timeout_str = os.getenv("LANGFUSE_TIMEOUT", "30")
     try:
@@ -382,9 +442,9 @@ def _read_env_defaults() -> dict[str, Any]:
     except ValueError:
         timeout = 30
     return {
-        "public_key": os.getenv("LANGFUSE_PUBLIC_KEY"),
-        "secret_key": os.getenv("LANGFUSE_SECRET_KEY"),
-        "host": os.getenv("LANGFUSE_HOST") or "https://cloud.langfuse.com",
+        "public_key": os.getenv("LANGFUSE_PUBLIC_KEY") or profile.get("public_key"),
+        "secret_key": os.getenv("LANGFUSE_SECRET_KEY") or profile.get("secret_key"),
+        "host": os.getenv("LANGFUSE_HOST") or profile.get("host") or "https://cloud.langfuse.com",
         "timeout": timeout,
         "log_level": os.getenv("LANGFUSE_LOG_LEVEL", "INFO"),
         "log_to_console": os.getenv("LANGFUSE_LOG_TO_CONSOLE", "").lower() in {"1", "true", "yes"},
@@ -392,9 +452,58 @@ def _read_env_defaults() -> dict[str, Any]:
     }
 
 
+def _build_profile_parser() -> argparse.ArgumentParser:
+    """Construct the parser for the options that select a credentials profile."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--profile",
+        type=str,
+        default=os.getenv("LANGFUSE_MCP_PROFILE"),
+        help=(
+            "Named profile from the profiles file that supplies public key, secret key and host. "
+            "CLI flags and LANGFUSE_* environment variables override profile values. Set via LANGFUSE_MCP_PROFILE."
+        ),
+    )
+    parser.add_argument(
+        "--profiles-file",
+        type=str,
+        default=os.getenv("LANGFUSE_MCP_PROFILES_FILE"),
+        help=(
+            "Path of the TOML profiles file (default: $XDG_CONFIG_HOME/langfuse-mcp/profiles.toml, "
+            "or ~/.config/langfuse-mcp/profiles.toml). Set via LANGFUSE_MCP_PROFILES_FILE."
+        ),
+    )
+    return parser
+
+
+def _resolve_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, dict[str, Any], list[str]]:
+    """Parse the CLI with precedence: CLI flags > environment variables > selected profile > defaults.
+
+    Returns the parsed arguments, the defaults they were parsed against, and the names of
+    environment variables that override a value of the selected profile.
+    """
+    profile_args, _ = _build_profile_parser().parse_known_args(argv)
+    profile: dict[str, str] = {}
+    profile_error: ProfileError | None = None
+    if profile_args.profile:
+        path = Path(profile_args.profiles_file).expanduser() if profile_args.profiles_file else _default_profiles_path()
+        try:
+            profile = _load_profile(profile_args.profile, path)
+        except ProfileError as exc:
+            profile_error = exc
+
+    env_defaults = _read_env_defaults(profile)
+    parser = _build_arg_parser(env_defaults)
+    args = parser.parse_args(argv)  # parse first so --help still works when the profile is bad
+    if profile_error is not None:
+        parser.error(str(profile_error))
+    overrides = [var for field_name, var in PROFILE_FIELDS.items() if field_name in profile and os.getenv(var)]
+    return args, env_defaults, overrides
+
+
 def _build_arg_parser(env_defaults: dict[str, Any]) -> argparse.ArgumentParser:
     """Construct the CLI argument parser using provided defaults."""
-    parser = argparse.ArgumentParser(description="Langfuse MCP Server")
+    parser = argparse.ArgumentParser(description="Langfuse MCP Server", parents=[_build_profile_parser()])
     parser.add_argument(
         "--public-key",
         type=str,
@@ -6199,9 +6308,7 @@ def app_factory(
 def main():
     """Entry point for the langfuse_mcp package."""
     _load_env_file()
-    env_defaults = _read_env_defaults()
-    parser = _build_arg_parser(env_defaults)
-    args = parser.parse_args()
+    args, env_defaults, profile_overrides = _resolve_args()
 
     global logger
     logger = configure_logging(args.log_level, args.log_to_console)
@@ -6209,6 +6316,10 @@ def main():
     logger.info(f"Starting Langfuse MCP v{__version__}")
     logger.info(f"Python executable: {sys.executable}")
     logger.info("=" * 80)
+    if args.profile:
+        logger.info(f"Using profile {args.profile!r}")
+    for var in profile_overrides:
+        logger.warning(f"{var} is set in the environment and overrides the value from profile {args.profile!r}")
     logger.info(
         "Environment defaults loaded: %s",
         {k: ("***" if "key" in k else v) for k, v in env_defaults.items()},
