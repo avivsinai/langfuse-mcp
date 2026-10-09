@@ -494,9 +494,9 @@ def _resolve_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, di
 
     env_defaults = _read_env_defaults(profile)
     parser = _build_arg_parser(env_defaults)
+    args = parser.parse_args(argv)  # parse first so --help still works when the profile is bad
     if profile_error is not None:
         parser.error(str(profile_error))
-    args = parser.parse_args(argv)
     overrides = [var for field_name, var in PROFILE_FIELDS.items() if field_name in profile and os.getenv(var)]
     return args, env_defaults, overrides
 
