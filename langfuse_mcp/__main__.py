@@ -480,7 +480,8 @@ def _resolve_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, di
     """Parse the CLI with precedence: CLI flags > environment variables > selected profile > defaults.
 
     Returns the parsed arguments, the defaults they were parsed against, and the names of
-    environment variables that override a value of the selected profile.
+    the winning sources (the CLI flag when given, else the environment variable) that override a value
+    of the selected profile and also have an environment variable set.
     """
     profile_args, _ = _build_profile_parser().parse_known_args(argv)
     profile: dict[str, str] = {}
@@ -497,7 +498,12 @@ def _resolve_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, di
     args = parser.parse_args(argv)  # parse first so --help still works when the profile is bad
     if profile_error is not None:
         parser.error(str(profile_error))
-    overrides = [var for field_name, var in PROFILE_FIELDS.items() if field_name in profile and os.getenv(var)]
+    flags = {token.split("=", 1)[0] for token in (sys.argv[1:] if argv is None else argv) if token.startswith("--")}
+    overrides = []
+    for field_name, var in PROFILE_FIELDS.items():
+        if field_name in profile and os.getenv(var):
+            flag = "--" + field_name.replace("_", "-")
+            overrides.append(flag if flag in flags else var)
     return args, env_defaults, overrides
 
 
@@ -6318,8 +6324,8 @@ def main():
     logger.info("=" * 80)
     if args.profile:
         logger.info(f"Using profile {args.profile!r}")
-    for var in profile_overrides:
-        logger.warning(f"{var} is set in the environment and overrides the value from profile {args.profile!r}")
+    for source in profile_overrides:
+        logger.warning(f"{source} overrides the value from profile {args.profile!r}")
     logger.info(
         "Environment defaults loaded: %s",
         {k: ("***" if "key" in k else v) for k, v in env_defaults.items()},
