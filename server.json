@@ -9,13 +9,13 @@
     "source": "github",
     "id": "952361536"
   },
-  "version": "0.12.1",
+  "version": "0.13.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "langfuse-mcp",
-      "version": "0.12.1",
+      "version": "0.13.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

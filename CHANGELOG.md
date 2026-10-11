@@ -6,11 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.13.0] - 2026-10-11
 ### Added
 - Named profiles for local stdio servers: `langfuse-mcp --profile prod` reads the public key, secret key and host of that project from `$XDG_CONFIG_HOME/langfuse-mcp/profiles.toml` (override with `--profiles-file` or `LANGFUSE_MCP_PROFILES_FILE`; select with `LANGFUSE_MCP_PROFILE`). Register one MCP server per project. Values can be literal or name an environment variable (`secret_key_env`). CLI flags and `LANGFUSE_*` environment variables override profile values. An unknown profile or a missing file stops startup with an error that names the file and the available profiles.
 
 ### Fixed
 - The startup warning for a profile value that is overridden by both a CLI flag and an environment variable names the CLI flag, which wins, instead of the environment variable.
+
 
 ## [0.12.1] - 2026-09-25
 ### Fixed
