@@ -332,3 +332,20 @@ class TestParseBasicAuth:
             with pytest.raises(ValueError) as exc_info:
                 _parse_basic_auth(header)
             assert secret not in str(exc_info.value), f"Secret leaked into error message for header={header!r}"
+
+
+def test_cli_flag_over_env_over_profile_warning_names_cli_flag(monkeypatch, tmp_path):
+    """With a profile host, LANGFUSE_HOST and --host all set, --host wins and the warning names it."""
+    _isolate_profiles(monkeypatch, tmp_path)
+    monkeypatch.setenv("PROD_LANGFUSE_SECRET", "sk-prod")
+    monkeypatch.setenv("LANGFUSE_HOST", "https://env.langfuse.example")
+
+    from langfuse_mcp.__main__ import _resolve_args
+
+    args, _, overrides = _resolve_args(["--profile", "prod", "--host", "https://cli.langfuse.example"])
+    assert args.host == "https://cli.langfuse.example"
+    assert overrides == ["--host"]
+
+    args, _, overrides = _resolve_args(["--profile", "prod"])
+    assert args.host == "https://env.langfuse.example"
+    assert overrides == ["LANGFUSE_HOST"]
