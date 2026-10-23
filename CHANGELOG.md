@@ -6,8 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- **BREAKING**: Require `langfuse>=4.13.1,<6.0.0` (was `>=3.11.2,<5.0.0`). The 0.12.0 upgrade notes already asked for 4.13.1, which has every replacement API this server uses after Langfuse Cloud's 2026-11-16 removals (Observations v2, Scores v3, experiments). Langfuse SDK 3 is no longer supported. CI tests the floor (langfuse 4.13.1 on Python 3.10).
+
 ### Added
-- Support Langfuse Python SDK 5 (`langfuse>=3.11.2,<6.0.0`; SDK 5 needs Python 3.11+). SDK 5 deletes the clients for the routes Langfuse Cloud removes on 2026-11-16 (`api.legacy`, `api.trace.get`/`list`, `api.sessions`, `api.scores_v3`, `api.dataset_run_items`, and `api.datasets.get_runs`/`get_run`/`delete_run`) and serves Scores API v3 from `api.scores.get_many`.
+- Support Langfuse Python SDK 5 (SDK 5 needs Python 3.11+; Python 3.10 keeps SDK 4). SDK 5 deletes the clients for the routes Langfuse Cloud removes on 2026-11-16 (`api.legacy`, `api.trace.get`/`list`, `api.sessions`, `api.scores_v3`, `api.dataset_run_items`, and `api.datasets.get_runs`/`get_run`/`delete_run`) and serves Scores API v3 from `api.scores.get_many`.
 
 ### Fixed
 - With SDK 5, `list_scores_v2`, `get_score_v2`, and `fetch_trace` scores read Scores API v3 through `api.scores.get_many` instead of calling it with v2 `page` arguments.
