@@ -1944,3 +1944,66 @@ class FakeContext:
     def __init__(self, state: Any) -> None:
         """Expose the minimal request context consumed by tool implementations."""
         self.request_context = type("_RC", (), {"lifespan_context": state})
+
+
+class _TraceV5API:
+    """Fake SDK 5 ``api.trace``: only the delete routes remain (``get``/``list`` were removed)."""
+
+    def __init__(self, store: FakeDataStore) -> None:
+        """Delegate deletes to the v3/v4 fake so stores stay consistent."""
+        self._inner = _TraceAPI(store)
+
+    @property
+    def delete_multiple_calls(self) -> list[list[str]]:
+        """Expose the recorded batch deletes."""
+        return self._inner.delete_multiple_calls
+
+    def delete_multiple(self, *, trace_ids: list[str]) -> dict[str, str]:
+        """Delete trace data as the v4 batch endpoint does."""
+        return self._inner.delete_multiple(trace_ids=trace_ids)
+
+
+class _ScoresV5API(_ScoresV3API):
+    """Fake SDK 5 ``api.scores``: Scores API v3 under ``get_many``; no ``get_by_id`` or page-based reads."""
+
+    get_many = _ScoresV3API.get_many_v3
+
+
+class _DatasetsV5API:
+    """Fake SDK 5 ``api.datasets``: ``get_runs``/``get_run``/``delete_run`` were removed."""
+
+    def __init__(self, store: FakeDataStore) -> None:
+        """Delegate the surviving dataset methods to the shared fake."""
+        self._inner = _DatasetsAPI(store)
+        self.list = self._inner.list
+        self.get = self._inner.get
+        self.create = self._inner.create
+
+
+class FakeAPIV5:
+    """Aggregate object exposed via FakeLangfuseV5.api — the SDK 5 surface.
+
+    Mirrors langfuse 5.0.x: no ``legacy``, ``sessions``, ``scores_v3`` or ``dataset_run_items``
+    namespaces; ``trace`` keeps only deletes; ``datasets`` lost the run helpers; ``scores.get_many``
+    reads Scores API v3.
+    """
+
+    def __init__(self, store: FakeDataStore) -> None:
+        """Wire the SDK 5 resources to the shared store."""
+        self.trace = _TraceV5API(store)
+        self.observations = _ObservationsV4API(store)
+        self.prompts = _PromptsAPI(store)
+        self.scores = _ScoresV5API(store)
+        self.datasets = _DatasetsV5API(store)
+        self.experiments = _ExperimentsAPI(store)
+        self.annotation_queues = _AnnotationQueuesV4API(store)
+        self.metrics = _MetricsV2API(store)
+
+
+class FakeLangfuseV5(FakeLangfuseV4):
+    """Langfuse client double exposing the SDK 5 API surface (see ``FakeAPIV5``)."""
+
+    def __init__(self) -> None:
+        """Initialise the fake v5 client with in-memory storage and the v5 API facade."""
+        super().__init__()
+        self.api = FakeAPIV5(self._store)  # type: ignore[assignment]

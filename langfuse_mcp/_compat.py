@@ -76,13 +76,27 @@ def get_score_namespace(client: Any) -> Any | None:
     return getattr(api, "scores", None) or getattr(api, "score_v_2", None)
 
 
-def get_score_list_method(scores_namespace: Any) -> Any | None:
-    """Return the list-many callable on a score namespace.
+def _is_scores_v3_get_many(method: Any) -> bool:
+    """Return True when ``method`` is SDK 5's ``api.scores.get_many``, which calls Scores API v3.
 
-    v4 exposes ``get_many``; v3 exposes ``get`` (singular). Returns ``None``
-    when neither is present, so callers can degrade gracefully.
+    SDK 5 removed the v2 score reads and moved Scores API v3 from ``scores_v3.get_many_v3``
+    to ``scores.get_many``. The two ``get_many`` shapes differ by pagination: v2 is
+    page-based (``page``), v3 is cursor-based (``cursor``).
     """
-    return getattr(scores_namespace, "get_many", None) or getattr(scores_namespace, "get", None)
+    return callable(method) and method_has_param(method, "cursor") is True and method_has_param(method, "page") is False
+
+
+def get_score_list_method(scores_namespace: Any) -> Any | None:
+    """Return the v2 (page-based) list-many callable on a score namespace.
+
+    v4 exposes ``get_many``; v3 exposes ``get`` (singular). SDK 5's ``get_many`` reads
+    Scores API v3 instead and is not returned here. Returns ``None`` when no v2 list
+    method is present, so callers can degrade gracefully.
+    """
+    method = getattr(scores_namespace, "get_many", None)
+    if method is not None and _is_scores_v3_get_many(method):
+        return None
+    return method or getattr(scores_namespace, "get", None)
 
 
 def _metrics_routes(client: Any) -> tuple[Callable[..., Any] | None, Callable[..., Any] | None]:
@@ -254,10 +268,36 @@ def get_observations_v2_method(client: Any) -> Callable[..., Any] | None:
 
 
 def get_scores_v3_method(client: Any) -> Callable[..., Any] | None:
-    """Return ``client.api.scores_v3.get_many_v3`` (SDK 4.8.1+), or ``None``."""
+    """Return the Scores API v3 list callable, or ``None``.
+
+    - SDK 4.8.1+: ``client.api.scores_v3.get_many_v3``.
+    - SDK 5: ``client.api.scores.get_many`` (cursor-based; ``scores_v3`` was removed).
+    """
     api = getattr(client, "api", None)
-    scores_v3 = getattr(api, "scores_v3", None) if api is not None else None
-    return getattr(scores_v3, "get_many_v3", None) if scores_v3 is not None else None
+    if api is None:
+        return None
+    scores_v3 = getattr(api, "scores_v3", None)
+    method = getattr(scores_v3, "get_many_v3", None) if scores_v3 is not None else None
+    if method is not None:
+        return method
+    scores = getattr(api, "scores", None)
+    method = getattr(scores, "get_many", None) if scores is not None else None
+    return method if method is not None and _is_scores_v3_get_many(method) else None
+
+
+def get_sdk_method(client: Any, path: str) -> Callable[..., Any] | None:
+    """Return the callable at dotted ``path`` under ``client.api``, or ``None`` when absent.
+
+    SDK 5 deleted the legacy resources outright (``api.legacy``, ``api.trace.get``/``list``,
+    ``api.sessions``, ``api.dataset_run_items``, ``api.datasets.get_runs``/``get_run``/
+    ``delete_run``). Callers treat ``None`` like a 404/405 from a removed route.
+    """
+    node: Any = getattr(client, "api", None)
+    for part in path.split("."):
+        if node is None:
+            return None
+        node = getattr(node, part, None)
+    return node if callable(node) else None
 
 
 def get_experiments_methods(client: Any) -> tuple[Callable[..., Any], Callable[..., Any]] | None:

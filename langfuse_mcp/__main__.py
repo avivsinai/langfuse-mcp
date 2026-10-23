@@ -841,8 +841,40 @@ _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
 
 def _route_missing(exc: Exception) -> bool:
-    """Return True when the server does not serve the route (404/405), e.g. self-hosted Langfuse v3 without v2."""
+    """Return True when the server does not serve the route (404/405), e.g. self-hosted Langfuse v3 without v2.
+
+    Also True for ``LegacyRouteUnavailableError``: the installed SDK (Langfuse Python SDK 5) no
+    longer has a client method for the route, which callers handle like a removed route.
+    """
     return getattr(exc, "status_code", None) in (404, 405)
+
+
+class LegacyRouteUnavailableError(RuntimeError):
+    """The installed Langfuse SDK has no client method for a legacy route.
+
+    Langfuse Python SDK 5 deleted the clients for the routes Langfuse Cloud removes on
+    2026-11-16 (``api.trace.get``/``list``, ``api.sessions``, ``api.dataset_run_items``,
+    ``api.datasets.get_runs``/``get_run``/``delete_run``, ``api.legacy``). ``status_code`` is
+    404 so the existing route-removed handling applies unchanged.
+    """
+
+    status_code = 404
+
+    def __init__(self, path: str) -> None:
+        """Name the missing ``client.api`` method."""
+        super().__init__(
+            f"The installed Langfuse SDK has no api.{path}: Langfuse Python SDK 5 removed the legacy routes "
+            "(Langfuse Cloud removes them on 2026-11-16)"
+        )
+        self.path = path
+
+
+def _legacy_route(client: Any, path: str) -> Callable[..., Any]:
+    """Return the legacy SDK method at ``client.api.<path>``, or raise ``LegacyRouteUnavailableError``."""
+    method = _compat.get_sdk_method(client, path)
+    if method is None:
+        raise LegacyRouteUnavailableError(path)
+    return method
 
 
 def _parse_io_text(value: Any) -> Any:
@@ -1136,7 +1168,7 @@ def _list_traces(
 
     list_kwargs = {k: v for k, v in list_kwargs.items() if v is not None}
 
-    response = langfuse_client.api.trace.list(**list_kwargs)
+    response = _legacy_route(langfuse_client, "trace.list")(**list_kwargs)
     items, pagination = _extract_items_from_response(response)
 
     if metadata:
@@ -1739,11 +1771,12 @@ def _get_trace(langfuse_client: Any, trace_id: str, include_observations: bool) 
         "additional_query_parameters": {"fields": fields},
         "timeout_in_seconds": TRACE_GET_TIMEOUT_SECONDS,
     }
+    trace_get = _legacy_route(langfuse_client, "trace.get")
     try:
-        return langfuse_client.api.trace.get(trace_id=trace_id, request_options=request_options)
+        return trace_get(trace_id=trace_id, request_options=request_options)
     except TypeError:
         # Older SDK without request_options support: fall back to a plain get().
-        return langfuse_client.api.trace.get(trace_id=trace_id)
+        return trace_get(trace_id=trace_id)
 
 
 def _list_sessions_v2(method: Callable[..., Any], *, limit: int, page: int, from_timestamp: datetime) -> tuple[list[Any], dict[str, Any]]:
@@ -1816,7 +1849,7 @@ def _list_sessions(
     }
     list_kwargs = {k: v for k, v in list_kwargs.items() if v is not None}
 
-    response = langfuse_client.api.sessions.list(**list_kwargs)
+    response = _legacy_route(langfuse_client, "sessions.list")(**list_kwargs)
     return _extract_items_from_response(response)
 
 
@@ -4938,7 +4971,7 @@ async def list_dataset_runs(
                 }
 
         try:
-            response = client.api.datasets.get_runs(dataset_name, page=page, limit=limit)
+            response = _legacy_route(client, "datasets.get_runs")(dataset_name, page=page, limit=limit)
         except Exception as exc:
             _legacy_experiment_read_error(exc, has_probe=methods is not None)
         items, pagination = _extract_items_from_response(response)
@@ -5004,7 +5037,7 @@ async def get_dataset_run(
                 legacy_needed = True
         if legacy_needed:
             try:
-                result = _sdk_object_to_python(client.api.datasets.get_run(dataset_name, run_name))
+                result = _sdk_object_to_python(_legacy_route(client, "datasets.get_run")(dataset_name, run_name))
             except Exception as exc:
                 _legacy_experiment_read_error(exc, has_probe=methods is not None)
         if not result:
@@ -5076,7 +5109,7 @@ async def list_dataset_run_items(
                 pagination = {"total": None, "next_page": page + 1 if cursor else None}
         if legacy_needed:
             try:
-                response = client.api.dataset_run_items.list(dataset_id=dataset_id, run_name=run_name, page=page, limit=limit)
+                response = _legacy_route(client, "dataset_run_items.list")(dataset_id=dataset_id, run_name=run_name, page=page, limit=limit)
             except Exception as exc:
                 _legacy_experiment_read_error(exc, has_probe=methods is not None)
             items, pagination = _extract_items_from_response(response)
@@ -5148,7 +5181,7 @@ async def create_dataset_run_item(
         client = _resolve_client(state, ctx)
         try:
             response = _compat.call_with_request_or_kwargs(
-                client.api.dataset_run_items.create,
+                _legacy_route(client, "dataset_run_items.create"),
                 lambda: _build_create_dataset_run_item_request(**body_kwargs),
                 **body_kwargs,
             )
@@ -5210,7 +5243,7 @@ async def delete_dataset_run(
         if not isinstance(delete_traces, bool):
             raise TypeError("delete_traces must be a boolean")
         try:
-            response = client.api.datasets.delete_run(dataset_name, run_name)
+            response = _legacy_route(client, "datasets.delete_run")(dataset_name, run_name)
         except Exception as exc:
             if not _route_missing(exc):
                 raise
@@ -5796,6 +5829,12 @@ async def list_scores_v2(
             raise RuntimeError("Unsupported Langfuse client: no scores namespace exposed")
         list_method = _compat.get_score_list_method(scores_namespace)
         if list_method is None:
+            if v3_method is not None and (user_id or trace_tags):
+                raise RuntimeError(
+                    f"{ERR_SCORES_V2_ONLY_FILTER}: user_id and trace_tags need GET /v2/scores, which the installed "
+                    "Langfuse SDK no longer exposes (Python SDK 5 removed it; Langfuse Cloud removes the route on "
+                    "2026-11-16). Filter by trace_id or session_id instead."
+                )
             raise RuntimeError("Unsupported Langfuse client: scores namespace exposes no list method")
 
         try:
