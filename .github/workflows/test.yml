@@ -15,14 +15,17 @@ concurrency:
 
 jobs:
   test:
-    name: Test
+    # Rows without a pinned SDK keep the "Test (<python>)" names that branch protection requires.
+    name: ${{ matrix.langfuse-version && format('Test ({0}, langfuse {1})', matrix.python-version, matrix.langfuse-version) || format('Test ({0})', matrix.python-version) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       matrix:
         python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        # '' installs the newest SDK the pin allows.
+        langfuse-version: ['']
         include:
-          # Test the declared floor of the langfuse pin, not only the newest SDK the pin allows.
+          # An extra row at the declared floor of the langfuse pin.
           - python-version: '3.10'
             langfuse-version: '4.13.1'
 
