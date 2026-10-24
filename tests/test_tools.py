@@ -754,7 +754,7 @@ def test_error_scan_finds_non_span_error_observation(observation_state):
     count = asyncio.run(get_error_count(ctx, age=60))
     assert count["data"]["observation_count"] == 1
     assert count["data"]["trace_count"] == 1
-    assert count["data"]["exception_count"] is None
+    assert count["data"]["exception_count"] == 1
     assert count["metadata"]["count_basis"] == "error_level_observations"
 
 
@@ -1364,3 +1364,54 @@ def test_normalize_field_default_resolves_like_pydantic(field_kwargs, expected):
     field = Field(**field_kwargs) if field_kwargs else Field(...)
     assert _normalize_field_default(field) == expected
     assert _normalize_field_default("explicit") == "explicit"
+
+
+@pytest.mark.parametrize("error_count", [0, 3, 55])
+def test_error_count_matches_exception_scan_for_the_same_window(observation_state, monkeypatch, error_count):
+    """Count every error observation, including groups beyond the top-50 response."""
+    import langfuse_mcp.__main__ as server
+
+    fixed_now = datetime(2026, 10, 24, 5, 0, tzinfo=timezone.utc)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
+
+    monkeypatch.setattr(server, "datetime", FrozenDatetime)
+    client = observation_state.langfuse_client
+    for index in range(error_count):
+        _seed_error_observation(
+            client._store,
+            obs_id=f"count_error_{index}",
+            trace_id=f"trace_{index % 2}",
+            metadata={"exception.type": f"Error{index}"},
+        )
+    _seed_error_observation(client._store, obs_id="not_an_error", level="WARNING", status_message="warning only")
+    for observation in client._store.observations.values():
+        observation.start_time = fixed_now - timedelta(minutes=1)
+        observation.end_time = fixed_now - timedelta(minutes=1)
+    windows = []
+    original_scan = server._scan_error_observations
+
+    def record_scan(client, **kwargs):
+        windows.append((kwargs["from_start_time"], kwargs["to_start_time"]))
+        return original_scan(client, **kwargs)
+
+    monkeypatch.setattr(server, "_scan_error_observations", record_scan)
+    ctx = FakeContext(observation_state)
+    grouped = asyncio.run(server.find_exceptions(ctx, age=60, group_by="type"))
+    count = asyncio.run(server.get_error_count(ctx, age=60))
+
+    assert windows == [(fixed_now - timedelta(minutes=60), fixed_now)] * 2
+    assert count["data"]["exception_count"] == grouped["metadata"]["observation_count"] == error_count
+    assert count["data"]["observation_count"] == error_count
+    assert count["data"]["trace_count"] == min(error_count, 2)
+    assert count["data"]["from_timestamp"] == windows[0][0].isoformat()
+    assert count["data"]["to_timestamp"] == fixed_now.isoformat()
+    assert count["metadata"]["count_basis"] == grouped["metadata"]["count_basis"] == "error_level_observations"
+    if error_count <= 50:
+        assert count["data"]["exception_count"] == sum(group["count"] for group in grouped["data"])
+    else:
+        assert len(grouped["data"]) == 50
+        assert count["data"]["exception_count"] > sum(group["count"] for group in grouped["data"])

@@ -23,6 +23,7 @@ from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from threading import Lock
 from typing import Annotated, Any, Literal, cast
 
 from cachetools import LRUCache
@@ -1508,6 +1509,14 @@ def _scan_error_observations(
         f"{ERROR_SCAN_PAGE_SIZE} observations and more data remains. Narrow the age window or filter "
         "by trace_id and retry."
     )
+
+
+def _scan_recent_error_observations(langfuse_client: Any, age: int) -> tuple[list[dict[str, Any]], datetime, datetime]:
+    """Scan errors using the same frozen lookback window for exception tools."""
+    to_timestamp = datetime.now(timezone.utc)
+    from_timestamp = to_timestamp - timedelta(minutes=age)
+    observations = _scan_error_observations(langfuse_client, from_start_time=from_timestamp, to_start_time=to_timestamp)
+    return observations, from_timestamp, to_timestamp
 
 
 STRING_METADATA_KEYS = frozenset(
@@ -3484,16 +3493,8 @@ async def find_exceptions(
 
     age = validate_age(age)
 
-    # Calculate from_timestamp based on age
-    from_timestamp = datetime.now(timezone.utc) - timedelta(minutes=age)
-    to_timestamp = datetime.now(timezone.utc)
-
     try:
-        error_observations = _scan_error_observations(
-            _resolve_client(state, ctx),
-            from_start_time=from_timestamp,
-            to_start_time=to_timestamp,
-        )
+        error_observations, _, _ = _scan_recent_error_observations(_resolve_client(state, ctx), age)
 
         # Process observations to find and group errors by recorded metadata
         exception_groups: Counter = Counter()
@@ -3732,23 +3733,15 @@ async def get_error_count(
 
     Returns:
         Dictionary with error statistics: trace_count (distinct traces), observation_count
-        (error-level observations), and exception_count (always null — individual exception
-        events are not retrievable from the standard observation listing; see metadata.note).
+        (error-level observations), and exception_count (the same error-observation total
+        as find_exceptions, not a count of individual exception events; see metadata.note).
     """
     state = cast(MCPState, ctx.request_context.lifespan_context)
 
     age = validate_age(age)
 
-    # Calculate from_timestamp based on age
-    from_timestamp = datetime.now(timezone.utc) - timedelta(minutes=age)
-    to_timestamp = datetime.now(timezone.utc)
-
     try:
-        error_observations = _scan_error_observations(
-            _resolve_client(state, ctx),
-            from_start_time=from_timestamp,
-            to_start_time=to_timestamp,
-        )
+        error_observations, from_timestamp, to_timestamp = _scan_recent_error_observations(_resolve_client(state, ctx), age)
 
         # Count distinct traces and error-level observations
         trace_ids_with_errors = {obs.get("trace_id") for obs in error_observations if obs.get("trace_id")}
@@ -3759,7 +3752,7 @@ async def get_error_count(
             "to_timestamp": to_timestamp.isoformat(),
             "trace_count": len(trace_ids_with_errors),
             "observation_count": len(error_observations),
-            "exception_count": None,
+            "exception_count": len(error_observations),
         }
 
         logger.info(f"Found {len(error_observations)} error-level observations across {len(trace_ids_with_errors)} traces")
@@ -3770,9 +3763,7 @@ async def get_error_count(
                 "file_info": None,
                 "count_basis": "error_level_observations",
                 "note": (
-                    "exception_count is unavailable: individual exception events are not "
-                    "retrievable from the standard observation listing; observation_count "
-                    "counts error-level observations, not exception events"
+                    "exception_count counts error-level observations on the same basis as find_exceptions, not individual exception events"
                 ),
             },
         }
@@ -5923,6 +5914,19 @@ METRICS_HIGH_CARDINALITY_DIMENSIONS = {"id", "traceId", "userId", "sessionId", "
 DEFAULT_METRICS_LOOKBACK_MINUTES = 1440  # 24h, used when neither age nor from_timestamp is supplied
 
 
+_metrics_fallback_log_lock = Lock()
+_metrics_fallback_logged = False
+
+
+def _log_metrics_fallback_once() -> None:
+    """Report use of legacy metrics at most once per process."""
+    global _metrics_fallback_logged
+    with _metrics_fallback_log_lock:
+        if not _metrics_fallback_logged:
+            _metrics_fallback_logged = True
+            logger.info("v2 metrics unavailable; using legacy /api/public/metrics")
+
+
 @_normalize_tool_fields
 async def query_metrics(
     ctx: Context,
@@ -6076,7 +6080,7 @@ async def query_metrics(
         raise RuntimeError("This Langfuse SDK does not expose a metrics endpoint.")
     method, endpoint_mode = resolved
     if endpoint_mode == "legacy":
-        logger.warning("v2 metrics endpoint unavailable; using legacy /api/public/metrics")
+        _log_metrics_fallback_once()
 
     query_json = json.dumps(query)
     try:
@@ -6088,7 +6092,7 @@ async def query_metrics(
         # so retry legacy on a v2 404 when it is available rather than failing closed.
         legacy_method = _compat.get_legacy_metrics_method(client) if endpoint_mode == "v2" else None
         if status == 404 and legacy_method is not None:
-            logger.warning("v2 metrics returned 404 (Cloud-only); retrying legacy /api/public/metrics")
+            _log_metrics_fallback_once()
             raw = legacy_method(query=query_json)
             endpoint_mode = "legacy"
         elif status == 404:

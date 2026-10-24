@@ -100,21 +100,13 @@ def get_score_list_method(scores_namespace: Any) -> Any | None:
 
 
 def _metrics_routes(client: Any) -> tuple[Callable[..., Any] | None, Callable[..., Any] | None]:
-    """Return ``(v2_callable, legacy_callable)`` for the metrics endpoint; either may be ``None``.
+    """Return v2 and legacy metrics callables exposed by the SDK.
 
-    The v2/legacy split moved namespace between SDK 3 and SDK 4:
-
-    - SDK 3.11.2+: v2 is ``client.api.metrics_v_2.metrics`` (``GET /api/public/v2/metrics``);
-      legacy is ``client.api.metrics.metrics`` (``GET /api/public/metrics``).
-    - SDK 4: v2 moved to the plain ``client.api.metrics.metrics`` name — despite the name,
-      it calls ``GET /api/public/v2/metrics`` (verified against SDK 4.15.4's raw client and
-      its own "V2 endpoint with optimized performance" docstring); legacy moved to
-      ``client.api.legacy.metrics_v1.metrics`` (``GET /api/public/metrics``).
-
-    Branching is on attribute presence — an SDK-3-shaped ``metrics_v_2`` namespace vs. an
-    SDK-4-shaped ``legacy.metrics_v1`` namespace — never a sniffed version string. Both
-    callables accept ``query=<json string>``; presence says nothing about the server, since
-    the v2 *HTTP* endpoint is Langfuse Cloud-only and can 404 on self-hosted at call time.
+    SDK 3 exposes v2 at ``api.metrics_v_2.metrics`` and legacy at
+    ``api.metrics.metrics``. Supported SDK 4.13.1+ and SDK 5 expose v2 at
+    ``api.metrics.metrics``. SDK 4 additionally exposes legacy at
+    ``api.legacy.metrics_v1.metrics``; SDK 5 removes that namespace, so its
+    presence must not be required to recognize the v2 route.
     """
     api = getattr(client, "api", None)
     if api is None:
@@ -127,27 +119,19 @@ def _metrics_routes(client: Any) -> tuple[Callable[..., Any] | None, Callable[..
         legacy = legacy_namespace.metrics if legacy_namespace is not None and hasattr(legacy_namespace, "metrics") else None
         return v2_namespace.metrics, legacy
 
+    v2_namespace = getattr(api, "metrics", None)
+    v2 = getattr(v2_namespace, "metrics", None)
     legacy_api = getattr(api, "legacy", None)
-    metrics_v1_namespace = getattr(legacy_api, "metrics_v1", None) if legacy_api is not None else None
-    if metrics_v1_namespace is not None and hasattr(metrics_v1_namespace, "metrics"):
-        # SDK 4 layout: legacy is legacy.metrics_v1, v2 is the plain metrics namespace.
-        v2_namespace = getattr(api, "metrics", None)
-        v2 = v2_namespace.metrics if v2_namespace is not None and hasattr(v2_namespace, "metrics") else None
-        return v2, metrics_v1_namespace.metrics
-
-    # Neither SDK-3 nor SDK-4 markers are present. A bare ``api.metrics`` is the only
-    # endpoint this ambiguous/older shape offers; treat it as legacy rather than guessing
-    # it is the Cloud-only v2 route.
-    legacy_namespace = getattr(api, "metrics", None)
-    legacy = legacy_namespace.metrics if legacy_namespace is not None and hasattr(legacy_namespace, "metrics") else None
-    return None, legacy
+    metrics_v1_namespace = getattr(legacy_api, "metrics_v1", None)
+    legacy = getattr(metrics_v1_namespace, "metrics", None)
+    return v2 if callable(v2) else None, legacy if callable(legacy) else None
 
 
 def get_metrics_method(client: Any) -> tuple[Callable[..., Any], Literal["v2", "legacy"]] | None:
     """Return ``(callable, mode)`` for the metrics query endpoint, or ``None``.
 
     Prefers v2 over legacy; see ``_metrics_routes`` for how each is located across SDK 3
-    and SDK 4. Both accept ``query=<json string>``.
+    and SDK 4/5. Both accept ``query=<json string>``.
     """
     v2, legacy = _metrics_routes(client)
     if v2 is not None:
