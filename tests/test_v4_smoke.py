@@ -8,7 +8,7 @@ Skipped unless the standard Langfuse credentials are present in the
 environment (``LANGFUSE_PUBLIC_KEY``, ``LANGFUSE_SECRET_KEY``, optional
 ``LANGFUSE_HOST`` defaulting to ``https://cloud.langfuse.com``).
 
-The smoke also requires ``langfuse>=4.0.0,<5.0.0`` to be installed —
+The smoke also requires ``langfuse>=4.0.0,<6.0.0`` to be installed —
 exercising it against the v3 SDK only re-tests the v3 path the rest of
 the suite already covers. With v3 installed (or v4 missing entirely) the
 ``_require_v4_sdk`` skip fires.
@@ -16,7 +16,7 @@ the suite already covers. With v3 installed (or v4 missing entirely) the
 Run against a v4 venv::
 
     uv venv --python 3.11 .venv-v4
-    uv pip install --python .venv-v4/bin/python -e ".[dev]" "langfuse>=4.0.0,<5.0.0"
+    uv pip install --python .venv-v4/bin/python -e ".[dev]" "langfuse>=4.0.0,<6.0.0"
     LANGFUSE_PUBLIC_KEY=... LANGFUSE_SECRET_KEY=... \
         .venv-v4/bin/python -m pytest tests/test_v4_smoke.py -m integration -v -s
 
@@ -98,7 +98,7 @@ def _require_v4_sdk() -> str:
         pytest.skip(
             f"This smoke targets v4 SDK behavior (legacy.observations_v1 fallback, scores.get_many, "
             f"annotation_queue direct-kwargs). Installed `langfuse=={sdk_version}` is v{major}; "
-            f"install langfuse>=4.0.0,<5.0.0 to run."
+            f"install langfuse>=4.0.0,<6.0.0 to run."
         )
     return sdk_version
 
@@ -170,7 +170,9 @@ def test_dispatcher_paths_against_live_sdk(tmp_path, capsys):
     assert score_ns is not None, "Both api.scores and api.score_v_2 missing"
     assert v2_method is not None, "No Observations API v2 method with cursor + filter found"
     assert list_method is not None, "No observation list endpoint found"
-    assert fetcher is not None, "No observation single-fetch endpoint found"
+    if int(sdk_version.split(".", 1)[0]) < 5:
+        # SDK 5 deleted the legacy single-observation client; reads use Observations API v2 only.
+        assert fetcher is not None, "No observation single-fetch endpoint found"
 
 
 # ---------- Read smoke (always safe — no writes) ----------
@@ -209,9 +211,16 @@ def _forbid_removed_read_routes(state, monkeypatch: pytest.MonkeyPatch) -> None:
     ``api.legacy.observations_v1`` so only Observations API v2 can serve the reads.
     """
     api = state.langfuse_client.api
-    targets = [(api.trace, ("list", "get")), (api.sessions, ("list", "get")), (api.legacy.observations_v1, ("get", "get_many"))]
+    legacy = getattr(api, "legacy", None)
+    targets = [
+        (api.trace, ("list", "get")),
+        (getattr(api, "sessions", None), ("list", "get")),
+        (getattr(legacy, "observations_v1", None), ("get", "get_many")),
+    ]
     for namespace, methods in targets:
         for method in methods:
+            if namespace is None or not hasattr(type(namespace), method):
+                continue  # SDK 5 deleted this client, so no read can reach the route.
 
             def removed(*args: Any, _name: str = f"{type(namespace).__name__}.{method}", **kwargs: Any) -> Any:
                 raise AssertionError(f"{_name} calls a route removed on 2026-11-16")

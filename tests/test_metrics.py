@@ -212,7 +212,7 @@ def test_get_metrics_method_prefers_v2_then_legacy_then_none():
     method, mode = _compat.get_metrics_method(both)
     assert mode == "v2"
 
-    legacy_only = SimpleNamespace(api=SimpleNamespace(metrics=_Ns()))
+    legacy_only = SimpleNamespace(api=SimpleNamespace(legacy=SimpleNamespace(metrics_v1=_Ns())))
     method, mode = _compat.get_metrics_method(legacy_only)
     assert mode == "legacy"
 
@@ -356,3 +356,108 @@ def test_query_metrics_rejects_bad_order_by_direction(tmp_path):
                 order_by=[{"field": "count", "direction": "upward"}],
             )
         )
+
+
+def test_query_metrics_uses_sdk5_v2_without_legacy_namespace(tmp_path, caplog):
+    """Recognize SDK 5's v2 route without relying on its removed legacy namespace."""
+    import logging
+
+    from langfuse_mcp.__main__ import query_metrics
+
+    client = FakeLangfuseV4()
+    del client.api.legacy
+    caplog.set_level(logging.INFO, logger="langfuse_mcp")
+    result = asyncio.run(
+        query_metrics(FakeContext(_state(tmp_path, client)), view="observations", metrics=[{"measure": "count", "aggregation": "count"}])
+    )
+    assert result["metadata"]["metrics_endpoint"] == "v2"
+    assert client.api.metrics.last_query is not None
+    assert not any(record.levelno >= logging.WARNING or "v2 metrics unavailable" in record.message for record in caplog.records)
+
+
+@pytest.mark.parametrize("v2_status", [None, 404])
+def test_query_metrics_legacy_only_logs_fallback_once(tmp_path, monkeypatch, caplog, v2_status):
+    """Use an exposed legacy-only route and report the fallback once per process."""
+    import logging
+
+    import langfuse_mcp.__main__ as server
+
+    monkeypatch.setattr(server, "_metrics_fallback_logged", False)
+    caplog.set_level(logging.INFO, logger="langfuse_mcp")
+    client = FakeLangfuseV4()
+    attempted_queries = []
+    if v2_status is None:
+        del client.api.metrics
+    else:
+
+        class ApiError(Exception):
+            status_code = v2_status
+
+        def unavailable(*, query):
+            attempted_queries.append(query)
+            raise ApiError()
+
+        monkeypatch.setattr(client.api.metrics, "metrics", unavailable)
+    ctx = FakeContext(_state(tmp_path, client))
+    for _ in range(2):
+        result = asyncio.run(server.query_metrics(ctx, view="observations", metrics=[{"measure": "count", "aggregation": "count"}]))
+        assert result["metadata"]["metrics_endpoint"] == "legacy"
+    assert client.api.legacy.metrics_v1.last_query is not None
+    if attempted_queries:
+        assert client.api.legacy.metrics_v1.last_query == attempted_queries[-1]
+        assert len(attempted_queries) == 2
+    notices = [record for record in caplog.records if "v2 metrics unavailable" in record.message]
+    assert len(notices) == 1
+    assert notices[0].levelno == logging.INFO
+    assert not any(record.levelno >= logging.WARNING for record in caplog.records)
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 429, 500])
+def test_query_metrics_does_not_fall_back_for_non_404(tmp_path, monkeypatch, status):
+    """Propagate non-404 v2 errors instead of masking them with a legacy request."""
+    from langfuse_mcp.__main__ import query_metrics
+
+    class ApiError(Exception):
+        status_code = status
+
+    client = FakeLangfuseV4()
+
+    def fail(*, query):
+        raise ApiError()
+
+    monkeypatch.setattr(client.api.metrics, "metrics", fail)
+    with pytest.raises(ApiError):
+        asyncio.run(
+            query_metrics(
+                FakeContext(_state(tmp_path, client)), view="observations", metrics=[{"measure": "count", "aggregation": "count"}]
+            )
+        )
+    assert client.api.legacy.metrics_v1.last_query is None
+
+
+def test_real_sdk_metrics_dispatch_uses_v2_transport_without_network():
+    """Verify the installed SDK's generated client reaches the v2 HTTP path offline."""
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent("""\
+        from types import SimpleNamespace
+        import httpx
+        from langfuse.api.client import LangfuseAPI
+        from langfuse_mcp import _compat
+
+        paths = []
+        def respond(request):
+            paths.append(request.url.path)
+            return httpx.Response(200, json={"data": []})
+
+        with httpx.Client(transport=httpx.MockTransport(respond), trust_env=False) as transport:
+            api = LangfuseAPI(base_url="https://metrics.test", httpx_client=transport)
+            method, mode = _compat.get_metrics_method(SimpleNamespace(api=api))
+            assert mode == "v2", mode
+            method(query="{}")
+        assert paths == ["/api/public/v2/metrics"], paths
+    """)
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
