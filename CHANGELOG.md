@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.14.0] - 2026-10-25
 ### Changed
 - **BREAKING**: Require `langfuse>=4.13.1,<6.0.0` (was `>=3.11.2,<5.0.0`). The 0.12.0 upgrade notes already asked for 4.13.1, which has every replacement API this server uses after Langfuse Cloud's 2026-11-16 removals (Observations v2, Scores v3, experiments). Langfuse SDK 3 is no longer supported. CI tests the floor (langfuse 4.13.1 on Python 3.10).
 
@@ -16,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - With SDK 5, `list_scores_v2`, `get_score_v2`, and `fetch_trace` scores read Scores API v3 through `api.scores.get_many` instead of calling it with v2 `page` arguments.
 - With SDK 5, `create_dataset_run_item` raises `ERR_LANGFUSE_RUN_ITEM_CREATE_REMOVED`, and `delete_dataset_run` requires `delete_traces=True`, instead of failing with `AttributeError`.
 - With SDK 5, a fallback to a legacy route on a server without the v2 API raises an error that names the missing SDK method, instead of `AttributeError`. `list_scores_v2` with `user_id` or `trace_tags` raises `ERR_LANGFUSE_SCORES_V2_ONLY_FILTER`, because SDK 5 has no v2 score reader.
+
 
 ## [0.13.0] - 2026-10-11
 ### Added
