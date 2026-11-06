@@ -37,7 +37,7 @@ uv run -m ruff check --fix .
 
 ## Release Contract
 
-- Release from `main` only through `./scripts/release.sh X.Y.Z` and the resulting release PR; do not create manual tags, GitHub releases, or ad hoc release uploads.
+- Release from `main` only through `./scripts/release.sh X.Y.Z` or the `Release request` GitHub Actions workflow (`workflow_dispatch` version `X.Y.Z`) and the resulting release PR; do not create manual tags, GitHub releases, or ad hoc release uploads.
 - A push to `main` updates the AvivSinai marketplace immediately for the `langfuse` skill.
 - Keep one version across `CHANGELOG.md` and skill/plugin metadata in the release commit; after merge, CI validates the merged commit, creates the tag, and then publishes the GitHub release plus PyPI and Docker artifacts. The committed changelog entry becomes the GitHub release notes, while the Python package version remains tag-derived via `uv-dynamic-versioning`.
 

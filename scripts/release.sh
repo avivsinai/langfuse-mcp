@@ -21,11 +21,15 @@ Options:
   --skip-verify      Skip uv sync/test/lint/typecheck/build verification
   --allow-empty      Allow releasing with an empty Unreleased section
   --no-auto-merge    Create the PR but do not enable auto-merge
+  --no-push          Prepare and commit locally; skip push, PR, and auto-merge
+  --ci               GitHub Actions mode: allow detached HEAD at origin/main
   -h, --help         Show this help text
 
 Examples:
   ./scripts/release.sh 0.6.5
   ./scripts/release.sh 0.6.5 --no-auto-merge
+  ./scripts/release.sh 0.6.5 --ci --skip-verify
+  ./scripts/release.sh 0.6.5 --no-push --skip-verify --allow-empty
 EOF
 }
 
@@ -41,6 +45,8 @@ release_date="$(date -u +%Y-%m-%d)"
 skip_verify=0
 allow_empty=0
 auto_merge=1
+no_push=0
+ci=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -65,6 +71,14 @@ while [ $# -gt 0 ]; do
       auto_merge=0
       shift
       ;;
+    --no-push)
+      no_push=1
+      shift
+      ;;
+    --ci)
+      ci=1
+      shift
+      ;;
     --*)
       echo "error: unknown option: $1" >&2
       usage >&2
@@ -85,9 +99,13 @@ done
 [ -n "$version" ] || { usage >&2; exit 1; }
 
 require_command git
-require_command gh
 require_command python3
-require_command uv
+if [ "$skip_verify" -eq 0 ]; then
+  require_command uv
+fi
+if [ "$no_push" -eq 0 ]; then
+  require_command gh
+fi
 
 printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$' || {
   echo "error: version must be X.Y.Z or X.Y.Z-rc.1, got: $version" >&2
@@ -111,10 +129,12 @@ git diff --cached --quiet --ignore-submodules -- || {
 }
 
 current_branch="$(git branch --show-current)"
-[ "$current_branch" = "main" ] || {
-  echo "error: releases must be prepared from main; current branch is $current_branch" >&2
-  exit 1
-}
+if [ "$current_branch" != "main" ]; then
+  if [ "$ci" -ne 1 ] || [ -n "$current_branch" ]; then
+    echo "error: releases must be prepared from main; current branch is ${current_branch:-detached HEAD}" >&2
+    exit 1
+  fi
+fi
 
 git fetch --quiet origin main --tags
 
@@ -124,6 +144,27 @@ remote_head="$(git rev-parse origin/main)"
   echo "error: local main is not at origin/main; pull or reset before releasing" >&2
   exit 1
 }
+
+if [ "$ci" -eq 1 ]; then
+  if ! git config --get user.name >/dev/null 2>&1; then
+    if [ -n "${GIT_AUTHOR_NAME:-}" ]; then
+      git config user.name "$GIT_AUTHOR_NAME"
+    else
+      git config user.name "github-actions[bot]"
+    fi
+  fi
+  if ! git config --get user.email >/dev/null 2>&1; then
+    if [ -n "${GIT_AUTHOR_EMAIL:-}" ]; then
+      git config user.email "$GIT_AUTHOR_EMAIL"
+    else
+      git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+    fi
+  fi
+  if [ "$no_push" -eq 0 ] && [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
+    echo "error: --ci requires GH_TOKEN to push and open the PR" >&2
+    exit 1
+  fi
+fi
 
 if git show-ref --verify --quiet "refs/heads/${branch}"; then
   echo "error: branch already exists locally: ${branch}" >&2
@@ -265,6 +306,16 @@ git diff --cached --quiet && {
 }
 
 git commit -m "chore(release): ${tag}"
+
+if [ "$no_push" -eq 1 ]; then
+  echo ""
+  echo "Prepared ${tag} locally (--no-push)"
+  echo "Release branch: ${branch}"
+  echo "Commit: $(git rev-parse HEAD)"
+  echo "Skipped push, PR, and auto-merge"
+  exit 0
+fi
+
 git push -u origin "$branch"
 
 pr_body=$(
