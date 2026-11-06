@@ -1,0 +1,82 @@
+name: Release request
+run-name: Release request ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (X.Y.Z)"
+        required: true
+        type: string
+
+# GITHUB_TOKEN cannot open the release PR: a token-authored merge would not
+# trigger release.yml. The release GitHub App token is the push/PR identity.
+permissions:
+  contents: read
+
+concurrency:
+  group: >-
+    release-request-${{
+      github.ref != 'refs/heads/main' &&
+      format('rejected-{0}', github.run_id) ||
+      github.repository
+    }}
+  cancel-in-progress: false
+
+jobs:
+  open-release-pr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Validate release request
+        env:
+          VERSION: ${{ inputs.version }}
+          REF: ${{ github.ref }}
+          APP_CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::Release requests must be dispatched from main (got ${REF})."
+            exit 1
+          fi
+          if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::version must be X.Y.Z, got: ${VERSION}"
+            exit 1
+          fi
+          if [ -z "$APP_CLIENT_ID" ] || [ -z "$APP_PRIVATE_KEY" ]; then
+            echo "::error::RELEASE_APP_CLIENT_ID and RELEASE_APP_PRIVATE_KEY must be configured."
+            exit 1
+          fi
+
+      - name: Create repository-scoped release PR token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Open release pull request
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_PROMPT_DISABLED: "1"
+          GH_NO_UPDATE_NOTIFIER: "1"
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          ./scripts/release.sh "$VERSION" --ci --skip-verify
