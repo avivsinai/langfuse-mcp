@@ -147,10 +147,18 @@ remote_head="$(git rev-parse origin/main)"
 
 if [ "$ci" -eq 1 ]; then
   if ! git config --get user.name >/dev/null 2>&1; then
-    git config user.name "${GIT_AUTHOR_NAME:-github-actions[bot]}"
+    if [ -n "${GIT_AUTHOR_NAME:-}" ]; then
+      git config user.name "$GIT_AUTHOR_NAME"
+    else
+      git config user.name "github-actions[bot]"
+    fi
   fi
   if ! git config --get user.email >/dev/null 2>&1; then
-    git config user.email "${GIT_AUTHOR_EMAIL:-41898282+github-actions[bot]@users.noreply.github.com}"
+    if [ -n "${GIT_AUTHOR_EMAIL:-}" ]; then
+      git config user.email "$GIT_AUTHOR_EMAIL"
+    else
+      git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+    fi
   fi
   if [ "$no_push" -eq 0 ] && [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
     echo "error: --ci requires GH_TOKEN to push and open the PR" >&2
