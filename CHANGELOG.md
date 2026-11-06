@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- GitHub Actions `Release request` workflow (`workflow_dispatch` version `X.Y.Z`) prepares `release/vX.Y.Z` and opens the `chore(release): vX.Y.Z` PR with squash auto-merge, so a release no longer requires running `scripts/release.sh` locally.
+
 ## [0.14.0] - 2026-10-25
 ### Changed
 - **BREAKING**: Require `langfuse>=4.13.1,<6.0.0` (was `>=3.11.2,<5.0.0`). The 0.12.0 upgrade notes already asked for 4.13.1, which has every replacement API this server uses after Langfuse Cloud's 2026-11-16 removals (Observations v2, Scores v3, experiments). Langfuse SDK 3 is no longer supported. CI tests the floor (langfuse 4.13.1 on Python 3.10).
