@@ -217,7 +217,6 @@ description = "Skip email-like patterns and known safe patterns"
 regexes = [
   '''@gmail\.com''',
   '''@github\.com''',
-  '''@users\.noreply\.github\.com''',
   '''@example\.com''',
 ]
 

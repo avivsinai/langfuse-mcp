@@ -1,8 +1,5 @@
 # Gitleaks ignore file - remaining false positives after path/regex exclusions
 
-# ${GIT_AUTHOR_EMAIL:-...@users.noreply.github.com} matched generic-auth-tuple in an earlier commit on this branch
-238ff3b720d9a3a547d8407674c65f27d3eb4107:scripts/release.sh:generic-auth-tuple:153
-
 # env variable reading patterns in __main__.py
 69c6026162eb3d197ebad537e080dbb93a8ba46f:langfuse_mcp/__main__.py:credentials-python:233
 69c6026162eb3d197ebad537e080dbb93a8ba46f:langfuse_mcp/__main__.py:credentials-python:237
